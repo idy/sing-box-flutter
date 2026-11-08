@@ -137,8 +137,10 @@ Android builds require a licensed SDK in `ANDROID_HOME` (or `ANDROID_SDK_ROOT`),
 installed platforms/build-tools, NDK `28.0.13004108`, and **OpenJDK 17** selected with
 `JAVA_HOME`. The exact NDK requirement removes the upstream builder's permissive
 fallback to a different NDK. Missing SDKs or Java cause a clear error. Local tooling
-never installs or changes a global SDK. Flutter's Android example can require an
-additional platform/build-tools version; its native compilation is a separate check.
+never installs or changes a global SDK. The Flutter plugin and example use NDK
+`28.2.13676358` to package the prebuilt core and match Flutter's integration-test
+plugin. CI installs both NDK versions; native Go compilation retains its recorded
+`28.0.13004108` input. Flutter host compilation is a separate check.
 
 `--bootstrap-dir` and `--cache-dir` accept only separate, non-nested directories
 inside this project's `.build/`. Symlinks cannot redirect them outside the project.

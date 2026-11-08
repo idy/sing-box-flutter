@@ -44,6 +44,7 @@ android {
     namespace = "dev.idy.sing_box_flutter"
 
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

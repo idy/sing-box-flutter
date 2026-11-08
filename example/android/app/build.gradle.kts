@@ -7,7 +7,7 @@ plugins {
 android {
     namespace = "dev.idy.sing_box_flutter_example"
     compileSdk = 36
-    ndkVersion = "28.0.13004108"
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

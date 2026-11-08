@@ -79,7 +79,8 @@ jobs:
           yes | "$sdk_manager" --sdk_root="$native_sdk" --licenses >/dev/null
           set -o pipefail
           "$sdk_manager" --sdk_root="$native_sdk" \
-            'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.0.13004108'
+            'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' \
+            'ndk;28.0.13004108' 'ndk;28.2.13676358'
           printf 'JAVA_HOME=%s\nANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\n' \
             "$JAVA_HOME" "$native_sdk" "$native_sdk" >> "$GITHUB_ENV"
       - name: Build pinned core with Tailscale Go

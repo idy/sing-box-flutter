@@ -14,6 +14,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.IpPrefix
+import android.net.InetAddresses
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -175,9 +176,9 @@ class SingBoxVpnService : VpnService(), CommandServerHandler {
                 if (!routes6.hasNext() && options.inet6Address.hasNext()) builder.addRoute("::", 0)
                 while (routes6.hasNext()) routes6.next().let { builder.addRoute(it.address(), it.prefix()) }
                 val excluded4 = options.inet4RouteExcludeAddress
-                while (excluded4.hasNext()) excluded4.next().let { builder.excludeRoute(IpPrefix("${it.address()}/${it.prefix()}")) }
+                while (excluded4.hasNext()) excluded4.next().let { builder.excludeRoute(IpPrefix(InetAddresses.parseNumericAddress(it.address()), it.prefix())) }
                 val excluded6 = options.inet6RouteExcludeAddress
-                while (excluded6.hasNext()) excluded6.next().let { builder.excludeRoute(IpPrefix("${it.address()}/${it.prefix()}")) }
+                while (excluded6.hasNext()) excluded6.next().let { builder.excludeRoute(IpPrefix(InetAddresses.parseNumericAddress(it.address()), it.prefix())) }
             } else {
                 // libbox computes the route complement for Android versions without excludeRoute.
                 val routes4 = options.inet4RouteRange
