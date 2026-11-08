@@ -1,2 +1,2 @@
 # Preserve upstream legal notices verbatim, including their original whitespace.
-third_party/licenses/** -whitespace
+THIRD_PARTY_NOTICES.md -whitespace

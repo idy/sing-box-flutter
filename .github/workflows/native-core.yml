@@ -7,7 +7,8 @@ on:
       - core/**
       - ios/**
       - macos/**
-      - third_party/**
+      - THIRD_PARTY_NOTICES.md
+      - LICENSE
       - tool/**
       - tests/**
       - .github/workflows/native-core.yml

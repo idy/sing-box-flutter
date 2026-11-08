@@ -251,10 +251,6 @@ def legal_files(root: Path = ROOT) -> dict[str, Path]:
         path = root / "core" / name
         if path.is_file():
             files["core/" + name] = path
-    dependencies = root / "third_party/licenses"
-    for path in sorted(dependencies.rglob("*")):
-        if path.is_file():
-            files["dependencies/" + path.relative_to(dependencies).as_posix()] = path
     return files
 
 
