@@ -164,8 +164,11 @@ configuration fails startup rather than reporting a packet tunnel connection.
 `initialize` to complete. VPN consent cancellation returns `false`; signing,
 configuration, and preference failures return a platform error.
 
-Each start updates an owner-scoped Keychain item and saves its persistent reference
-and a new non-secret session identifier in VPN preferences. The provider can load
+Each start stages a new session-scoped Keychain item and saves its persistent
+reference and a non-secret session identifier in VPN preferences. The previous
+payload remains intact until the new preferences are saved and reloaded. A failed
+save discards only the pending item; after a successful commit, the previous owned
+item can be retired. The provider can load
 it when started from iOS Settings without a running Flutter engine. Use the fully
 expanded access group (for example `TEAMID.dev.example.app.vpn`) in Dart; use
 `$(AppIdentifierPrefix)dev.example.app.vpn` in both targets' Keychain entitlements.

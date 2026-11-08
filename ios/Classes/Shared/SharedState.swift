@@ -66,7 +66,7 @@ final class TunnelStorage {
 
     func saveConfiguration(_ config: String, name: String) throws -> StoredTunnelConfiguration {
         let value = TunnelConfiguration(version: 2, sessionID: UUID().uuidString, config: config, name: name)
-        let reference = try keychain.put(JSONEncoder().encode(value))
+        let reference = try keychain.put(JSONEncoder().encode(value), sessionID: value.sessionID)
         return StoredTunnelConfiguration(configuration: value, reference: reference)
     }
 
@@ -77,6 +77,11 @@ final class TunnelStorage {
             throw TunnelFailure(code: "stale_configuration", message: "Save the configuration again from the app before starting the VPN.")
         }
         return value
+    }
+
+    /// Only call after preferences commit/reload, or to discard a failed pending write.
+    func removeConfiguration(reference: Data) throws {
+        try keychain.remove(reference: reference)
     }
 
     /// Host-only, one-time upgrade of pre-Keychain sing-box profiles. The provider

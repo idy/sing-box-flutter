@@ -143,6 +143,40 @@ class ToolchainTests(unittest.TestCase):
             self.assertTrue(Path(env["TEST_TELEMETRY_DIR"]).is_relative_to(root / "cache"))
             self.assertEqual((Path(env["TEST_TELEMETRY_DIR"]) / "mode").read_text(), "off\n")
 
+    def test_private_module_rules_survive_pinned_toolchain_environment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            private = {
+                "GOPRIVATE": "git.example.com/team/*,github.com/private-team/*",
+                "GONOPROXY": "git.example.com/team/*",
+                "GONOSUMDB": "git.example.com/team/*,github.com/private-team/*",
+                "GOPROXY": "https://modules.example.com,direct",
+                "GOROOT": "/wrong-toolchain", "GOTOOLCHAIN": "auto",
+                "GOSUMDB": "off", "GOFLAGS": "-overlay=unexpected.json",
+            }
+            env = go_environment(root / "verified-fork", root / "cache", private)
+            for name in ("GOPRIVATE", "GONOPROXY", "GONOSUMDB", "GOPROXY"):
+                self.assertEqual(env[name], private[name])
+            self.assertEqual(env["GOROOT"], str(root / "verified-fork"))
+            self.assertEqual(env["GOTOOLCHAIN"], "local")
+            self.assertEqual(env["GOSUMDB"], "sum.golang.org")
+            self.assertNotIn("overlay", env["GOFLAGS"])
+
+    def test_goprivate_uses_normal_go_defaults_without_forced_scope_overrides(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            env = go_environment(root / "fork", root / "cache", {
+                "GOPRIVATE": "git.example.com/team/*",
+            })
+            self.assertEqual(env["GOPRIVATE"], "git.example.com/team/*")
+            self.assertNotIn("GONOPROXY", env)
+            self.assertNotIn("GONOSUMDB", env)
+            self.assertEqual(env["GOPROXY"], "https://proxy.golang.org,direct")
+            explicit = go_environment(root / "fork", root / "cache", {
+                "GOPRIVATE": "git.example.com/team/*", "GONOPROXY": "none",
+            })
+            self.assertEqual(explicit["GONOPROXY"], "none")
+
     def test_runtime_toolchain_contract_rejects_a_different_fork(self):
         actual = "63ae404c8203317fd3c82d972e5dc8f0fcb425cb"
         verify_dependency_toolchain(actual, actual + "\n", "1" * 40)

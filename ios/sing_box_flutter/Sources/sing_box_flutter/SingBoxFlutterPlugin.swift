@@ -157,7 +157,9 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
             DispatchQueue.main.async {
                 guard error == nil else {
                     manager.protocolConfiguration = previous
-                    self.fail(result, TunnelFailure(code: "preferences_failed", message: "The secure configuration reference could not be saved. Start again from the app before using the VPN."))
+                    // The old item has not been changed; only discard this uncommitted item.
+                    try? storage.removeConfiguration(reference: saved.reference)
+                    self.fail(result, TunnelFailure(code: "preferences_failed", message: "The secure configuration reference could not be saved. The previous saved profile is unchanged."))
                     return
                 }
                 // Reload after every reference/session update before obtaining the session.
@@ -175,6 +177,11 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                             try storage.removeLegacyConfiguration()
                             guard !self.isActive else { self.fail(result, .busy); return }
                             guard let session = manager.connection as? NETunnelProviderSession else { throw TunnelFailure.storage }
+                            if let oldReference = (previous as? NETunnelProviderProtocol)?.passwordReference,
+                               oldReference != saved.reference {
+                                // Retire the old payload only after the new reference is persisted and reloaded.
+                                try? storage.removeConfiguration(reference: oldReference)
+                            }
                             self.startRequested = true
                             try session.startVPNTunnel(options: ["sessionID": saved.configuration.sessionID as NSString])
                             self.emit(TunnelStatus("connecting"))
@@ -278,12 +285,14 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                 guard !self.isActive else { self.fail(result, .busy); return }
                 let tunnel = (previous?.copy() as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
                 var savedSession = isCurrent ? previous.flatMap { TunnelPreferences.sessionID(in: $0) } : nil
+                var pendingMigration: StoredTunnelConfiguration?
                 if !isCurrent {
                     // References belonging to a different group/schema are not inherited.
                     tunnel.passwordReference = nil
                     do {
                         if let legacy = try storage.legacyConfigurationForMigration() {
                             let migrated = try storage.saveConfiguration(legacy.config, name: legacy.name)
+                            pendingMigration = migrated
                             tunnel.passwordReference = migrated.reference
                             savedSession = migrated.configuration.sessionID
                         }
@@ -299,6 +308,9 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                 manager.saveToPreferences { error in
                     DispatchQueue.main.async {
                         if let error {
+                            if let pendingMigration {
+                                try? storage.removeConfiguration(reference: pendingMigration.reference)
+                            }
                             self.setManager(nil)
                             if self.isConsentCancellation(error as NSError) { self.finish(result, false) }
                             else { self.fail(result, TunnelFailure(code: "permission_failed", message: "The VPN configuration could not be saved. Check both targets' signing and Network Extension entitlements.")) }

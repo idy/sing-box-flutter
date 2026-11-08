@@ -87,9 +87,17 @@ final class KeychainConfigurationStore {
         return group
     }
 
-    func put(_ configuration: Data) throws -> Data {
+    func put(_ configuration: Data, sessionID: String? = nil) throws -> Data {
         guard !configuration.isEmpty, configuration.count <= ConfigurationIdentity.maximumConfigurationBytes else { throw TunnelFailure.storage }
-        var query = ownerQuery
+        if let sessionID {
+            guard UUID(uuidString: sessionID) != nil,
+                  let payload = try? JSONSerialization.jsonObject(with: configuration) as? [String: Any],
+                  payload["sessionID"] as? String == sessionID else { throw TunnelFailure.storage }
+        }
+        // Session-scoped items remain immutable while preferences still name the old reference.
+        let account = sessionID.map { identity.account + "/" + $0 } ?? identity.account
+        let owner = Self.baseQuery(account: account, accessGroup: identity.accessGroup)
+        var query = owner
         query[kSecValueData as String] = configuration
         query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         query[kSecReturnPersistentRef as String] = true
@@ -101,9 +109,9 @@ final class KeychainConfigurationStore {
             guard let value = result as? Data else { throw TunnelFailure.keychain }
             reference = value
         case errSecDuplicateItem:
-            // A single stable, owner-scoped item preserves the persistent reference
-            // across starts and avoids retaining obsolete configurations with keys.
-            var lookup = ownerQuery
+            // Existing session items are immutable; legacy writes retain their old contract.
+            guard sessionID == nil else { throw TunnelFailure.keychain }
+            var lookup = owner
             lookup[kSecReturnAttributes as String] = true
             lookup[kSecReturnData as String] = true
             lookup[kSecReturnPersistentRef as String] = true
@@ -113,7 +121,7 @@ final class KeychainConfigurationStore {
                   let value = attributes[kSecValuePersistentRef as String] as? Data else { throw TunnelFailure.keychain }
             _ = try Self.configurationData(from: result, identity: identity)
             reference = value
-            guard client.update(ownerQuery as CFDictionary, attributes: [kSecValueData as String: configuration] as CFDictionary) == errSecSuccess else {
+            guard client.update(owner as CFDictionary, attributes: [kSecValueData as String: configuration] as CFDictionary) == errSecSuccess else {
                 throw TunnelFailure.keychain
             }
         default:
@@ -148,12 +156,17 @@ final class KeychainConfigurationStore {
     static func configurationData(from result: CFTypeRef?, identity: ConfigurationIdentity) throws -> Data {
         guard let attributes = result as? [String: Any],
               attributes[kSecAttrService as String] as? String == ConfigurationIdentity.service,
-              attributes[kSecAttrAccount as String] as? String == identity.account,
+              let account = attributes[kSecAttrAccount as String] as? String,
               attributes[kSecAttrAccessGroup as String] as? String == identity.accessGroup,
               attributes[kSecAttrAccessible as String] as? String == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
               isNonSynchronizable(attributes),
               let data = attributes[kSecValueData as String] as? Data, !data.isEmpty,
               data.count <= ConfigurationIdentity.maximumConfigurationBytes else { throw TunnelFailure.keychain }
+        if account != identity.account {
+            guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessionID = payload["sessionID"] as? String, UUID(uuidString: sessionID) != nil,
+                  account == identity.account + "/" + sessionID else { throw TunnelFailure.keychain }
+        }
         return data
     }
 
@@ -162,7 +175,18 @@ final class KeychainConfigurationStore {
         return value == nil || value as? Bool == false
     }
 
-    private var ownerQuery: [String: Any] { Self.baseQuery(account: identity.account, accessGroup: identity.accessGroup) }
+    func remove(reference: Data) throws {
+        var query = try Self.readQuery(reference: reference)
+        var result: CFTypeRef?
+        let status = client.copyMatching(query as CFDictionary, result: &result)
+        if status == errSecItemNotFound { return }
+        guard status == errSecSuccess else { throw TunnelFailure.keychain }
+        _ = try Self.configurationData(from: result, identity: identity)
+        query.removeValue(forKey: kSecReturnAttributes as String)
+        query.removeValue(forKey: kSecReturnData as String)
+        let deletion = client.delete(query as CFDictionary)
+        guard deletion == errSecSuccess || deletion == errSecItemNotFound else { throw TunnelFailure.keychain }
+    }
 
     private static func baseQuery(account: String, accessGroup: String?) -> [String: Any] {
         var query: [String: Any] = [

@@ -102,8 +102,16 @@ SHA-256; the installer rejects a core built without this exact WGC implementatio
 
 Custom transports use `--wgc-config wgc.core.json`; see [WGC](wgc.md). Custom
 release archives can be installed explicitly with `--from-dir`; the public release
-installer accepts only the standard extension set. Legal notices are included in
-`Legal/` in each archive and retained under `.build/legal/<target>` on install.
+installer accepts only the standard extension set. Module-access variables
+`GOPRIVATE`, `GONOPROXY`, `GONOSUMDB` and an explicit `GOPROXY` are preserved;
+the default proxy includes a direct fallback. Compiler/workspace overrides remain
+isolated and the verified Tailscale Go toolchain is always selected. Export the
+module-access variables explicitly, since `go env -w` settings are not loaded.
+
+The WGC license is copied from its pinned, verified Go module into the native
+release cache. It ships with the existing project/libbox notices in `Legal/` and
+is retained under `.build/legal/<target>` on install; bulk dependency license
+texts are not checked into this repository.
 
 The official entry point remains `go run ./cmd/internal/build_libbox -target
 android` or `-target apple -platform ios,iossimulator,macos`. The tool applies the small,

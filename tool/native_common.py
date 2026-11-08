@@ -245,12 +245,16 @@ def sync_apple_framework(root: Path = ROOT) -> None:
         mirror.symlink_to("../../ios/Frameworks/Libbox.xcframework", target_is_directory=True)
 
 
-def legal_files(root: Path = ROOT) -> dict[str, Path]:
+def legal_files(root: Path = ROOT, *, wgc_license: Path | None = None) -> dict[str, Path]:
     files = {"LICENSE": root / "LICENSE", "THIRD_PARTY_NOTICES.md": root / "THIRD_PARTY_NOTICES.md"}
     for name in ("LICENSE", "NOTICE"):
         path = root / "core" / name
         if path.is_file():
             files["core/" + name] = path
+    if wgc_license is not None:
+        if wgc_license.is_symlink() or not wgc_license.is_file():
+            raise BuildError("Pinned WGC license is missing; rebuild the native artifact")
+        files["LICENSE.wgc"] = wgc_license
     return files
 
 

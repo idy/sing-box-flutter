@@ -48,7 +48,7 @@ def host_key() -> str:
 
 
 def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> dict:
-    """Ignore user Go config, auto-downloads and cross-compiler overrides."""
+    """Pin the compiler and caches while retaining explicit module-access rules."""
     original = os.environ if inherited is None else inherited
     env = {k: v for k, v in original.items()
            if not k.startswith("GO") and not k.startswith("CGO_")
@@ -59,11 +59,17 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
         "GOCACHE": str(cache / "go-build"), "GOMODCACHE": str(cache / "go-mod"),
         "GOTMPDIR": str(cache / "tmp"), "TMPDIR": str(cache / "tmp"),
         "TEST_TELEMETRY_DIR": str(cache / "telemetry"),
-        "GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org",
+        "GOPROXY": original.get("GOPROXY", "https://proxy.golang.org,direct"),
+        "GOSUMDB": "sum.golang.org",
         "GOFLAGS": "-mod=readonly -trimpath -buildvcs=false", "CGO_ENABLED": "1",
         "PATH": os.pathsep.join((str(goroot / "bin"), str(cache / "gopath/bin"),
                                  original.get("PATH", os.defpath))),
     })
+    # Scope private-module access without accepting compiler/workspace overrides.
+    # Leave omitted values unset so Go can derive their defaults from GOPRIVATE.
+    for name in ("GOPRIVATE", "GONOPROXY", "GONOSUMDB"):
+        if name in original:
+            env[name] = original[name]
     for name in ("gopath/bin", "go-build", "go-mod", "tmp", "telemetry"):
         (cache / name).mkdir(parents=True, exist_ok=True)
     # The Go command's documented test hook also controls compiler counters.
@@ -328,6 +334,20 @@ def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict,
              "sum": modules["Sum"], "go_mod_sum": modules["GoModSum"], "binaries": binaries}, dependency)
 
 
+def retain_wgc_license(go: Path, env: dict, source: Path, cache: Path, pins: dict) -> Path:
+    module = json.loads(run([go, "list", "-m", "-json", "github.com/idy/wgc"],
+                            cwd=source, env=env, capture=True))
+    if module.get("Version") != pins["wgc_version"]:
+        raise BuildError("Resolved WGC module does not match native-core.json")
+    license_path = Path(module["Dir"]) / "LICENSE"
+    if license_path.is_symlink() or not license_path.is_file():
+        raise BuildError("Pinned WGC module has no regular LICENSE file")
+    destination = cache / "results/LICENSE.wgc"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(license_path, destination)
+    return destination
+
+
 def package_target(target: str, pins: dict, cache: Path) -> Path:
     metadata_path = cache / "results" / f"{target}.json"
     if not metadata_path.is_file():
@@ -356,7 +376,7 @@ def package_target(target: str, pins: dict, cache: Path) -> Path:
                 archive.add(path, arcname=path.relative_to(ROOT).as_posix(), recursive=False, filter=normalize)
             archive.add(metadata_path, arcname="native-build.json", filter=normalize)
             archive.add(license_path, arcname="LICENSE.sing-box", filter=normalize)
-            legal = legal_files()
+            legal = legal_files(wgc_license=cache / "results/LICENSE.wgc")
             if {name: sha256(path) for name, path in legal.items()} != metadata.get("legal_sha256"):
                 raise BuildError("Legal notices changed since the native build")
             for name, path in sorted(legal.items()):
@@ -425,9 +445,7 @@ def main(argv: list[str] | None = None) -> int:
                     if output.exists():
                         shutil.rmtree(output) if output.is_dir() else output.unlink()
                     with mobile_profile(source) as profile_provenance, wgc_overlay(source, go, env, run, extensions) as wgc_provenance:
-                        selected_wgc = run([go, "list", "-m", "-f", "{{.Version}}", "github.com/idy/wgc"], cwd=source, env=env, capture=True)
-                        if selected_wgc != pins["wgc_version"]:
-                            raise BuildError("Resolved WGC module does not match native-core.json")
+                        wgc_license = retain_wgc_license(go, env, source, cache, pins)
                         effective_tags = upstream_tags(source, target)
                         run(args_go, cwd=source, env=env)
                     if not output.exists():
@@ -455,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "toolchain": toolchain, "gomobile": mobile, "tailscale_dependency": tailscale_dependency, "sdks": sdk_versions,
                                 "tags": effective_tags, "mobile_profile": profile_provenance,
                                 "wgc": wgc_provenance,
-                                "legal_sha256": {name: sha256(path) for name, path in legal_files().items()},
+                                "legal_sha256": {name: sha256(path) for name, path in legal_files(wgc_license=wgc_license).items()},
                                 "platform": "ios,iossimulator,macos" if target == "apple" else "android",
                                 "artifact_sha256": artifact_hashes(destination), "license_sha256": sha256(notices)}
                     write_json(cache / "results" / f"{target}.json", metadata)

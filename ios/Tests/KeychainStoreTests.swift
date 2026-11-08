@@ -18,6 +18,7 @@ struct KeychainStoreTests {
         try testWriteAndSecurityFailures()
         try testAccessGroupResolution()
         try testStorageAndMigration()
+        try testPreferenceFailureKeepsPreviousConfiguration()
         try testPreferences()
         print("Apple security/storage contracts passed (\(assertions) assertions).")
     }
@@ -151,7 +152,7 @@ struct KeychainStoreTests {
         let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: container) }
-        let client = MemoryKeychainClient()
+        let client = TransactionalKeychainClient()
         let storage = try TunnelStorage(identity: identity, container: container, keychainClient: client)
         let legacyURL = storage.root.appendingPathComponent("configuration.json")
         let legacy = TunnelConfiguration(version: 1, sessionID: UUID().uuidString, config: String(decoding: secret, as: UTF8.self), name: "Legacy")
@@ -177,6 +178,40 @@ struct KeychainStoreTests {
         }
         let statusData = try Data(contentsOf: storage.root.appendingPathComponent("status.json"))
         try expect(!String(decoding: statusData, as: UTF8.self).contains(String(decoding: secret, as: UTF8.self)), "Status file exposed payload")
+    }
+
+    private static func testPreferenceFailureKeepsPreviousConfiguration() throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: container) }
+        let client = TransactionalKeychainClient()
+        let storage = try TunnelStorage(identity: identity, container: container, keychainClient: client)
+        let previous = TunnelConfiguration(version: 2, sessionID: UUID().uuidString, config: "previous-configuration", name: "Previous")
+        let previousReference = try KeychainConfigurationStore(identity: identity, client: client).put(JSONEncoder().encode(previous))
+        let savedPreferences = NETunnelProviderProtocol()
+        TunnelPreferences.apply(to: savedPreferences, identity: identity, sessionID: previous.sessionID)
+        savedPreferences.passwordReference = previousReference
+        let pending = try storage.saveConfiguration("pending-configuration", name: "Pending")
+        try expect(pending.reference != previousReference, "Pending configuration overwrote the persisted Keychain item")
+        let retained = try storage.loadConfiguration(reference: previousReference, expectedSessionID: previous.sessionID)
+        try expect(retained.config == previous.config, "A preferences failure would invalidate the previous saved profile")
+        try expect(savedPreferences.passwordReference == previousReference, "Pending write altered persisted preferences")
+        try expect(client.items.count == 2, "Previous payload was removed before preferences committed")
+        // Simulate saveToPreferences failing: only the pending item is discarded.
+        try storage.removeConfiguration(reference: pending.reference)
+        try expect(client.items.count == 1, "Failed pending payload was retained")
+        try expect(try storage.loadConfiguration(reference: previousReference, expectedSessionID: previous.sessionID).config == previous.config, "Preferences rollback lost the previously working profile")
+        // Once preferences commit and reload succeeds, the previous item can be retired.
+        let committed = try storage.saveConfiguration("committed-configuration", name: "Committed")
+        TunnelPreferences.apply(to: savedPreferences, identity: identity, sessionID: committed.configuration.sessionID)
+        savedPreferences.passwordReference = committed.reference
+        try storage.removeConfiguration(reference: previousReference)
+        try storage.removeConfiguration(reference: previousReference)
+        try expect(client.items.count == 1, "Committed profiles accumulated obsolete Keychain items")
+        try expect(try storage.loadConfiguration(reference: committed.reference, expectedSessionID: committed.configuration.sessionID).config == "committed-configuration", "Committed configuration is unavailable")
+        client.items[committed.reference]?[kSecAttrAccount as String] = identity.account + "/" + UUID().uuidString
+        try expectFailure("keychain_unavailable") { try storage.removeConfiguration(reference: committed.reference) }
+        try expect(client.items.count == 1, "Deletion removed an item whose ownership did not match its payload")
     }
 
     private static func testPreferences() throws {
@@ -244,6 +279,52 @@ private final class MemoryKeychainClient: ConfigurationKeychainClient {
     func delete(_ query: CFDictionary) -> OSStatus {
         guard deleteStatus == errSecSuccess else { return deleteStatus }
         item = nil
+        return errSecSuccess
+    }
+}
+
+private final class TransactionalKeychainClient: ConfigurationKeychainClient {
+    var items: [Data: [String: Any]] = [:]
+    var copyStatus = errSecSuccess
+
+    private func reference(for query: [String: Any]) -> Data? {
+        if let reference = query[kSecValuePersistentRef as String] as? Data {
+            return items[reference] == nil ? nil : reference
+        }
+        return items.first {
+            $0.value[kSecAttrAccount as String] as? String == query[kSecAttrAccount as String] as? String
+                && $0.value[kSecAttrService as String] as? String == query[kSecAttrService as String] as? String
+                && $0.value[kSecAttrAccessGroup as String] as? String == query[kSecAttrAccessGroup as String] as? String
+        }?.key
+    }
+
+    func add(_ query: CFDictionary, result: inout CFTypeRef?) -> OSStatus {
+        let query = query as! [String: Any]
+        guard reference(for: query) == nil else { return errSecDuplicateItem }
+        let reference = Data(UUID().uuidString.utf8)
+        var attributes = query
+        attributes[kSecValuePersistentRef as String] = reference
+        items[reference] = attributes
+        result = reference as CFData
+        return errSecSuccess
+    }
+
+    func copyMatching(_ query: CFDictionary, result: inout CFTypeRef?) -> OSStatus {
+        guard copyStatus == errSecSuccess else { return copyStatus }
+        guard let reference = reference(for: query as! [String: Any]), let item = items[reference] else { return errSecItemNotFound }
+        result = item as CFDictionary
+        return errSecSuccess
+    }
+
+    func update(_ query: CFDictionary, attributes: CFDictionary) -> OSStatus {
+        guard let reference = reference(for: query as! [String: Any]) else { return errSecItemNotFound }
+        items[reference]?[kSecValueData as String] = (attributes as! [String: Any])[kSecValueData as String]
+        return errSecSuccess
+    }
+
+    func delete(_ query: CFDictionary) -> OSStatus {
+        guard let reference = reference(for: query as! [String: Any]) else { return errSecItemNotFound }
+        items.removeValue(forKey: reference)
         return errSecSuccess
     }
 }

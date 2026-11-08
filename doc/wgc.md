@@ -222,8 +222,17 @@ Replace the old `wgc_ne.core.yaml` build input with `wgc.core.json`:
 ```
 
 An entry can also supply `"path": "../transport"` for a local module; paths are
-relative to the manifest. Keep the package, module, and version fields. Private
-Go module authentication belongs in the normal Go/Git environment, not this file.
+relative to the manifest. Keep the package, module, and version fields. Export
+`GOPRIVATE`, and optionally `GONOPROXY`, `GONOSUMDB` or `GOPROXY`, for private
+modules; these access settings are passed to the pinned Go toolchain. Git/SSH
+credentials use the existing Git setup, not this manifest. Settings written only
+with `go env -w` are not loaded because the build isolates `GOENV`; export the
+module-access settings explicitly. Unset `GONOPROXY` and `GONOSUMDB` retain Go's
+normal `GOPRIVATE` defaults.
+
+```bash
+export GOPRIVATE='github.com/your-team/*'
+```
 
 ```bash
 dart run sing_box_flutter build --target apple --wgc-config wgc.core.json
