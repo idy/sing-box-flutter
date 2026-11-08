@@ -178,14 +178,21 @@ def mobile_profile_bytes(original: bytes, profile: dict) -> bytes:
     if hashlib.sha256(original).hexdigest() != profile["upstream_builder_sha256"]:
         raise BuildError("Upstream builder hash differs from the reviewed mobile feature profile")
     text = original.decode()
+    pattern = r'sharedTags = append\(sharedTags, [^\n]+\)'
+    candidates = [match for match in re.finditer(pattern, text)
+                  if all(f'"{tag}"' in match[0] for tag in profile["drop_tags"])]
+    if len(candidates) != 1:
+        raise BuildError("Mobile profile sharedTags replacement is ambiguous")
+    match = candidates[0]
+    replacement = match[0]
     for tag in profile["drop_tags"]:
         if tag in REQUIRED_TAGS or not re.fullmatch(r"with_[a-z_]+", tag):
             raise BuildError("Mobile profile attempts to remove a required or invalid tag")
         needle = f', "{tag}"'
-        if text.count(needle) != 1:
+        if replacement.count(needle) != 1:
             raise BuildError("Mobile profile tag replacement is ambiguous")
-        text = text.replace(needle, "", 1)
-    return text.encode()
+        replacement = replacement.replace(needle, "", 1)
+    return (text[:match.start()] + replacement + text[match.end():]).encode()
 
 
 @contextlib.contextmanager

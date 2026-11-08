@@ -55,11 +55,11 @@ class PinTests(unittest.TestCase):
 
     def test_mobile_profile_checks_hash_and_removes_only_optional_tags(self):
         import hashlib
-        content = b'sharedTags = append(sharedTags, "with_gvisor", "with_tailscale", "with_naive_outbound", "with_usbip", "with_openvpn", "with_openconnect")\n'
+        content = b'sharedTags = append(sharedTags, "with_gvisor", "with_tailscale", "with_naive_outbound", "with_usbip", "with_openvpn", "with_openconnect")\nlegacyTags := filterTags(sharedTags, "with_naive_outbound")\n'
         profile = {"upstream_builder_sha256": hashlib.sha256(content).hexdigest(),
                    "drop_tags": ["with_naive_outbound", "with_usbip", "with_openvpn", "with_openconnect"]}
         patched = mobile_profile_bytes(content, profile)
-        self.assertEqual(patched, b'sharedTags = append(sharedTags, "with_gvisor", "with_tailscale")\n')
+        self.assertEqual(patched, b'sharedTags = append(sharedTags, "with_gvisor", "with_tailscale")\nlegacyTags := filterTags(sharedTags, "with_naive_outbound")\n')
         with self.assertRaises(BuildError):
             mobile_profile_bytes(content + b"// modified", profile)
         profile["drop_tags"] = ["with_tailscale"]

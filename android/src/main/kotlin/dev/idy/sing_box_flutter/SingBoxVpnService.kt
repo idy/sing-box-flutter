@@ -27,13 +27,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class SingBoxVpnService : VpnService(), CommandServerHandler {
     private var commandServer: CommandServer? = null // NativeRuntime.worker only.
+    private val stopCompletions = mutableListOf<() -> Unit>() // NativeRuntime.worker only.
     private lateinit var platform: AndroidPlatform
     private val fdLock = Any()
     private var tunnel: ParcelFileDescriptor? = null
     private val destroyed = AtomicBoolean(false)
     private val revoked = AtomicBoolean(false)
     private var sessionName = "sing-box"
-    @Volatile private var latestStartId = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -42,7 +42,6 @@ class SingBoxVpnService : VpnService(), CommandServerHandler {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        latestStartId = startId
         if (intent?.action == ACTION_STOP) {
             NativeRuntime.worker.execute { NativeRuntime.stop() }
             return START_NOT_STICKY
@@ -99,6 +98,11 @@ class SingBoxVpnService : VpnService(), CommandServerHandler {
         }
     }
 
+    internal fun requestStopOnWorker(completion: (() -> Unit)?) {
+        if (completion != null) stopCompletions.add(completion)
+        shutdownOnWorker()
+    }
+
     /** The sole owner of native teardown. Never called synchronously inside a Go callback. */
     internal fun shutdownOnWorker(error: String? = null) {
         if (NativeRuntime.service === this && NativeRuntime.snapshot()["state"] != "disconnected") {
@@ -119,7 +123,10 @@ class SingBoxVpnService : VpnService(), CommandServerHandler {
             if (message == null) NativeRuntime.publish("disconnected") else NativeRuntime.publish("error", message)
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelfResult(latestStartId)
+        // NativeRuntime rejects starts while this instance exists. All delivered startIds
+        // therefore belong to this same lifecycle; a newer STOP must not cancel destruction
+        // and leave MethodChannel stop completions waiting forever.
+        stopSelf()
     }
 
     override fun onRevoke() {
@@ -138,6 +145,9 @@ class SingBoxVpnService : VpnService(), CommandServerHandler {
             val preserveError = if (state == "error") NativeRuntime.snapshot()["message"] else null
             shutdownOnWorker(preserveError)
             if (NativeRuntime.service === this) NativeRuntime.service = null
+            val completions = stopCompletions.toList()
+            stopCompletions.clear()
+            completions.forEach { it() }
         }
         super.onDestroy()
     }

@@ -66,8 +66,8 @@ class SingBoxFlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
                         null
                     }
                     "stop" -> {
-                        NativeRuntime.stop()
-                        null
+                        NativeRuntime.stop { NativeRuntime.main.post { result.success(null) } }
+                        return@execute
                     }
                     else -> NativeRuntime.snapshot()
                 }

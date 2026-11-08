@@ -11,6 +11,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
@@ -84,6 +85,30 @@ class SingBoxFlutterPluginTest {
         }.get(5, TimeUnit.SECONDS)
         assertFalse(NativeRuntime.isCurrent(request))
         assertEquals("disconnected", NativeRuntime.snapshot()["state"])
+    }
+
+    @Test
+    fun everyStopCompletionWaitsForServiceDestructionAndRunsOnce() {
+        val controller = Robolectric.buildService(SingBoxVpnService::class.java).create()
+        val service = controller.get()
+        var completed = 0
+        try {
+            NativeRuntime.worker.submit {
+                NativeRuntime.stop { completed++ }
+                NativeRuntime.stop { completed++ }
+            }.get(5, TimeUnit.SECONDS)
+            assertEquals(0, completed)
+            assertTrue(shadowOf(service).isStoppedBySelf)
+            // Android must destroy the instance before a new VPN can be accepted.
+            assertTrue(NativeRuntime.service === service)
+        } finally {
+            controller.destroy()
+            NativeRuntime.worker.submit {}.get(5, TimeUnit.SECONDS)
+        }
+        assertEquals(2, completed)
+        assertEquals(null, NativeRuntime.service)
+        NativeRuntime.worker.submit { NativeRuntime.stop() }.get(5, TimeUnit.SECONDS)
+        assertEquals(2, completed)
     }
 
     @Test
