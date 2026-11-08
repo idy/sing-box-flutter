@@ -65,5 +65,10 @@ unless embed.files_references.include?(extension.product_reference)
   file = embed.add_file_reference(extension.product_reference)
   file.settings = { 'ATTRIBUTES' => ['RemoveHeadersOnCopy'] }
 end
+# Embed extensions before Flutter's thinning phase to avoid an Xcode cycle via
+# the application Info.plist and PlugIns directory.
+runner.build_phases.delete(embed)
+thin_index = runner.build_phases.index { |phase| phase.display_name == 'Thin Binary' }
+runner.build_phases.insert(thin_index || runner.build_phases.length, embed)
 project.save
 puts 'Configured Runner and embedded PacketTunnel for CocoaPods.'

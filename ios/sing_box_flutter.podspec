@@ -10,7 +10,7 @@ Install the native Libbox.xcframework artifact before running pod install.
   s.homepage         = 'https://github.com/idy/sing-box-flutter'
   s.license          = { :type => 'GPL-3.0-or-later', :file => '../LICENSE' }
   s.author           = { 'idy' => 'https://github.com/idy' }
-  s.source           = { :git => 'https://github.com/idy/sing-box-flutter.git', :tag => s.version.to_s }
+  s.source           = { :git => 'https://github.com/idy/sing-box-flutter.git', :tag => "v#{s.version}" }
   s.platform         = :ios, '15.0'
   s.swift_version    = '5.0'
   s.module_name      = 'sing_box_flutter'
@@ -22,8 +22,7 @@ Install the native Libbox.xcframework artifact before running pod install.
   s.subspec 'Core' do |core|
     core.source_files = 'Classes/Shared/**/*.swift'
     core.vendored_frameworks = 'Frameworks/Libbox.xcframework'
-    core.frameworks = 'Network', 'NetworkExtension', 'Security', 'SystemConfiguration', 'CoreFoundation',
-                      'UIKit', 'CoreGraphics', 'CoreText', 'CoreTelephony'
+    core.frameworks = 'Network', 'NetworkExtension', 'Security', 'SystemConfiguration', 'CoreFoundation', 'UIKit'
     core.libraries = 'resolv'
     core.resource_bundles = {
       'sing_box_flutter_privacy' => ['sing_box_flutter/Sources/sing_box_flutter/PrivacyInfo.xcprivacy']

@@ -16,6 +16,7 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
     private var statusObserver: NSObjectProtocol?
     private var eventSink: FlutterEventSink?
     private var startRequested = false
+    private var stopRequested = false
     private var status = TunnelStatus("disconnected")
 
     public static func register(with registrar: FlutterPluginRegistrar) {
@@ -100,8 +101,12 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
             validationQueue.async {
                 do {
                     try NativeCore.check(config)
-                    let configuration = try storage.saveConfiguration(config, name: name)
                     DispatchQueue.main.async {
+                        // The OS can start the saved VPN from Settings while validation runs.
+                        guard !self.isActive else { self.fail(result, .busy); return }
+                        let configuration: TunnelConfiguration
+                        do { configuration = try storage.saveConfiguration(config, name: name) }
+                        catch { self.fail(result, .storage); return }
                         do {
                             self.startRequested = true
                             try session.startVPNTunnel(options: ["sessionID": configuration.sessionID as NSString])
@@ -124,6 +129,7 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
             let needsStop = isActive
             startRequested = false
             if needsStop {
+                stopRequested = true
                 manager?.connection.stopVPNTunnel()
                 emit(TunnelStatus("disconnecting"))
             } else {
@@ -141,8 +147,8 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
 
     private var isActive: Bool {
-        guard let state = manager?.connection.status else { return startRequested }
-        return startRequested || ![NEVPNStatus.invalid, .disconnected].contains(state)
+        guard let state = manager?.connection.status else { return startRequested || stopRequested }
+        return startRequested || stopRequested || ![NEVPNStatus.invalid, .disconnected].contains(state)
     }
 
     private func initialize(_ arguments: [String: Any], result: @escaping FlutterResult) {
@@ -233,6 +239,7 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                         manager.loadFromPreferences { error in
                             DispatchQueue.main.async {
                                 guard error == nil else {
+                                    self.setManager(nil)
                                     self.fail(result, TunnelFailure(code: "preferences_failed", message: "The saved VPN configuration could not be reloaded."))
                                     return
                                 }
@@ -260,12 +267,19 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
         self.manager = manager
         guard let manager else { statusObserver = nil; return }
         statusObserver = NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: manager.connection, queue: .main) { [weak self] _ in
-            self?.startRequested = false
-            self?.refreshStatus()
+            guard let self else { return }
+            self.startRequested = false
+            if [.disconnected, .invalid].contains(manager.connection.status) {
+                self.stopRequested = false
+            } else if self.stopRequested, [.connecting, .connected, .reasserting].contains(manager.connection.status) {
+                manager.connection.stopVPNTunnel()
+            }
+            self.refreshStatus()
         }
     }
 
     private func refreshStatus() {
+        if stopRequested { emit(TunnelStatus("disconnecting")); return }
         let state = manager?.connection.status ?? .disconnected
         switch state {
         case .connecting: emit(TunnelStatus("connecting"))
@@ -283,7 +297,7 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
 
     private func queryProviderStatus(result: @escaping FlutterResult) {
-        guard let manager, [.connected, .reasserting].contains(manager.connection.status),
+        guard !stopRequested, let manager, [.connected, .reasserting].contains(manager.connection.status),
               let session = manager.connection as? NETunnelProviderSession,
               let request = try? JSONSerialization.data(withJSONObject: ["version": 1, "command": "getStatus"]) else {
             finish(result, status.event)

@@ -122,7 +122,9 @@ final class ApplePlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, L
             self.currentPath = path
             self.lock.unlock()
             listener.updateNetworkPath(self.describe(path))
-            let interface = path.availableInterfaces.first { path.usesInterfaceType($0.type) }
+            // availableInterfaces is ordered by system preference. Follow the
+            // official adapter even while a cellular path requires connection.
+            let interface = path.availableInterfaces.first
             if path.status == .satisfied, let interface {
                 listener.updateDefaultInterface(interface.name, interfaceIndex: Int32(interface.index), isExpensive: path.isExpensive, isConstrained: path.isConstrained)
             } else {

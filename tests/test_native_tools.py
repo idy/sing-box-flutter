@@ -17,7 +17,7 @@ from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, ver
 
 
 class PinTests(unittest.TestCase):
-    def test_expected_user_pins(self):
+    def test_core_pins_and_dependency_matching_fork(self):
         self.assertEqual(pin_identity(load_pins()), {
             "sing_box_version": "1.14.4",
             "sing_box_revision": "c005f35300ce76427dc285481ec5695f5b179cd2",
@@ -135,6 +135,8 @@ class ToolchainTests(unittest.TestCase):
             self.assertNotIn("CGO_CFLAGS", env)
             self.assertEqual(env["GOSUMDB"], "sum.golang.org")
             self.assertTrue(Path(env["GOMODCACHE"]).is_relative_to(root / "cache"))
+            self.assertTrue(Path(env["TEST_TELEMETRY_DIR"]).is_relative_to(root / "cache"))
+            self.assertEqual((Path(env["TEST_TELEMETRY_DIR"]) / "mode").read_text(), "off\n")
 
     def test_runtime_toolchain_contract_rejects_a_different_fork(self):
         actual = "63ae404c8203317fd3c82d972e5dc8f0fcb425cb"

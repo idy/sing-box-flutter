@@ -112,6 +112,21 @@ jobs:
           else
             flutter build ios --simulator --no-codesign 2>&1 | tee ../.build/logs/plugin-apple.log
           fi
+      - name: Check native Android lifecycle
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
+        working-directory: example/android
+        run: bash gradlew :sing_box_flutter:testDebugUnitTest
+      - name: Execute Apple native runtime smoke
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'apple'
+        shell: bash
+        run: |
+          set -euo pipefail
+          simulator=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; devices=json.load(sys.stdin)["devices"]; print(next(d["udid"] for group in devices.values() for d in group if d["name"].startswith("iPhone")))')
+          xcrun simctl boot "$simulator" || true
+          xcrun simctl bootstatus "$simulator" -b
+          bash ios/Tests/run-native-smoke.sh "$simulator" \
+            example/build/ios/iphonesimulator/Runner.app/PlugIns/PacketTunnel.appex/PacketTunnel \
+            2>&1 | tee .build/logs/native-smoke-apple.log
       - name: Upload release inputs and diagnostics
         if: always() && steps.select.outputs.enabled == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -213,6 +213,34 @@ matching session. A normal `stop` clears it once the VPN is stopped.
 
 ## Validation and example host changes
 
+After installing the native artifact, run the durable native smoke check from the
+package root with an already booted simulator UUID:
+
+```sh
+xcrun simctl list devices booted
+bash ios/Tests/run-native-smoke.sh <simulator-uuid>
+```
+
+An optional second argument is the built extension executable, for example
+`example/build/ios/iphonesimulator/Runner.app/PlugIns/PacketTunnel.appex/PacketTunnel`.
+The script compiles and links the physical arm64 extension with extension-safe
+compiler checks, then executes a real simulator binary to verify the installed
+libbox version against `native-core.json`, valid/invalid configuration handling,
+and bounded credential-safe events. It also rejects Flutter linkage in the
+supplied extension executable. It never bypasses the Tailscale Go runtime
+assertion: a mismatched fork can link successfully and still panic before the
+first Swift method runs. Generated upstream Objective-C headers currently emit
+nullability warnings; those are distinct from Swift or linker errors.
+
+Validation completed for this implementation with the iOS 27.1 SDK targeting
+iOS 15: the Flutter plugin typechecked, the physical arm64 extension compiled and
+linked against the actual XCFramework, and the smoke executable ran on an arm64
+iOS 26.5 simulator. Runtime checks returned libbox `1.14.4`, accepted a valid
+configuration, rejected an invalid configuration with a credential-safe error,
+and verified bounded status events. The built example extension's dynamic
+libraries contained no Flutter dependency. These checks used the matching pinned
+Tailscale Go fork without a toolchain-mismatch override.
+
 A real device with correctly provisioned capabilities is required to verify VPN
 consent, packet forwarding, DNS, network changes, locked-device reconnects,
 revocation, and survival after terminating Flutter. Simulator compilation verifies

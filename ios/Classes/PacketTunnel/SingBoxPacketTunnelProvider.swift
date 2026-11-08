@@ -14,10 +14,12 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
     private var commandServer: LibboxCommandServer?
     private var platform: ApplePlatformInterface?
     private var status = TunnelStatus("disconnected")
+    private var transitioning = false
 
     override open func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         coreQueue.async {
-            guard self.commandServer == nil else { completionHandler(TunnelFailure.busy); return }
+            guard self.commandServer == nil, !self.transitioning else { completionHandler(TunnelFailure.busy); return }
+            self.transitioning = true
             do {
                 guard let configuration = self.protocolConfiguration as? NETunnelProviderProtocol,
                       let group = configuration.providerConfiguration?["appGroup"] as? String else {
@@ -49,12 +51,18 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
                     throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound on iOS.")
                 }
                 self.setStatus("connected")
+                self.transitioning = false
                 completionHandler(nil)
             } catch {
                 let failure = error as? TunnelFailure ?? TunnelFailure(code: "core_start_failed", message: "sing-box could not start the tunnel. Check the configuration and extension capabilities.")
                 self.setStatus("error", message: failure.message)
                 self.closeCore()
-                self.setTunnelNetworkSettings(nil) { _ in completionHandler(failure) }
+                self.setTunnelNetworkSettings(nil) { _ in
+                    self.coreQueue.async {
+                        self.transitioning = false
+                        completionHandler(failure)
+                    }
+                }
             }
         }
     }
@@ -62,6 +70,7 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
     override open func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         coreQueue.async {
             // Preserve an actionable startup failure when the OS follows it with stopTunnel.
+            self.transitioning = true
             let preserveError = self.status.state == "error"
             if !preserveError { self.setStatus("disconnecting") }
             let closeFailed = self.closeCore()
@@ -70,6 +79,7 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
                     if !preserveError {
                         self.setStatus(closeFailed ? "error" : "disconnected", message: closeFailed ? "sing-box reported an error while stopping the tunnel." : nil)
                     }
+                    self.transitioning = false
                     completionHandler()
                 }
             }

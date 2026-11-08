@@ -57,13 +57,17 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
         "GOPATH": str(cache / "gopath"), "GOBIN": str(cache / "gopath/bin"),
         "GOCACHE": str(cache / "go-build"), "GOMODCACHE": str(cache / "go-mod"),
         "GOTMPDIR": str(cache / "tmp"), "TMPDIR": str(cache / "tmp"),
+        "TEST_TELEMETRY_DIR": str(cache / "telemetry"),
         "GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org",
         "GOFLAGS": "-mod=readonly -trimpath -buildvcs=false", "CGO_ENABLED": "1",
         "PATH": os.pathsep.join((str(goroot / "bin"), str(cache / "gopath/bin"),
                                  original.get("PATH", os.defpath))),
     })
-    for name in ("gopath/bin", "go-build", "go-mod", "tmp"):
+    for name in ("gopath/bin", "go-build", "go-mod", "tmp", "telemetry"):
         (cache / name).mkdir(parents=True, exist_ok=True)
+    # The Go command's documented test hook also controls compiler counters.
+    # Keep even telemetry's disabled mode file inside the project cache.
+    (cache / "telemetry/mode").write_text("off\n")
     return env
 
 
@@ -381,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
                               "bootstrap_dir": str(bootstrap.relative_to(ROOT)), "cache_dir": str(cache.relative_to(ROOT)),
                               "environment": {"GOTOOLCHAIN": "local", "GOROOT": "<verified fork>", "PATH": "<verified fork>/bin:<project GOPATH>/bin:..."},
                               "tags": list(REQUIRED_TAGS), "apple_extra_tags": ["with_low_memory", "with_dhcp", "grpcnotrace"],
-                              "commands": ["<fork>/bin/go install github.com/sagernet/gomobile/cmd/{gomobile,gobind}@" + pins["gomobile_version"],
+                              "commands": ["<fork>/bin/go install github.com/sagernet/gomobile/cmd/{gomobile,gobind} (in verified core module; pinned " + pins["gomobile_version"] + ")",
                                            *["<fork>/bin/go run ./cmd/internal/build_libbox -target " + target + (" -platform ios,iossimulator" if target == "apple" else "") for target in targets]],
                               "outputs": [ARTIFACTS[target] for target in targets],
                               "mode": "package" if args.package_only else "bootstrap" if args.bootstrap_only else "build"}, indent=2))
