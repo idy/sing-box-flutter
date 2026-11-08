@@ -231,6 +231,9 @@ def validate_metadata(metadata: dict, pins: dict, target: str) -> None:
     if (metadata.get("schema") != 1 or metadata.get("target") != target
             or metadata.get("pins") != pin_identity(pins)):
         raise BuildError("Release metadata does not match project pins/target")
+    dependency = metadata.get("tailscale_dependency", {})
+    if pins["tailscale_go_revision"] not in (dependency.get("toolchain_revision"), dependency.get("next_toolchain_revision")):
+        raise BuildError("Release Tailscale dependency runtime contract differs from the toolchain pin")
     tags = metadata.get("tags", [])
     if not set(REQUIRED_TAGS).issubset(tags):
         raise BuildError("Release metadata is missing required mobile features")

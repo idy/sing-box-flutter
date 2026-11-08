@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -21,12 +21,28 @@ from native_common import (ARTIFACTS, BuildError, RELEASE_REPO, ROOT, archive_na
                            validate_metadata, write_json)
 
 
-def install_one(target: str, pins: dict, base: str, sums: dict, cache: Path,
+def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: Path,
                 force: bool, manifest_sha256: str) -> None:
     name = archive_name(pins, target)
     if name not in sums:
         raise BuildError(f"Release SHA256SUMS has no entry for {name}")
-    archive, provenance = download(base + "/" + name, cache / "downloads", sums[name])
+    if isinstance(source, Path):
+        original = source / name
+        if original.is_symlink() or not original.is_file():
+            raise BuildError("Local core archive must be a regular file")
+        # Snapshot local/CI input into an isolated private directory, then verify.
+        # Extraction never follows a file that the source directory can replace.
+        isolated = Path(tempfile.mkdtemp(prefix="local-archive-", dir=cache))
+        archive = isolated / "payload"
+        shutil.copyfile(original, archive)
+        if sha256(archive) != sums[name]:
+            raise BuildError("Local archive SHA-256 does not match SHA256SUMS")
+        provenance = {"source": "local-release-directory", "name": name, "sha256": sums[name],
+                      "size": archive.stat().st_size}
+        release_source = "local-release-directory"
+    else:
+        archive, provenance = download(source + "/" + name, cache / "downloads", sums[name])
+        release_source = source
     staging = Path(tempfile.mkdtemp(prefix=f"install-{target}-", dir=cache))
     try:
         safe_extract(archive, staging)
@@ -73,7 +89,7 @@ def install_one(target: str, pins: dict, base: str, sums: dict, cache: Path,
                 raise
             print(f"{target}: installed {relative}")
         write_json(cache / "installed" / f"{target}.json", {
-            "schema": 1, "release_url": base, "manifest_sha256": manifest_sha256,
+            "schema": 1, "release_source": release_source, "manifest_sha256": manifest_sha256,
             "download": provenance, "build": metadata,
         })
     finally:
@@ -83,7 +99,9 @@ def install_one(target: str, pins: dict, base: str, sums: dict, cache: Path,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=("android", "apple", "all"), default="all")
-    parser.add_argument("--release", required=True, help="Published tag, e.g. v0.1.0; never latest")
+    source_args = parser.add_mutually_exclusive_group(required=True)
+    source_args.add_argument("--release", help="Published tag, e.g. v0.1.0; never latest")
+    source_args.add_argument("--from-dir", type=Path, help="Install verified local/CI release inputs without networking")
     parser.add_argument("--manifest-sha256", help="Optional independently obtained SHA-256 of SHA256SUMS")
     parser.add_argument("--cache-dir", default=str(ROOT / ".build/install"))
     parser.add_argument("--dry-run", action="store_true")
@@ -92,23 +110,36 @@ def main(argv: list[str] | None = None) -> int:
     try:
         pins = load_pins()
         cache = build_directory(args.cache_dir)
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", args.release) or args.release == "latest":
+        if args.release and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", args.release) or args.release == "latest"):
             raise BuildError("Use an explicit release tag without paths")
         if args.manifest_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.manifest_sha256):
             raise BuildError("--manifest-sha256 must be a lowercase SHA-256 digest")
         targets = ["android", "apple"] if args.target == "all" else [args.target]
-        base = f"https://github.com/{RELEASE_REPO}/releases/download/{urllib.parse.quote(args.release, safe='')}"
+        source = args.from_dir.resolve() if args.from_dir else f"https://github.com/{RELEASE_REPO}/releases/download/{urllib.parse.quote(args.release, safe='')}"
         if args.dry_run:
-            print(json.dumps({"manifest": base + "/SHA256SUMS", "archives": [base + "/" + archive_name(pins, t) for t in targets],
-                              "validation": ["HTTPS release", "SHA256SUMS", "safe extraction", "core/toolchain pins", "artifact hashes"],
+            prefix = str(source)
+            print(json.dumps({"manifest": prefix + "/SHA256SUMS", "archives": [prefix + "/" + archive_name(pins, t) for t in targets],
+                              "validation": ["SHA256SUMS", "safe extraction", "core/toolchain pins", "mobile profile", "artifact hashes"],
                               "outputs": [ARTIFACTS[t] for t in targets]}, indent=2))
             return 0
         with project_lock():
-            manifest, provenance = download(base + "/SHA256SUMS", cache / "downloads",
-                                             args.manifest_sha256, max_bytes=1024 * 1024)
-            sums = parse_manifest(manifest.read_text())
+            cache.mkdir(parents=True, exist_ok=True)
+            if isinstance(source, Path):
+                manifest = source / "SHA256SUMS"
+                if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 1024 * 1024:
+                    raise BuildError("Local SHA256SUMS must be a regular file under 1 MiB")
+                manifest_bytes = manifest.read_bytes()
+                digest = hashlib.sha256(manifest_bytes).hexdigest()
+                if args.manifest_sha256 and digest != args.manifest_sha256:
+                    raise BuildError("Local SHA256SUMS does not match --manifest-sha256")
+            else:
+                manifest, provenance = download(source + "/SHA256SUMS", cache / "downloads",
+                                                 args.manifest_sha256, max_bytes=1024 * 1024)
+                manifest_bytes = manifest.read_bytes()
+                digest = provenance["sha256"]
+            sums = parse_manifest(manifest_bytes.decode())
             for target in targets:
-                install_one(target, pins, base, sums, cache, args.force, provenance["sha256"])
+                install_one(target, pins, source, sums, cache, args.force, digest)
         return 0
     except (BuildError, OSError, ValueError, KeyError, tarfile.TarError, zipfile.BadZipFile) as exc:
         print(f"error: {exc}", file=sys.stderr)

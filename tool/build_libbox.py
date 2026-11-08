@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 # Keep bytecode and all tool state out of source / the pub archive.
 sys.dont_write_bytecode = True
@@ -147,6 +148,8 @@ def source_checkout(pins: dict, bootstrap: Path) -> Path:
             or git("rev-parse", f"v{pins['sing_box_version']}^{{commit}}") != pins["sing_box_revision"]):
         raise BuildError("Cached source git identity differs from core pins")
     git("fsck", "--no-dangling")
+    if git("describe", "--tags") != "v" + pins["sing_box_version"]:
+        raise BuildError("Official linker version would differ from sing_box_version")
     if git("status", "--porcelain", "--untracked-files=no"):
         raise BuildError("Cached core checkout has tracked modifications; remove the checkout and retry")
     # Untracked source/go.work/vendor files could alter compilation. Only the known
@@ -265,16 +268,49 @@ def check_sdks(targets: list[str], env: dict) -> dict:
     return versions
 
 
-def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> dict:
-    # Rebuild tools rather than executing a stale or altered cached gomobile/gobind.
-    run([go, "install", "-trimpath", f"{GOMOBILE_MODULE}/cmd/gomobile@{pins['gomobile_version']}",
-         f"{GOMOBILE_MODULE}/cmd/gobind@{pins['gomobile_version']}"], env=env)
-    modules = json.loads(run([go, "mod", "download", "-json", f"{GOMOBILE_MODULE}@{pins['gomobile_version']}"],
-                             cwd=source, env=env, capture=True))
-    # Go verifies downloaded modules against go.sum / sum.golang.org; verify cached
-    # module contents too before the official builder executes them.
-    run([go, "mod", "download"], cwd=source, env=env)
+def network_run(args: list[str | Path], **kwargs) -> str:
+    for attempt in range(3):
+        try:
+            return run(args, **kwargs)
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            delay = 2 ** (attempt + 1)
+            print(f"Network command failed; retrying in {delay}s with checksum verification enabled", flush=True)
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
+def verify_dependency_toolchain(revision: str, current: str, next_revision: str) -> None:
+    expected = {current.strip(), next_revision.strip()} - {""}
+    if revision not in expected:
+        raise BuildError("Pinned Tailscale Go " + revision + " conflicts with the pinned Tailscale dependency's runtime requirement "
+                         + ", ".join(sorted(expected)) + ". Resolve the pin conflict explicitly; mismatch overrides are not used")
+
+
+def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict, dict]:
+    # Stay in the verified core module. An @version go install outside the module
+    # queries unrelated latest versions for deprecation notices; this uses go.mod.
+    modules = json.loads(network_run([go, "mod", "download", "-json", GOMOBILE_MODULE],
+                                     cwd=source, env=env, capture=True))
+    if modules.get("Version") != pins["gomobile_version"]:
+        raise BuildError("Selected gomobile module differs from native-core.json")
+    # Go verifies downloads against go.sum / sum.golang.org. Verify cached source
+    # before compiling any tool from it, then check the dependency runtime contract.
+    network_run([go, "mod", "download"], cwd=source, env=env)
     run([go, "mod", "verify"], cwd=source, env=env)
+    tailscale = json.loads(network_run([go, "mod", "download", "-json", "github.com/sagernet/tailscale"],
+                                       cwd=source, env=env, capture=True))
+    dependency_dir = Path(tailscale["Dir"])
+    current = (dependency_dir / "go.toolchain.rev").read_text().strip()
+    next_revision = (dependency_dir / "go.toolchain.next.rev").read_text().strip()
+    verify_dependency_toolchain(pins["tailscale_go_revision"], current, next_revision)
+    dependency = {"module": tailscale["Path"], "version": tailscale["Version"],
+                  "sum": tailscale["Sum"], "go_mod_sum": tailscale["GoModSum"],
+                  "toolchain_revision": current, "next_toolchain_revision": next_revision}
+    # Rebuild rather than executing stale or altered cached mobile tools.
+    network_run([go, "install", "-trimpath", f"{GOMOBILE_MODULE}/cmd/gomobile",
+                 f"{GOMOBILE_MODULE}/cmd/gobind"], cwd=source, env=env)
     binaries = {}
     for name in ("gomobile", "gobind"):
         binary = Path(env["GOBIN"]) / name
@@ -283,8 +319,8 @@ def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> dict:
                 or f"\tpath\t{GOMOBILE_MODULE}/cmd/{name}" not in info):
             raise BuildError(f"{name} binary identity does not match the pinned module")
         binaries[name] = sha256(binary)
-    return {"module": GOMOBILE_MODULE, "version": pins["gomobile_version"],
-            "sum": modules["Sum"], "go_mod_sum": modules["GoModSum"], "binaries": binaries}
+    return ({"module": GOMOBILE_MODULE, "version": pins["gomobile_version"],
+             "sum": modules["Sum"], "go_mod_sum": modules["GoModSum"], "binaries": binaries}, dependency)
 
 
 def package_target(target: str, pins: dict, cache: Path) -> Path:
@@ -365,7 +401,7 @@ def main(argv: list[str] | None = None) -> int:
                 notices = cache / "results/LICENSE.sing-box"
                 notices.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source / "LICENSE", notices)
-                mobile = install_mobile(go, env, source, pins)
+                mobile, tailscale_dependency = install_mobile(go, env, source, pins)
                 if args.bootstrap_only:
                     print("Verified Tailscale Go, source and gomobile bootstrap complete.")
                     return 0
@@ -397,8 +433,9 @@ def main(argv: list[str] | None = None) -> int:
                             shutil.copyfile(sources_jar, generated / sources_jar.name)
                     metadata = {"schema": 1, "target": target, "pins": pin_identity(pins),
                                 "source": {"repository": CORE_REPO, "tag": "v" + pins["sing_box_version"],
-                                           "revision": pins["sing_box_revision"], "go_sum_sha256": sha256(source / "go.sum")},
-                                "toolchain": toolchain, "gomobile": mobile, "sdks": sdk_versions,
+                                           "revision": pins["sing_box_revision"], "go_sum_sha256": sha256(source / "go.sum"),
+                                           "linker_version": pins["sing_box_version"], "linker_version_source": "verified exact git describe tag"},
+                                "toolchain": toolchain, "gomobile": mobile, "tailscale_dependency": tailscale_dependency, "sdks": sdk_versions,
                                 "tags": effective_tags, "mobile_profile": profile_provenance,
                                 "platform": "ios,iossimulator" if target == "apple" else "android",
                                 "artifact_sha256": artifact_hashes(destination), "license_sha256": sha256(notices)}

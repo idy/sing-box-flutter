@@ -1,12 +1,12 @@
 {
-  "revision": "7ef7b403648ac3a9481a6e88e8b894eff50b0167",
-  "version": "go1.27.3",
-  "release": "https://github.com/tailscale/go/releases/tag/build-7ef7b403648ac3a9481a6e88e8b894eff50b0167",
-  "checksum_source": "https://api.github.com/repos/tailscale/go/releases/tags/build-7ef7b403648ac3a9481a6e88e8b894eff50b0167",
+  "revision": "63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
+  "version": "go1.26.5",
+  "release": "https://github.com/tailscale/go/releases/tag/build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
+  "checksum_source": "https://api.github.com/repos/tailscale/go/releases/tags/build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
   "sha256": {
-    "darwin-amd64": "e7047255cf3fc10ab4c180337919451fce38989d960dc01d1f64acaa7d026a85",
-    "darwin-arm64": "c05e1fa39d20234c928b5df1300684e38b961060cb9fa461c7c08486e2271115",
-    "linux-amd64": "d7add016a4fa533fbd44e5ec07375c8c50f2a0afcc2ea7cc6fee3421488bd40c",
-    "linux-arm64": "9ab36ba88dd282adc255e499282b7df03f6340486585b8cbe61e6ddc555894a9"
+    "darwin-amd64": "c0372692986cfe983e1b772848c0d3ef6864054c20f4b90d9fe114f6b5eb68b3",
+    "darwin-arm64": "dca8c2dcbc61c355536ef9fd953da0efd67f9066949289e77a3aa2b96da35287",
+    "linux-amd64": "d06972c01a6d2b32a2eabd09179f48d888b7dc29ae051a72eea5972e4e085800",
+    "linux-arm64": "a551877a249858e035c778e1ee89dde70c226298e7520cdc1cf3a4f798a1fde1"
   }
 }

@@ -36,7 +36,7 @@ implementation references. Files adapted from upstream retain source notices.
 ## Tailscale Go
 
 - Source: https://github.com/tailscale/go
-- Pinned revision: 7ef7b403648ac3a9481a6e88e8b894eff50b0167
+- Pinned revision: 63ae404c8203317fd3c82d972e5dc8f0fcb425cb
 - License: BSD-3-Clause, as provided by that repository.
 
 Tailscale Go is a build toolchain. Its binaries are cached locally and are not

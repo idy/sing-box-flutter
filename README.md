@@ -145,7 +145,7 @@ All Go compilation uses the Tailscale-maintained Go fork. The build refuses to
 substitute a system Go toolchain. Inputs are fixed in [native-core.json](native-core.json):
 
 - sing-box: `1.14.4`, revision `c005f35300ce76427dc285481ec5695f5b179cd2`.
-- Tailscale Go: revision `7ef7b403648ac3a9481a6e88e8b894eff50b0167`.
+- Tailscale Go: revision `63ae404c8203317fd3c82d972e5dc8f0fcb425cb`.
 - SagerNet gomobile: `v0.1.12`.
 
 From a source checkout:

@@ -1,0 +1,63 @@
+name: Android plugin validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      core-run-id:
+        description: Completed Native core run providing the Android artifact
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-core-android
+          run-id: ${{ inputs.core-run-id }}
+          github-token: ${{ github.token }}
+          path: .build/ci-input/android
+      - name: Verify and install the previously built core
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=$(find .build/ci-input/android -type f -name SHA256SUMS -print -quit)
+          test -n "$manifest"
+          python3 tool/install_libbox.py --target android --from-dir "$(dirname "$manifest")"
+      - name: Resolve Flutter packages
+        run: flutter pub get
+      - name: Build example APK
+        working-directory: example
+        run: flutter build apk --debug
+      - name: Run native lifecycle and channel tests
+        working-directory: example/android
+        run: bash gradlew :sing_box_flutter:testDebugUnitTest
+      - name: Upload native test results and debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-plugin-validation
+          if-no-files-found: warn
+          path: |
+            example/build/app/outputs/flutter-apk/app-debug.apk
+            example/build/sing_box_flutter/test-results/**
+            example/build/sing_box_flutter/reports/tests/**

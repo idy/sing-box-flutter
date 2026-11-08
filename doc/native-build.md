@@ -1,0 +1,189 @@
+# Native libbox builds
+
+The Dart package ships source and tooling. Native AAR/XCFramework files and `.build/`
+are excluded from the pub archive. Plugin users install a separately released core
+before building their app; maintainers can reproduce it from the pinned sources.
+Python 3.11 or newer is recommended (CI uses Python 3.13). No Python packages are
+required. Run the commands from the plugin directory, including when using a local
+copy of the pub package. Python must execute these checked-in scripts rather than
+scripts found inside a downloaded archive.
+
+## Install a published core
+
+After a maintainer publishes a release containing the assets described below:
+
+```sh
+dart run sing_box_flutter install --target android --release v0.1.0
+dart run sing_box_flutter install --target apple --release v0.1.0
+# Equivalent direct invocation, using your Python 3.11+ executable:
+python3 tool/install_libbox.py --target all --release v0.1.0
+```
+
+`--dry-run` prints URLs and destinations without writing files or downloading.
+`--force` replaces a different existing artifact only after validating its replacement.
+The installer uses only `https://github.com/idy/sing-box-flutter/releases/download/`
+and requires an explicit tag; it does not select `latest`. If the release has not
+been published, the command fails rather than manufacturing or compiling a binary.
+The installer does not need Go, Xcode, an Android SDK, or Java.
+
+The installer downloads `SHA256SUMS`, verifies each archive's SHA-256 before
+extraction, rejects unsafe archive entries, checks the core/toolchain/mobile-profile
+pins in `native-build.json`, and verifies all artifact contents. An AAR must contain
+`classes.jar` and `AndroidManifest.xml`; an XCFramework must contain `Info.plist`.
+Framework symlinks are hashed as `SHA256("symlink:" + link target)` and must resolve
+within the artifact. Each download has a fresh directory under `.build/install`.
+Installation provenance stays under `.build/install/installed/`. For artifacts
+already downloaded from a CI run, use the same validator without network access:
+
+```sh
+python3 tool/install_libbox.py --target android --from-dir .build/ci-input/release
+```
+
+The directory must contain the archive and `SHA256SUMS`; `--from-dir` is mutually
+exclusive with `--release`. Local archives are copied to a fresh private directory
+before hashing/extraction, and pass the same pin/profile/contents checks.
+
+The manifest and archive are fetched over HTTPS from the same trusted release.
+This detects corruption but does not protect against a compromised release account.
+For an independent trust anchor, obtain the manifest digest from the maintainer's
+release announcement or verified CI summary and pass it explicitly:
+
+```sh
+python3 tool/install_libbox.py --target apple --release v0.1.0 \
+  --manifest-sha256 <64-character-SHA256-of-SHA256SUMS>
+```
+
+## Build from source
+
+All Go compilation uses **Tailscale's Go fork**. Stock Go is never selected as a
+fallback, and `GOTOOLCHAIN=local` prevents Go from downloading another toolchain.
+Inputs are read from `native-core.json`:
+
+| Input | Pin |
+| --- | --- |
+| sing-box | v1.14.4, commit `c005f35300ce76427dc285481ec5695f5b179cd2` |
+| Tailscale Go | `63ae404c8203317fd3c82d972e5dc8f0fcb425cb` (`go1.26.5`) |
+| Upstream mobile module | `github.com/sagernet/gomobile v0.1.12` |
+
+`tool/tailscale-go.json` pins the official release archive SHA-256 for each supported
+macOS/Linux arm64/amd64 host. These digests came from GitHub's asset `digest` values
+for Tailscale's `build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb` release, with the
+source API URL recorded in the lock. The archive checksum is validated on every
+invocation, then the toolchain is extracted again before any downloaded executable
+runs. A modified cached executable or a local provenance stamp cannot substitute
+for verification. `VERSION`, `go env`, explicit `GOROOT`, and the first `PATH` entry
+must agree. The Tailscale dependency's embedded `go.toolchain.rev` / next-revision
+contract is checked before native compilation; a mismatched fork fails early rather
+than producing a binary that panics at startup. No mismatch environment override is
+used. No source build of Go or globally installed Go is used.
+
+```sh
+python3 tool/build_libbox.py --target all --dry-run
+python3 tool/build_libbox.py --target apple
+python3 tool/build_libbox.py --target android
+# Download/verify inputs and build the pinned mobile tools without a native SDK:
+python3 tool/build_libbox.py --target apple --bootstrap-only
+```
+
+The bootstrap checkout validates the official remote, exact tag-to-commit mapping,
+`HEAD`, git object integrity, tracked changes, unexpected files, gomobile's module
+pin, and required upstream build tags. Go modules use `go.sum`/`sum.golang.org`;
+`go mod verify` checks cached module contents. Pinned `gomobile` and `gobind` are
+rebuilt using the verified fork and inspected with `go version -m` before use.
+Both tools and the core use project-local Go caches.
+
+The official entry point remains `go run ./cmd/internal/build_libbox -target
+android` or `-target apple -platform ios,iossimulator`. The tool applies the small,
+deterministic feature profile in `tool/mobile-profile.json` while running it and
+restores the pristine source in `finally`. The exact upstream builder SHA-256 is
+checked before the edit. The profile removes only `with_naive_outbound`,
+`with_usbip`, `with_openvpn`, and `with_openconnect`; these are outside this plugin's
+feature contract. Upstream naive outbound pulls Cronet native libraries whose
+pinned iOS archive referenced an undefined `base::MessagePumpKqueue::InitializeFeatures()`
+and `UIApplication` symbols during real PacketTunnel linking. No upstream version,
+API or dependency pin is changed. An interrupted process can leave the local
+checkout dirty; remove `.build/bootstrap/sing-box` and retry in that case.
+
+The profile preserves `with_tailscale`, `with_gvisor`, `with_wireguard`, `with_quic`,
+`with_utls`, `with_clash_api`, the upstream linker compatibility tags, and all
+upstream `ts_omit_*` mobile tags. Apple also preserves `with_low_memory` for non-macOS
+builds, `with_dhcp`, and `grpcnotrace`. Exact effective tags and the profile/builder
+hashes are recorded in build metadata. The upstream Android builder also emits its
+legacy variant; the plugin installs only the SDK-24 main `libbox.aar`.
+
+Outputs are:
+
+- `android/libs/libbox.aar` (Android architectures selected by official gomobile).
+- `ios/Frameworks/Libbox.xcframework` (iOS arm64 and simulator arm64/x86_64).
+- `.build/cache/generated/android/libbox-sources.jar`, when produced upstream.
+- `.build/cache/results/<target>.json`, with input pins, tag/profile hashes, SDK
+  versions, download URL/checksum, module sums, binary identities and artifact hashes.
+- `.build/release/libbox-1.14.4-<target>.tar.gz` and `SHA256SUMS`.
+
+Metadata contains no machine absolute paths, environment dumps, or credentials.
+Reproducibility means pinned inputs and recorded SDK versions, not a promise of
+identical compiler output across different Xcode versions. Packaging normalizes
+archive ordering, timestamps, owners and gzip headers.
+
+## Host SDKs and isolation
+
+Apple builds require macOS, Xcode command-line selection, and iPhoneOS plus
+simulator SDKs. Check with `xcode-select -p`, `xcrun --sdk iphoneos
+--show-sdk-version`, and `xcrun --sdk iphonesimulator --show-sdk-version`. The pinned
+upstream builder requires iOS 15.0 or later. It is restricted to iOS/simulator;
+macOS and tvOS frameworks are not built for this Flutter plugin.
+
+Android builds require a licensed SDK in `ANDROID_HOME` (or `ANDROID_SDK_ROOT`),
+installed platforms/build-tools, NDK `28.0.13004108`, and **OpenJDK 17** selected with
+`JAVA_HOME`. The exact NDK requirement removes the upstream builder's permissive
+fallback to a different NDK. Missing SDKs or Java cause a clear error. Local tooling
+never installs or changes a global SDK. Flutter's Android example can require an
+additional platform/build-tools version; its native compilation is a separate check.
+
+`--bootstrap-dir` and `--cache-dir` accept only separate, non-nested directories
+inside this project's `.build/`. Symlinks cannot redirect them outside the project.
+Downloaded archives are isolated from one another and are never a working directory
+for Python or build tools. A project lock prevents build/install races. Use the
+same cache directory for a subsequent `--package-only` operation:
+
+```sh
+python3 tool/build_libbox.py --target apple --package-only
+```
+
+Cached Go archives are rehashed; cached modules are verified; edited core source is
+rejected. To recover from a corrupt cache, remove the reported `.build/` subtree
+and rerun. Do not replace it with a stock Go installation.
+
+## Validation and release workflow
+
+```sh
+python3 -B -m unittest discover -s tests -v
+python3 tool/build_libbox.py --target all --dry-run
+python3 tool/install_libbox.py --target all --release v0.1.0 --dry-run
+```
+
+`.github/workflows/native-core.yml` validates the tooling for relevant PRs.
+`workflow_dispatch` accepts `all`, `android`, or `apple`. It builds with verified
+Tailscale Go, then compiles the real Flutter example/plugin against that artifact
+(Android debug APK or iOS simulator including the PacketTunnel target). Android's
+SDK is installed under the job's `.build/android-sdk`; the runner's JDK 17 is used.
+The workflow requests read-only repository permissions and publishes no release.
+It uploads build logs, provenance, generated Android sources, and release inputs,
+including on failure. With target `all`, a final successful job combines the two
+archive checksums and reports the `SHA256SUMS` digest in the job summary. Separate
+platform runs require a maintainer to combine the independently verified manifests.
+
+Before publishing a GitHub release, verify both native plugin builds, retain the
+logs/provenance, and upload exactly these public assets under the chosen plugin tag:
+
+- `libbox-1.14.4-android.tar.gz`
+- `libbox-1.14.4-apple.tar.gz`
+- `SHA256SUMS` containing both archive digests
+
+Each archive includes `native-build.json` and the upstream `LICENSE.sing-box`.
+Keep upstream/dependency license notices and make the exact corresponding GPL source
+and build profile available with the binary release. Do not put binaries, build
+caches, or release archives in the pub package. Publish the manifest's digest in the
+release notes so users can supply `--manifest-sha256`. Core assembly alone is not
+proof that a VPN plugin links or works; device permission/tunnel behavior still
+requires testing on actual Android and iOS devices.

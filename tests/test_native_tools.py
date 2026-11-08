@@ -13,7 +13,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
 from native_common import (BuildError, ROOT, REQUIRED_TAGS, build_directory, load_pins,
                            parse_manifest, pin_identity, safe_extract, sha256, validate_metadata)
-from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes
+from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, verify_dependency_toolchain
 
 
 class PinTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class PinTests(unittest.TestCase):
         self.assertEqual(pin_identity(load_pins()), {
             "sing_box_version": "1.14.4",
             "sing_box_revision": "c005f35300ce76427dc285481ec5695f5b179cd2",
-            "tailscale_go_revision": "7ef7b403648ac3a9481a6e88e8b894eff50b0167",
+            "tailscale_go_revision": "63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
             "gomobile_version": "v0.1.12",
         })
 
@@ -41,6 +41,7 @@ class PinTests(unittest.TestCase):
         profile = json.loads((ROOT / "tool/mobile-profile.json").read_text())
         metadata = {"schema": 1, "target": "apple", "pins": pin_identity(pins),
                     "tags": [*REQUIRED_TAGS, "with_low_memory"],
+                    "tailscale_dependency": {"toolchain_revision": pins["tailscale_go_revision"]},
                     "mobile_profile": {"profile_sha256": sha256(ROOT / "tool/mobile-profile.json"),
                                        "upstream_builder_sha256": profile["upstream_builder_sha256"],
                                        "removed_tags": profile["drop_tags"]}}
@@ -134,6 +135,13 @@ class ToolchainTests(unittest.TestCase):
             self.assertNotIn("CGO_CFLAGS", env)
             self.assertEqual(env["GOSUMDB"], "sum.golang.org")
             self.assertTrue(Path(env["GOMODCACHE"]).is_relative_to(root / "cache"))
+
+    def test_runtime_toolchain_contract_rejects_a_different_fork(self):
+        actual = "63ae404c8203317fd3c82d972e5dc8f0fcb425cb"
+        verify_dependency_toolchain(actual, actual + "\n", "1" * 40)
+        verify_dependency_toolchain(actual, "1" * 40, actual)
+        with self.assertRaisesRegex(BuildError, "runtime requirement"):
+            verify_dependency_toolchain("7ef7b403648ac3a9481a6e88e8b894eff50b0167", actual, actual)
 
     def test_corrupt_toolchain_cache_is_never_executed(self):
         with tempfile.TemporaryDirectory() as temp:
