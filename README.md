@@ -215,8 +215,10 @@ worker can run.
 
 Ready PRs are reviewed automatically when opened, reopened, edited, or updated.
 Post `@codex review` on its own line in a new PR comment to request a fresh review,
-or run the workflow manually with a PR number. Editing a linked Issue also
-refreshes its open PRs. Retry with a new request instead of rerunning an old run.
+or run the workflow manually with a PR number. For a fork PR, if GitHub does not
+associate the automatic run with the PR, request review with a new comment.
+Editing a linked Issue also refreshes its open PRs. Retry with a new request
+instead of rerunning an old run.
 
 The reviewer publishes `OpenAI PR Review`, `OpenAI Issue Review`, and
 `OpenAI Code Review` checks on the reviewed commit. It focuses on Android/iOS VPN
