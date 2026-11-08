@@ -1,0 +1,249 @@
+name: OpenAI PR review
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  issue_comment:
+    types: [created]
+  issues:
+    types: [edited, reopened, typed, untyped]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Open internal pull request to review.
+        required: true
+        type: string
+      dispatch_source_run_id:
+        description: Original PR-event run for an automatic review; leave empty for manual reviews.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  actions: write
+  checks: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: openai-pr-review-${{ github.event_name == 'pull_request_target' && 'dispatch' || 'worker' }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request_number }}
+  # Retain every pending approval; cancel-in-progress: false alone still drops
+  # the older pending worker in GitHub's default single-slot queue.
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  dispatch_review:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Dispatch review on the trusted default branch
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            if (context.eventName !== 'pull_request_target'
+              || Number(process.env.GITHUB_RUN_ATTEMPT) !== 1) {
+              throw new Error('Create a new review request instead of rerunning a PR dispatch.');
+            }
+            const number = Number(context.payload.pull_request?.number);
+            if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid pull request number');
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo, pull_number: number,
+            });
+            if (pr.state !== 'open' || pr.draft
+              || pr.head.sha !== context.payload.pull_request.head.sha) {
+              core.info('The pull request is closed, draft, or has a newer head; no review was dispatched.');
+              return;
+            }
+            const [{ data: repository }, { data: run }] = await Promise.all([
+              github.rest.repos.get(context.repo),
+              github.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId }),
+            ]);
+            if (!repository.default_branch || !Number.isSafeInteger(run.workflow_id)
+              || run.id !== context.runId || run.event !== 'pull_request_target') {
+              throw new Error('Could not establish the trusted caller workflow and default branch.');
+            }
+            // workflow_dispatch events created with GITHUB_TOKEN start a new run.
+            // Never run the worker from the PR branch or modify native Check results.
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: run.workflow_id,
+              ref: repository.default_branch,
+              inputs: { pull_request_number: String(number), dispatch_source_run_id: String(context.runId) },
+            });
+            core.info(`Requested a review of PR ${number} on the trusted default branch.`);
+
+  resolve_review_target:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      number: ${{ steps.target.outputs.number }}
+    steps:
+      - id: target
+        env:
+          CODEX_REVIEW_EVENT_NAME: ${{ github.event_name }}
+          CODEX_REVIEW_IS_PR: ${{ github.event.issue.pull_request != null }}
+          CODEX_REVIEW_PR_INPUT: ${{ inputs.pull_request_number }}
+          CODEX_REVIEW_ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const event = process.env.CODEX_REVIEW_EVENT_NAME;
+          if (!['issue_comment', 'workflow_dispatch'].includes(event)
+            || (event === 'issue_comment' && process.env.CODEX_REVIEW_IS_PR !== 'true')) {
+            throw new Error('Unsupported review event');
+          }
+          const requestedNumber = Number(process.env.CODEX_REVIEW_PR_INPUT);
+          let number;
+          if (Number.isSafeInteger(requestedNumber) && requestedNumber > 0) {
+            number = requestedNumber;
+          } else if (event === 'issue_comment') {
+            number = Number(process.env.CODEX_REVIEW_ISSUE_NUMBER);
+          } else {
+            number = requestedNumber;
+          }
+          if (!Number.isSafeInteger(number) || number < 1) {
+            throw new Error('A positive safe integer pull request number is required');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `number=${number}\n`);
+          NODE
+
+  review:
+    needs: resolve_review_target
+    if: github.event_name != 'issues' && github.event_name != 'pull_request_target'
+    concurrency:
+      group: openai-pr-review-invoke-${{ needs.resolve_review_target.outputs.number }}
+      queue: max
+      cancel-in-progress: false
+    uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
+    with:
+      review-instructions: >-
+        Review the complete pull-request diff against the trusted base for
+        actionable correctness, security, lifecycle, compatibility, and
+        test-coverage findings in the Flutter plugin and its Android and iOS
+        integrations. Check method/event channel contracts, VPN consent,
+        service and Network Extension lifecycles, socket protection, DNS and
+        routing, network transitions, and cleanup on failures or restarts.
+        Treat sing-box configurations and Tailscale authentication material
+        as sensitive. Verify that native build and install changes preserve
+        pinned inputs, artifact integrity checks, and the separation between
+        Dart tests, native compilation, and physical-device VPN validation.
+      issue-review-instructions: >-
+        Follow the trusted-base AGENTS.md hierarchy and the Issue-review
+        documents it requires. Require linked implementation Issues to
+        describe the goal, scope, design, affected platforms, and observable
+        validation without exposing credentials. Distinguish Dart tests,
+        native compilation, and physical-device VPN checks where relevant.
+      pr-readiness-instructions: >-
+        Require valid PR metadata, a description of the delivered behavior,
+        current validation evidence, and no actionable findings. Closing
+        Issues are optional; check Issue linkage and plan conformance when
+        present. Disclose native build or physical-device checks that were
+        not run rather than treating Dart-only tests as full VPN validation.
+      pull_request_number: ${{ inputs.pull_request_number }}
+      dispatch_source_run_id: ${{ inputs.dispatch_source_run_id }}
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  resolve_linked_prs:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+      pull-requests: read
+    outputs:
+      pull_requests: ${{ steps.links.outputs.pull_requests }}
+      pull_request_count: ${{ steps.links.outputs.pull_request_count }}
+    steps:
+      - id: links
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const data = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $number) {
+                    closedByPullRequestsReferences(first: 50) {
+                      totalCount
+                      nodes { number state repository { nameWithOwner } }
+                    }
+                  }
+                }
+              }
+            `, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              number: Number(context.payload.issue.number),
+            });
+            const references = data.repository.issue
+              ?.closedByPullRequestsReferences;
+            if (!references) {
+              throw new Error('Issue was not found');
+            }
+            if (references.totalCount > references.nodes.length) {
+              throw new Error(
+                'Could not resolve every linked pull request within the configured bound',
+              );
+            }
+            if (references.nodes.some((pullRequest) =>
+              typeof pullRequest?.repository?.nameWithOwner !== 'string')) {
+              throw new Error('Could not establish a linked pull request repository');
+            }
+            const repository = `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
+            const pullRequests = references.nodes
+              .filter((pullRequest) => pullRequest.state === 'OPEN'
+                && pullRequest.repository.nameWithOwner.toLowerCase() === repository)
+              .map((pullRequest) => pullRequest.number);
+            core.setOutput('pull_requests', JSON.stringify(pullRequests));
+            core.setOutput('pull_request_count', String(pullRequests.length));
+
+  refresh_linked_prs:
+    needs: resolve_linked_prs
+    if: >-
+      needs.resolve_linked_prs.result == 'success'
+      && needs.resolve_linked_prs.outputs.pull_request_count != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        pull_request_number: ${{ fromJSON(needs.resolve_linked_prs.outputs.pull_requests) }}
+    concurrency:
+      group: openai-pr-review-invoke-${{ matrix.pull_request_number }}
+      queue: max
+      cancel-in-progress: false
+    uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
+    with:
+      review-instructions: >-
+        Review the complete pull-request diff against the trusted base for
+        actionable correctness, security, lifecycle, compatibility, and
+        test-coverage findings in the Flutter plugin and its Android and iOS
+        integrations. Check method/event channel contracts, VPN consent,
+        service and Network Extension lifecycles, socket protection, DNS and
+        routing, network transitions, and cleanup on failures or restarts.
+        Treat sing-box configurations and Tailscale authentication material
+        as sensitive. Verify that native build and install changes preserve
+        pinned inputs, artifact integrity checks, and the separation between
+        Dart tests, native compilation, and physical-device VPN validation.
+      issue-review-instructions: >-
+        Follow the trusted-base AGENTS.md hierarchy and the Issue-review
+        documents it requires. Require linked implementation Issues to
+        describe the goal, scope, design, affected platforms, and observable
+        validation without exposing credentials. Distinguish Dart tests,
+        native compilation, and physical-device VPN checks where relevant.
+      pr-readiness-instructions: >-
+        Require valid PR metadata, a description of the delivered behavior,
+        current validation evidence, and no actionable findings. Closing
+        Issues are optional; check Issue linkage and plan conformance when
+        present. Disclose native build or physical-device checks that were
+        not run rather than treating Dart-only tests as full VPN validation.
+      pull_request_number: ${{ matrix.pull_request_number }}
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
