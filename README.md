@@ -8,6 +8,9 @@ This project is not affiliated with or endorsed by SagerNet or Tailscale.
 
 ## Platform support
 
+Requires **Flutter 3.47.2+**. The Android integration uses AGP 9.1 with built-in
+Kotlin and JDK 17; the checked-in example and CI use the same Flutter toolchain.
+
 | Platform | Native integration | Minimum version |
 | --- | --- | --- |
 | Android | Foreground `VpnService`, socket protection, network monitoring | Android 7 / API 24 |
