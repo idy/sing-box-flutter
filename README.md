@@ -205,6 +205,25 @@ Native compilation and physical-device VPN tests are separate from Dart unit tes
 Before shipping an app, test DNS, IPv4/IPv6, lock/unlock, Wi-Fi/cellular transitions,
 permission revocation, and UI restarts on the actual supported OS versions.
 
+## Automated pull-request review
+
+[OpenAI PR review](.github/workflows/openai-code-review.yml) uses the maintained
+[GizClaw reviewer](https://github.com/GizClaw/github-workflows) through its `latest`
+tag. Configure an `OPENAI_API_KEY` Actions secret in this repository before use.
+The caller must be merged into the default branch before its trusted review
+worker can run.
+
+Ready PRs are reviewed automatically when opened, reopened, edited, or updated.
+Post `@codex review` on its own line in a new PR comment to request a fresh review,
+or run the workflow manually with a PR number. Editing a linked Issue also
+refreshes its open PRs. Retry with a new request instead of rerunning an old run.
+
+The reviewer publishes `OpenAI PR Review`, `OpenAI Issue Review`, and
+`OpenAI Code Review` checks on the reviewed commit. It focuses on Android/iOS VPN
+lifecycle, Flutter channel compatibility, sensitive configuration, and native
+artifact integrity. These checks complement the existing tests; physical-device
+VPN validation remains a separate requirement.
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE) and
