@@ -1,0 +1,37 @@
+Android native integration is licensed under GPL-3.0-or-later.
+
+Portions adapted from https://github.com/SagerNet/sing-box-for-android
+at commit a548a7903e96266a0046018562c73b192edbfc18:
+  app/src/main/java/io/nekohasekai/sfa/bg/VPNService.kt
+  app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+  app/src/main/java/io/nekohasekai/sfa/bg/PlatformInterfaceWrapper.kt
+  app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkListener.kt
+  app/src/main/java/io/nekohasekai/sfa/bg/DefaultNetworkMonitor.kt
+  app/src/main/java/io/nekohasekai/sfa/bg/LocalResolver.kt
+
+Copyright (C) 2022 by nekohasekai <contact-sagernet@sekai.icu>
+Copyright (C) 2019 by Max Lv <max.c.lv@gmail.com>
+Copyright (C) 2019 by Mygod Studio <contact-shadowsocks-android@mygod.be>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+The full GPL-3.0 license is included in the project root LICENSE.
+
+The upstream application additionally states:
+"In addition, no derivative work may use the name or imply association
+with this application without prior consent."
+
+The native binary is built from SagerNet/sing-box v1.14.4, revision
+c005f35300ce76427dc285481ec5695f5b179cd2. Its own GPL license and the
+licenses of its dependencies also apply; see the native build provenance.
+This plugin is independent and does not imply endorsement by SagerNet.

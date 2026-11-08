@@ -1,0 +1,26 @@
+name: sing_box_flutter_example
+description: Demonstrates native VPN control with sing_box_flutter.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  sing_box_flutter:
+    path: ../
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  config:
+    enable-swift-package-manager: false
+  uses-material-design: true

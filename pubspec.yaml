@@ -1,0 +1,37 @@
+name: sing_box_flutter
+description: >-
+  Native sing-box VPN plugin for Flutter on Android and iOS, with Tailscale
+  endpoints, typed connection events, and reproducible Tailscale Go builds.
+version: 0.1.0
+homepage: https://github.com/idy/sing-box-flutter
+repository: https://github.com/idy/sing-box-flutter
+issue_tracker: https://github.com/idy/sing-box-flutter/issues
+topics:
+  - vpn
+  - sing-box
+  - tailscale
+  - networking
+
+# Native libbox artifacts are installed separately; see the README.
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.1.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.idy.sing_box_flutter
+        pluginClass: SingBoxFlutterPlugin
+      ios:
+        pluginClass: SingBoxFlutterPlugin

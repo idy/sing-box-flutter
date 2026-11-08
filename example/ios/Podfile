@@ -1,0 +1,43 @@
+platform :ios, '15.0'
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  configuration = File.expand_path('Flutter/Generated.xcconfig', __dir__)
+  raise 'Run flutter pub get from example/ first.' unless File.exist?(configuration)
+  File.foreach(configuration) do |line|
+    match = line.match(/FLUTTER_ROOT\=(.*)/)
+    return match[1].strip if match
+  end
+  raise 'FLUTTER_ROOT was not found in Generated.xcconfig.'
+end
+
+require File.expand_path('packages/flutter_tools/bin/podhelper', flutter_root)
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+  flutter_install_all_ios_pods __dir__
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+target 'PacketTunnel' do
+  use_frameworks!
+  pod 'sing_box_flutter/PacketTunnel', :path => '.symlinks/plugins/sing_box_flutter/ios'
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+    end
+  end
+end

@@ -1,0 +1,12 @@
+{
+  "revision": "7ef7b403648ac3a9481a6e88e8b894eff50b0167",
+  "version": "go1.27.3",
+  "release": "https://github.com/tailscale/go/releases/tag/build-7ef7b403648ac3a9481a6e88e8b894eff50b0167",
+  "checksum_source": "https://api.github.com/repos/tailscale/go/releases/tags/build-7ef7b403648ac3a9481a6e88e8b894eff50b0167",
+  "sha256": {
+    "darwin-amd64": "e7047255cf3fc10ab4c180337919451fce38989d960dc01d1f64acaa7d026a85",
+    "darwin-arm64": "c05e1fa39d20234c928b5df1300684e38b961060cb9fa461c7c08486e2271115",
+    "linux-amd64": "d7add016a4fa533fbd44e5ec07375c8c50f2a0afcc2ea7cc6fee3421488bd40c",
+    "linux-arm64": "9ab36ba88dd282adc255e499282b7df03f6340486585b8cbe61e6ddc555894a9"
+  }
+}

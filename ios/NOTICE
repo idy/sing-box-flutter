@@ -1,0 +1,26 @@
+sing_box_flutter iOS backend
+SPDX-License-Identifier: GPL-3.0-or-later
+
+The packet tunnel lifecycle, Network Extension settings and platform integration
+were developed with the official SagerNet/sing-box-for-apple implementation as a
+reference and adapt portions of its platform adapter:
+  https://github.com/SagerNet/sing-box-for-apple
+  Reference revision: 768b3de2baf2461dd06405cba1b2ca4e39da5ea4
+  Library/Network/ExtensionPlatformInterface.swift
+  Library/Network/ExtensionProvider.swift
+  Copyright (C) 2022 nekohasekai <contact-sagernet@sekai.icu>
+  License: GNU General Public License, version 3 or (at your option) any later version.
+
+The Swift protocol conformance and calls are checked against generated Objective-C
+bindings from these pinned core sources, not inferred from the reference revision:
+  https://github.com/SagerNet/sing-box/tree/v1.14.4/experimental/libbox
+  Core revision: c005f35300ce76427dc285481ec5695f5b179cd2
+  Binding generator: github.com/sagernet/gomobile v0.1.12
+  License: GNU General Public License, version 3 or any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License in the package LICENSE.
+
+Retain the upstream notices and provide corresponding source, including the core
+build inputs and modifications, when distributing binaries as required by GPL.

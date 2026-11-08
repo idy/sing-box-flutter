@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "name": "plugin-mobile",
+  "upstream_builder_sha256": "1008b27acc8dc9ce05b76dde4a48ad2ea6eaf6d212f9001fe81893330f65f240",
+  "drop_tags": ["with_naive_outbound", "with_usbip", "with_openvpn", "with_openconnect"],
+  "reason": "Build only the pinned plugin feature contract. Upstream naive outbound brings Cronet native libraries with unresolved MessagePumpKqueue and UIApplication references on iOS."
+}

@@ -1,0 +1,43 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve packages
+        run: flutter pub get
+      - name: Format
+        run: dart format --output=none --set-exit-if-changed lib bin test example/lib example/test example/integration_test
+      - name: Analyze
+        run: flutter analyze
+      - name: Dart tests
+        run: flutter test
+      - name: Example tests
+        working-directory: example
+        run: flutter test
+      - name: Check publication archive
+        run: flutter pub publish --dry-run
+  build-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build tool tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Check pinned build plan
+        run: python3 tool/build_libbox.py --target apple --dry-run
