@@ -197,6 +197,64 @@ void main() {
     }
   });
 
+  test('IPv4-mapped peer endpoints exclude their actual IPv4 host', () {
+    for (final endpoint in [
+      '[::ffff:203.0.113.10]:51820',
+      '[::ffff:cb00:710a]:51820',
+      '[0:0:0:0:0:ffff:cb00:710a]:51820',
+      '[0:0:0:0:0:FFFF:CB00:710A]:51820',
+    ]) {
+      final profile = WgcConfiguration.fromJson({
+        ...profileJson(),
+        'peers': [
+          {'id': 'exit', 'public_key': key, 'endpoint': endpoint},
+        ],
+      });
+      expect(
+        tun(profile.toSingBoxConfig())['route_exclude_address'],
+        ['203.0.113.10/32'],
+        reason: endpoint,
+      );
+      expect(profile.peers.single.endpoint, endpoint);
+    }
+  });
+
+  test('mapped peer exclusions deduplicate IPv4 and preserve real IPv6', () {
+    final profile = WgcConfiguration.fromJson({
+      ...profileJson(),
+      'peers': [
+        {'id': 'exit', 'public_key': key, 'endpoint': '203.0.113.10:51820'},
+        {
+          'id': 'mapped',
+          'public_key': base64Encode(List.filled(32, 2)),
+          'endpoint': '[::ffff:cb00:710a]:1234',
+        },
+        {
+          'id': 'ipv6',
+          'public_key': base64Encode(List.filled(32, 3)),
+          'endpoint': '[2001:db8::1]:1234',
+        },
+        {
+          'id': 'nat64',
+          'public_key': base64Encode(List.filled(32, 4)),
+          'endpoint': '[64:ff9b::cb00:710a]:1234',
+        },
+      ],
+      'network': {
+        'excluded_routes': ['10.1.0.0/16', '203.0.113.10/32'],
+      },
+    });
+    expect(
+      tun(profile.toSingBoxConfig(peer: 'ipv6'))['route_exclude_address'],
+      [
+        '10.1.0.0/16',
+        '203.0.113.10/32',
+        '2001:db8::1/128',
+        '64:ff9b::cb00:710a/128',
+      ],
+    );
+  });
+
   test('legacy sing_box routing is preserved but cannot be silently converted',
       () {
     for (final override in [

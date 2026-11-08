@@ -412,8 +412,18 @@ String _defaultUpstreamDns(List<String> addresses) =>
         ? '1.1.1.1:53'
         : '[2606:4700:4700::1111]:53';
 
-String _hostRoute(InternetAddress address) =>
-    '${address.address}/${address.type == InternetAddressType.IPv4 ? 32 : 128}';
+String _hostRoute(InternetAddress address) {
+  final bytes = address.rawAddress;
+  // Match Go netip.Addr.Unmap: outer IPv4 packets need an IPv4 exclusion even
+  // when their endpoint uses dotted or hexadecimal IPv4-mapped IPv6 notation.
+  if (address.type == InternetAddressType.IPv6 &&
+      bytes.take(10).every((byte) => byte == 0) &&
+      bytes[10] == 0xff &&
+      bytes[11] == 0xff) {
+    return '${bytes.skip(12).join('.')}/32';
+  }
+  return '${address.address}/${address.type == InternetAddressType.IPv4 ? 32 : 128}';
+}
 
 const _configurationFields = {
   'version',
