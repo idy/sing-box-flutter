@@ -23,6 +23,21 @@ struct NativeCoreSmoke {
         try NativeCore.check("{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}]}")
         print("valid configuration: accepted")
 
+        let stateDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        let tailscaleConfig: [String: Any] = [
+            "endpoints": [[
+                "type": "tailscale", "tag": "tailnet", "hostname": "native-smoke",
+                "state_directory": stateDirectory.path,
+                "system_interface": false, "accept_routes": false,
+            ]],
+            "outbounds": [["type": "direct", "tag": "direct"]],
+        ]
+        let tailscaleJSON = try JSONSerialization.data(withJSONObject: tailscaleConfig)
+        try NativeCore.check(String(decoding: tailscaleJSON, as: UTF8.self))
+        print("Tailscale endpoint: registered and configuration accepted")
+
         let secret = "native-smoke-private-auth-sentinel"
         do {
             try NativeCore.check("{\"outbounds\":[{\"type\":\"invalid-smoke-outbound\",\"password\":\"\(secret)\"}]}")
