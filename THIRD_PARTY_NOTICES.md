@@ -43,6 +43,20 @@ Tailscale Go is a build toolchain. Its binaries are cached locally and are not
 included in the Dart package. Its source and release artifacts remain available
 from the upstream repository.
 
+## WGC and migrated tunnel components
+
+- Source: https://github.com/idy/wgc
+- Pinned version: `v0.2.1-0.20261107180014-c3ca5bb852e4`
+- License: MIT; the original text is preserved in
+  `third_party/licenses/github.com/idy/wgc/LICENSE`.
+
+The WGC session, configuration, custom transport registry, and Apple Keychain
+components were migrated from https://github.com/idy/wgc-ne, GPL-3.0-or-later.
+They are maintained in this repository; building this package does not require
+the retired repository. WGC's MIT license does not change the license of the
+combined sing-box native core. Additional dependency license texts are preserved
+under `third_party/licenses/` and bundled in native release archives.
+
 ## Transitive native dependencies
 
 The pinned sing-box source and its `go.mod` and `go.sum` identify transitive

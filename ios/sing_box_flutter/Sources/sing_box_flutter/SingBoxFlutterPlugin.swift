@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#if os(macOS)
+import FlutterMacOS
+#else
 import Flutter
+#endif
 import Foundation
 import Libbox
 import NetworkExtension
@@ -21,8 +25,13 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = SingBoxFlutterPlugin()
-        let methods = FlutterMethodChannel(name: "dev.idy.sing_box_flutter/methods", binaryMessenger: registrar.messenger())
-        let events = FlutterEventChannel(name: "dev.idy.sing_box_flutter/events", binaryMessenger: registrar.messenger())
+        #if os(macOS)
+        let messenger = registrar.messenger
+        #else
+        let messenger = registrar.messenger()
+        #endif
+        let methods = FlutterMethodChannel(name: "dev.idy.sing_box_flutter/methods", binaryMessenger: messenger)
+        let events = FlutterEventChannel(name: "dev.idy.sing_box_flutter/events", binaryMessenger: messenger)
         registrar.addMethodCallDelegate(instance, channel: methods)
         events.setStreamHandler(instance)
     }
@@ -94,7 +103,7 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
             guard let config = arguments["config"] as? String, !config.isEmpty,
                   let name = arguments["name"] as? String, !name.isEmpty else { fail(result, .invalidArguments); return }
             guard !isActive else { fail(result, .busy); return }
-            guard let manager, manager.isEnabled, let session = manager.connection as? NETunnelProviderSession else {
+            guard let manager, manager.isEnabled else {
                 fail(result, TunnelFailure(code: "permission_required", message: "Call requestPermission and allow the VPN configuration before starting."))
                 return
             }
@@ -104,19 +113,11 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                     DispatchQueue.main.async {
                         // The OS can start the saved VPN from Settings while validation runs.
                         guard !self.isActive else { self.fail(result, .busy); return }
-                        let configuration: TunnelConfiguration
-                        do { configuration = try storage.saveConfiguration(config, name: name) }
-                        catch { self.fail(result, .storage); return }
                         do {
-                            self.startRequested = true
-                            try session.startVPNTunnel(options: ["sessionID": configuration.sessionID as NSString])
-                            self.emit(TunnelStatus("connecting"))
-                            self.finish(result)
+                            let saved = try storage.saveConfiguration(config, name: name)
+                            self.saveAndStart(saved, storage: storage, manager: manager, result: result)
                         } catch {
-                            self.startRequested = false
-                            try? storage.writeStatus(TunnelStatus("error", message: "The system rejected the VPN start request.", sessionID: configuration.sessionID))
-                            self.emit(TunnelStatus("error", message: "The system rejected the VPN start request."))
-                            self.fail(result, TunnelFailure(code: "start_failed", message: "The system rejected the VPN start request. Check the extension target and VPN permission."))
+                            self.fail(result, error as? TunnelFailure ?? .storage)
                         }
                     }
                 } catch let failure as TunnelFailure {
@@ -146,6 +147,51 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
         }
     }
 
+    private func saveAndStart(_ saved: StoredTunnelConfiguration, storage: TunnelStorage, manager: NETunnelProviderManager, result: @escaping FlutterResult) {
+        let previous = manager.protocolConfiguration
+        let tunnel = (previous?.copy() as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
+        TunnelPreferences.apply(to: tunnel, identity: storage.identity, sessionID: saved.configuration.sessionID)
+        tunnel.passwordReference = saved.reference
+        manager.protocolConfiguration = tunnel
+        manager.saveToPreferences { error in
+            DispatchQueue.main.async {
+                guard error == nil else {
+                    manager.protocolConfiguration = previous
+                    self.fail(result, TunnelFailure(code: "preferences_failed", message: "The secure configuration reference could not be saved. Start again from the app before using the VPN."))
+                    return
+                }
+                // Reload after every reference/session update before obtaining the session.
+                manager.loadFromPreferences { error in
+                    DispatchQueue.main.async {
+                        guard error == nil,
+                              let loaded = manager.protocolConfiguration as? NETunnelProviderProtocol,
+                              TunnelPreferences.matches(loaded, identity: storage.identity),
+                              loaded.passwordReference == saved.reference,
+                              TunnelPreferences.sessionID(in: loaded) == saved.configuration.sessionID else {
+                            self.fail(result, TunnelFailure(code: "preferences_failed", message: "The secure VPN configuration could not be reloaded."))
+                            return
+                        }
+                        do {
+                            try storage.removeLegacyConfiguration()
+                            guard !self.isActive else { self.fail(result, .busy); return }
+                            guard let session = manager.connection as? NETunnelProviderSession else { throw TunnelFailure.storage }
+                            self.startRequested = true
+                            try session.startVPNTunnel(options: ["sessionID": saved.configuration.sessionID as NSString])
+                            self.emit(TunnelStatus("connecting"))
+                            self.finish(result)
+                        } catch {
+                            self.startRequested = false
+                            let failure = error as? TunnelFailure ?? TunnelFailure(code: "start_failed", message: "The system rejected the VPN start request. Check the extension target and VPN permission.")
+                            try? storage.writeStatus(TunnelStatus("error", message: failure.message, sessionID: saved.configuration.sessionID))
+                            self.emit(TunnelStatus("error", message: failure.message))
+                            self.fail(result, failure)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var isActive: Bool {
         guard let state = manager?.connection.status else { return startRequested || stopRequested }
         return startRequested || stopRequested || ![NEVPNStatus.invalid, .disconnected].contains(state)
@@ -155,15 +201,24 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
         guard let group = arguments["appGroup"] as? String, !group.isEmpty,
               let bundle = arguments["providerBundleIdentifier"] as? String, !bundle.isEmpty,
               let title = arguments["notificationTitle"] as? String, !title.isEmpty else { fail(result, .invalidArguments); return }
-        if let storage, storage.appGroup == group, providerBundleIdentifier == bundle {
-            notificationTitle = title
-            refreshStatus()
-            finish(result)
-            return
+        let requestedKeychainGroup: String?
+        if let value = arguments["keychainAccessGroup"], !(value is NSNull) {
+            guard let value = value as? String else { fail(result, .invalidKeychainGroup); return }
+            requestedKeychainGroup = value
+        } else {
+            requestedKeychainGroup = nil
         }
-        guard !isActive else { fail(result, .busy); return }
         do {
-            let newStorage = try TunnelStorage(appGroup: group)
+            let keychainGroup = try KeychainConfigurationStore.resolveAccessGroup(requestedKeychainGroup)
+            let identity = try ConfigurationIdentity(appGroup: group, providerBundleIdentifier: bundle, accessGroup: keychainGroup)
+            if let storage, storage.identity == identity {
+                notificationTitle = title
+                refreshStatus()
+                finish(result)
+                return
+            }
+            guard !isActive else { fail(result, .busy); return }
+            let newStorage = try TunnelStorage(identity: identity)
             NETunnelProviderManager.loadAllFromPreferences { managers, error in
                 DispatchQueue.main.async {
                     guard error == nil else {
@@ -213,17 +268,31 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                 }
                 let manager = self.findManager(managers, bundle: bundle, appGroup: storage.appGroup) ?? NETunnelProviderManager()
                 self.setManager(manager)
-                if manager.isEnabled, manager.protocolConfiguration != nil {
+                let previous = manager.protocolConfiguration as? NETunnelProviderProtocol
+                let isCurrent = previous.map { TunnelPreferences.matches($0, identity: storage.identity) } ?? false
+                if manager.isEnabled, isCurrent {
                     self.refreshStatus()
                     self.finish(result, true)
                     return
                 }
                 guard !self.isActive else { self.fail(result, .busy); return }
-                let tunnel = NETunnelProviderProtocol()
-                tunnel.providerBundleIdentifier = bundle
-                tunnel.providerConfiguration = ["appGroup": storage.appGroup, "schemaVersion": 1]
-                tunnel.serverAddress = "sing-box"
-                tunnel.disconnectOnSleep = false
+                let tunnel = (previous?.copy() as? NETunnelProviderProtocol) ?? NETunnelProviderProtocol()
+                var savedSession = isCurrent ? previous.flatMap { TunnelPreferences.sessionID(in: $0) } : nil
+                if !isCurrent {
+                    // References belonging to a different group/schema are not inherited.
+                    tunnel.passwordReference = nil
+                    do {
+                        if let legacy = try storage.legacyConfigurationForMigration() {
+                            let migrated = try storage.saveConfiguration(legacy.config, name: legacy.name)
+                            tunnel.passwordReference = migrated.reference
+                            savedSession = migrated.configuration.sessionID
+                        }
+                    } catch {
+                        self.fail(result, error as? TunnelFailure ?? .storage)
+                        return
+                    }
+                }
+                TunnelPreferences.apply(to: tunnel, identity: storage.identity, sessionID: savedSession)
                 manager.protocolConfiguration = tunnel
                 manager.localizedDescription = self.notificationTitle
                 manager.isEnabled = true
@@ -238,9 +307,19 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                         // Apple's newly saved preferences must be reloaded before startVPNTunnel.
                         manager.loadFromPreferences { error in
                             DispatchQueue.main.async {
-                                guard error == nil else {
+                                guard error == nil,
+                                      let loaded = manager.protocolConfiguration as? NETunnelProviderProtocol,
+                                      TunnelPreferences.matches(loaded, identity: storage.identity),
+                                      loaded.passwordReference == tunnel.passwordReference,
+                                      TunnelPreferences.sessionID(in: loaded) == savedSession else {
                                     self.setManager(nil)
                                     self.fail(result, TunnelFailure(code: "preferences_failed", message: "The saved VPN configuration could not be reloaded."))
+                                    return
+                                }
+                                do {
+                                    if !isCurrent, loaded.passwordReference != nil { try storage.removeLegacyConfiguration() }
+                                } catch {
+                                    self.fail(result, .storage)
                                     return
                                 }
                                 self.setManager(manager)
@@ -288,8 +367,10 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
         case .disconnecting: emit(TunnelStatus("disconnecting"))
         case .invalid, .disconnected:
             if startRequested { emit(TunnelStatus("connecting")); return }
-            if let saved = storage?.readStatus(), saved.state == "error",
-               let configuration = try? storage?.loadConfiguration(), saved.sessionID == configuration.sessionID {
+            if let storage, let saved = storage.readStatus(), saved.state == "error",
+               let tunnel = manager?.protocolConfiguration as? NETunnelProviderProtocol,
+               TunnelPreferences.matches(tunnel, identity: storage.identity),
+               let sessionID = TunnelPreferences.sessionID(in: tunnel), saved.sessionID == sessionID {
                 emit(TunnelStatus("error", message: saved.message))
             } else { emit(TunnelStatus("disconnected")) }
         @unknown default: emit(TunnelStatus("error", message: "The system returned an unknown VPN status."))

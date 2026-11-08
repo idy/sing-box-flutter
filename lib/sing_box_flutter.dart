@@ -1,4 +1,4 @@
-/// Native sing-box VPN control for Android and iOS.
+/// Native sing-box, WireGuard and WGC VPN control for Android, iOS and macOS.
 ///
 /// Install the native libbox artifacts and, on iOS, a Packet Tunnel extension
 /// before using this library. See the package README for host setup.
@@ -8,8 +8,11 @@ import 'dart:convert';
 
 import 'sing_box_flutter_platform_interface.dart';
 import 'src/events.dart';
+import 'src/wgc/configuration.dart';
 
 export 'src/events.dart';
+export 'src/wgc/configuration.dart';
+export 'src/wgc/wireguard_key.dart';
 
 /// Controls the native VPN service independently of Flutter's UI lifecycle.
 ///
@@ -18,15 +21,24 @@ export 'src/events.dart';
 class SingBoxFlutter {
   /// Initializes platform integration without starting a VPN connection.
   ///
-  /// On iOS, [appGroup] must match the shared App Group entitlement and
+  /// On Apple, [appGroup] must match the shared App Group entitlement and
   /// [providerBundleIdentifier] must identify the host's Packet Tunnel extension.
+  /// [keychainAccessGroup] selects the fully expanded shared Keychain group
+  /// (for example `TEAMID.com.example.vpn`) present in both targets' entitlements.
+  /// Configuration is stored in device-only Keychain items. When omitted, the
+  /// resolved app default group must also be accessible to the extension.
   /// Android uses [notificationTitle] for its foreground-service notification.
   Future<void> initialize({
     String? appGroup,
     String? providerBundleIdentifier,
+    String? keychainAccessGroup,
     String notificationTitle = 'sing-box',
   }) {
-    for (final value in [appGroup, providerBundleIdentifier]) {
+    for (final value in [
+      appGroup,
+      providerBundleIdentifier,
+      keychainAccessGroup
+    ]) {
       if (value != null && value.trim().isEmpty) {
         throw ArgumentError('Apple identifiers must not be empty.');
       }
@@ -37,6 +49,7 @@ class SingBoxFlutter {
     return SingBoxFlutterPlatform.instance.initialize(
       appGroup: appGroup,
       providerBundleIdentifier: providerBundleIdentifier,
+      keychainAccessGroup: keychainAccessGroup,
       notificationTitle: notificationTitle,
     );
   }
@@ -70,6 +83,23 @@ class SingBoxFlutter {
     }
     return SingBoxFlutterPlatform.instance.start(config: config, name: name);
   }
+
+  /// Validates a WGC profile through the same native sing-box core.
+  Future<void> checkWgcConfig(WgcConfiguration configuration, {String? peer}) =>
+      checkConfig(configuration.toSingBoxConfigString(peer: peer));
+
+  /// Starts WGC inside the shared sing-box service with generated TUN/DNS routes.
+  ///
+  /// Permission and Apple host initialization follow the same contract as [start].
+  /// For mixed WGC/Tailscale routing, edit [WgcConfiguration.toSingBoxConfig] and
+  /// pass the resulting complete JSON to [start].
+  Future<void> startWgc({
+    required WgcConfiguration configuration,
+    String? peer,
+    String name = 'WGC',
+  }) =>
+      start(
+          config: configuration.toSingBoxConfigString(peer: peer), name: name);
 
   /// Stops the native VPN service and releases its tunnel and core.
   Future<void> stop() => SingBoxFlutterPlatform.instance.stop();

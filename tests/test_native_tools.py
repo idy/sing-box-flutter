@@ -23,6 +23,9 @@ class PinTests(unittest.TestCase):
             "sing_box_revision": "c005f35300ce76427dc285481ec5695f5b179cd2",
             "tailscale_go_revision": "63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
             "gomobile_version": "v0.1.12",
+            "wgc_version": "v0.2.1-0.20261107180014-c3ca5bb852e4",
+            "wgc_source_sha256": pin_identity(load_pins())["wgc_source_sha256"],
+            "wgc_overlay_sha256": sha256(ROOT / "tool/wgc_overlay.py"),
         })
 
     def test_revision_and_checksum_lock_must_agree(self):
@@ -45,6 +48,8 @@ class PinTests(unittest.TestCase):
                     "mobile_profile": {"profile_sha256": sha256(ROOT / "tool/mobile-profile.json"),
                                        "upstream_builder_sha256": profile["upstream_builder_sha256"],
                                        "removed_tags": profile["drop_tags"]}}
+        metadata["wgc"] = {"source_sha256": metadata["pins"]["wgc_source_sha256"],
+                           "overlay_sha256": metadata["pins"]["wgc_overlay_sha256"], "extensions": []}
         validate_metadata(metadata, pins, "apple")
         metadata["pins"]["sing_box_revision"] = "f" * 40
         with self.assertRaises(BuildError):

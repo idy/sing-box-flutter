@@ -19,6 +19,7 @@ tests/
 **/flutter_export_environment.sh
 android/libs/*.aar
 ios/Frameworks/Libbox.xcframework/
+macos/Frameworks/Libbox.xcframework/
 example/build/
 example/.dart_tool/
 example/.flutter-plugins-dependencies

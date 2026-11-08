@@ -22,9 +22,10 @@ import time
 # Keep bytecode and all tool state out of source / the pub archive.
 sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, CORE_REPO, GOMOBILE_MODULE,
-                           REQUIRED_TAGS, ROOT, archive_name, artifact_hashes, build_directory,
-                           download, load_pins, pin_identity, project_lock,
-                           safe_extract, sha256, validate_metadata, write_json)
+                           REQUIRED_TAGS, UPSTREAM_REQUIRED_TAGS, ROOT, archive_name, artifact_hashes, build_directory,
+                           download, legal_files, load_pins, pin_identity, project_lock,
+                           safe_extract, sha256, sync_apple_framework, validate_metadata, write_json)
+from wgc_overlay import load_extensions, wgc_overlay
 
 NDK_VERSION = "28.0.13004108"  # build_shared.FindSDK prefers this exact version.
 
@@ -173,7 +174,7 @@ def source_checkout(pins: dict, bootstrap: Path) -> Path:
     builder = (source / "cmd/internal/build_libbox/main.go").read_text()
     # Inspect active code, not obsolete commented-out flags.
     active = "\n".join(line.split("//", 1)[0] for line in builder.splitlines())
-    for tag in REQUIRED_TAGS:
+    for tag in UPSTREAM_REQUIRED_TAGS:
         if f'"{tag}"' not in active:
             raise BuildError(f"Upstream build_libbox no longer enables required tag {tag}")
     if '"-tags-not-macos=with_low_memory"' not in active:
@@ -241,7 +242,7 @@ def check_sdks(targets: list[str], env: dict) -> dict:
     if "apple" in targets:
         if platform.system() != "Darwin":
             raise BuildError("Apple builds require macOS with Xcode and iOS simulator/device SDKs")
-        for sdk in ("iphoneos", "iphonesimulator"):
+        for sdk in ("iphoneos", "iphonesimulator", "macosx"):
             versions[sdk] = run(["xcrun", "--sdk", sdk, "--show-sdk-version"], env=env, capture=True)
         versions["xcode"] = run(["xcodebuild", "-version"], env=env, capture=True).replace("\n", "; ")
     if "android" in targets:
@@ -332,7 +333,7 @@ def package_target(target: str, pins: dict, cache: Path) -> Path:
     if not metadata_path.is_file():
         raise BuildError(f"No verified {target} build metadata; run a build first")
     metadata = json.loads(metadata_path.read_text())
-    validate_metadata(metadata, pins, target)
+    validate_metadata(metadata, pins, target, allow_custom=True)
     artifact = ROOT / ARTIFACTS[target]
     if metadata["artifact_sha256"] != artifact_hashes(artifact):
         raise BuildError("Artifact differs from the recorded build; rebuild before packaging")
@@ -355,6 +356,11 @@ def package_target(target: str, pins: dict, cache: Path) -> Path:
                 archive.add(path, arcname=path.relative_to(ROOT).as_posix(), recursive=False, filter=normalize)
             archive.add(metadata_path, arcname="native-build.json", filter=normalize)
             archive.add(license_path, arcname="LICENSE.sing-box", filter=normalize)
+            legal = legal_files()
+            if {name: sha256(path) for name, path in legal.items()} != metadata.get("legal_sha256"):
+                raise BuildError("Legal notices changed since the native build")
+            for name, path in sorted(legal.items()):
+                archive.add(path, arcname="Legal/" + name, recursive=False, filter=normalize)
     return destination
 
 
@@ -366,6 +372,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--cache-dir", default=str(ROOT / ".build/cache"))
     result.add_argument("--bootstrap-only", action="store_true", help="Verify/download fork and core; install pinned mobile tools")
     result.add_argument("--package-only", action="store_true", help="Package existing verified artifacts for a future release")
+    result.add_argument("--wgc-config", type=Path, help="JSON manifest of compiled WGC transport extensions")
     return result
 
 
@@ -373,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         pins = load_pins()
+        extensions = load_extensions(args.wgc_config)
         bootstrap = build_directory(args.bootstrap_dir)
         cache = build_directory(args.cache_dir)
         if bootstrap == cache or bootstrap.is_relative_to(cache) or cache.is_relative_to(bootstrap):
@@ -386,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
                               "environment": {"GOTOOLCHAIN": "local", "GOROOT": "<verified fork>", "PATH": "<verified fork>/bin:<project GOPATH>/bin:..."},
                               "tags": list(REQUIRED_TAGS), "apple_extra_tags": ["with_low_memory", "with_dhcp", "grpcnotrace"],
                               "commands": ["<fork>/bin/go install github.com/sagernet/gomobile/cmd/{gomobile,gobind} (in verified core module; pinned " + pins["gomobile_version"] + ")",
-                                           *["<fork>/bin/go run ./cmd/internal/build_libbox -target " + target + (" -platform ios,iossimulator" if target == "apple" else "") for target in targets]],
+                                           *["<fork>/bin/go run ./cmd/internal/build_libbox -target " + target + (" -platform ios,iossimulator,macos" if target == "apple" else "") for target in targets]],
                               "outputs": [ARTIFACTS[target] for target in targets],
                               "mode": "package" if args.package_only else "bootstrap" if args.bootstrap_only else "build"}, indent=2))
             return 0
@@ -412,11 +420,14 @@ def main(argv: list[str] | None = None) -> int:
                 for target in targets:
                     args_go = [go, "run", "./cmd/internal/build_libbox", "-target", target]
                     if target == "apple":
-                        args_go += ["-platform", "ios,iossimulator"]
+                        args_go += ["-platform", "ios,iossimulator,macos"]
                     output = source / ("libbox.aar" if target == "android" else "Libbox.xcframework")
                     if output.exists():
                         shutil.rmtree(output) if output.is_dir() else output.unlink()
-                    with mobile_profile(source) as profile_provenance:
+                    with mobile_profile(source) as profile_provenance, wgc_overlay(source, go, env, run, extensions) as wgc_provenance:
+                        selected_wgc = run([go, "list", "-m", "-f", "{{.Version}}", "github.com/idy/wgc"], cwd=source, env=env, capture=True)
+                        if selected_wgc != pins["wgc_version"]:
+                            raise BuildError("Resolved WGC module does not match native-core.json")
                         effective_tags = upstream_tags(source, target)
                         run(args_go, cwd=source, env=env)
                     if not output.exists():
@@ -429,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
                         shutil.copytree(output, destination, symlinks=True)
                     else:
                         shutil.copyfile(output, destination)
+                    if target == "apple":
+                        sync_apple_framework()
                     if target == "android":
                         sources_jar = source / "libbox-sources.jar"
                         if sources_jar.is_file():
@@ -441,7 +454,9 @@ def main(argv: list[str] | None = None) -> int:
                                            "linker_version": pins["sing_box_version"], "linker_version_source": "verified exact git describe tag"},
                                 "toolchain": toolchain, "gomobile": mobile, "tailscale_dependency": tailscale_dependency, "sdks": sdk_versions,
                                 "tags": effective_tags, "mobile_profile": profile_provenance,
-                                "platform": "ios,iossimulator" if target == "apple" else "android",
+                                "wgc": wgc_provenance,
+                                "legal_sha256": {name: sha256(path) for name, path in legal_files().items()},
+                                "platform": "ios,iossimulator,macos" if target == "apple" else "android",
                                 "artifact_sha256": artifact_hashes(destination), "license_sha256": sha256(notices)}
                     write_json(cache / "results" / f"{target}.json", metadata)
             archives = [package_target(target, pins, cache) for target in targets]

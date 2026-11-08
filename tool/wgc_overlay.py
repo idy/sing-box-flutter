@@ -1,0 +1,125 @@
+"""Reversible, source-identified WGC registration in the pinned upstream libbox."""
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+from pathlib import Path
+import re
+
+from native_common import BuildError, ROOT, sha256
+
+MODULE = "github.com/idy/sing-box-flutter/core"
+REGISTRY_SHA256 = "cbc7bc06391fe555828782df7bc1ce0844e446a82647448739dbb3e8e3eef19e"
+IMPORT_PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]+$")
+VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*$")
+
+
+def source_digest(root: Path) -> str:
+    """Hash compile inputs with their paths, excluding build caches and tests."""
+    files = sorted(p for p in root.rglob("*") if p.is_file() and
+                   (p.name in ("go.mod", "go.sum") or
+                    (p.suffix in (".go", ".c", ".h") and not p.name.endswith("_test.go"))) and
+                   not any(part.startswith(".") for part in p.relative_to(root).parts))
+    if not files or not (root / "go.mod").is_file():
+        raise BuildError("WGC source module is missing")
+    digest = hashlib.sha256()
+    for path in files:
+        if path.is_symlink():
+            raise BuildError("WGC source inputs must not be symlinks")
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def load_extensions(config: Path | None) -> list[dict]:
+    if config is None:
+        return []
+    config = config.expanduser().resolve(strict=True)
+    document = json.loads(config.read_text())
+    if not isinstance(document, dict) or set(document) != {"extensions"} or not isinstance(document["extensions"], list):
+        raise BuildError("WGC build config must contain an extensions list")
+    extensions = []
+    packages = set()
+    modules = {}
+    for item in document["extensions"]:
+        if not isinstance(item, dict) or set(item) - {"package", "module", "version", "path"}:
+            raise BuildError("Invalid WGC extension entry")
+        package, module, version = item.get("package"), item.get("module"), item.get("version", "v0.0.0")
+        if (not all(isinstance(v, str) for v in (package, module, version)) or
+                not IMPORT_PATH.fullmatch(package) or not IMPORT_PATH.fullmatch(module) or
+                ".." in package or ".." in module or not VERSION.fullmatch(version) or
+                not (package == module or package.startswith(module + "/")) or
+                module in (MODULE, "github.com/sagernet/sing-box", "github.com/idy/wgc") or
+                package in packages):
+            raise BuildError("Invalid, duplicate, or reserved WGC extension module")
+        entry = {"package": package, "module": module, "version": version}
+        if "path" in item:
+            if not isinstance(item["path"], str) or not item["path"]:
+                raise BuildError("WGC extension path must be a nonempty string")
+            local = (config.parent / item["path"]).resolve(strict=True)
+            entry.update({"path": str(local), "source_sha256": source_digest(local)})
+        identity = (version, entry.get("path"))
+        if module in modules and modules[module] != identity:
+            raise BuildError("Conflicting versions or paths for a WGC extension module")
+        modules[module] = identity
+        packages.add(package)
+        extensions.append(entry)
+    return extensions
+
+
+@contextlib.contextmanager
+def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], root: Path = ROOT):
+    """Register WGC in the same libbox instance; restore upstream inputs on all exits."""
+    registry = source / "include/registry.go"
+    builder = source / "cmd/internal/build_libbox/main.go"
+    generated = source / "include/wgc_flutter.go"
+    if generated.exists():
+        raise BuildError("Unexpected WGC overlay already exists in upstream checkout")
+    paths = [registry, builder, source / "go.mod", source / "go.sum"]
+    originals = {path: path.read_bytes() for path in paths}
+    if sha256(registry) != REGISTRY_SHA256:
+        raise BuildError("Upstream registry differs from the reviewed WGC registration point")
+    marker = "\tregisterTailscaleEndpoint(registry)\n"
+    registry_text = originals[registry].decode()
+    if registry_text.count(marker) != 1:
+        raise BuildError("WGC endpoint registration hook is ambiguous")
+    builder_text = originals[builder].decode()
+    tag_marker = 'sharedTags = append(sharedTags, "with_gvisor"'
+    if builder_text.count(tag_marker) != 1:
+        raise BuildError("WGC mobile build tag hook is ambiguous")
+    deployment_marker = '"-macosversion=13.0"'
+    if builder_text.count(deployment_marker) != 1:
+        raise BuildError("Apple deployment target hook is ambiguous")
+    builder_text = builder_text.replace(deployment_marker, '"-macosversion=12.0"')
+    imports = [f'\t_ {json.dumps(item["package"])}' for item in extensions]
+    generated_text = ('// Code generated by sing-box-flutter; restored after the build.\n'
+                      'package include\n\nimport (\n'
+                      '\t"github.com/sagernet/sing-box/adapter/endpoint"\n'
+                      f'\twgc "{MODULE}"\n' + '\n'.join(imports) + '\n)\n\n'
+                      'func registerWGCEndpoint(registry *endpoint.Registry) {\n'
+                      '\twgc.RegisterEndpoint(registry)\n}\n')
+    provenance = {"module": MODULE, "source_sha256": source_digest(root / "core"),
+                  "overlay_sha256": sha256(root / "tool/wgc_overlay.py"),
+                  "upstream_registry_sha256": REGISTRY_SHA256,
+                  "extensions": [{k: v for k, v in item.items() if k != "path"} for item in extensions]}
+    try:
+        registry.write_text(registry_text.replace(marker, marker + "\tregisterWGCEndpoint(registry)\n"))
+        builder.write_text(builder_text.replace(tag_marker, 'sharedTags = append(sharedTags, "with_wgc")\n\t' + tag_marker))
+        generated.write_text(generated_text)
+        run([go, "mod", "edit", f"-require={MODULE}@v0.0.0", f"-replace={MODULE}={root / 'core'}"], cwd=source, env=env)
+        for item in extensions:
+            options = [f"-require={item['module']}@{item['version']}"]
+            if "path" in item:
+                options.append(f"-replace={item['module']}={item['path']}")
+            run([go, "mod", "edit", *options], cwd=source, env=env)
+        tidy_env = dict(env, GOFLAGS="-trimpath -buildvcs=false")
+        run([go, "mod", "tidy"], cwd=source, env=tidy_env)
+        run([go, "mod", "verify"], cwd=source, env=env)
+        provenance["go_sum_sha256"] = sha256(source / "go.sum")
+        yield provenance
+    finally:
+        for path, original in originals.items():
+            path.write_bytes(original)
+        generated.unlink(missing_ok=True)

@@ -7,8 +7,8 @@ Future<void> main(List<String> arguments) async {
     stdout.writeln('''Native core setup for sing_box_flutter.
 
 Usage:
-  dart run sing_box_flutter install --target android --release v0.1.0
-  dart run sing_box_flutter install --target apple --release v0.1.0
+  dart run sing_box_flutter install --target android --release v0.2.0
+  dart run sing_box_flutter install --target apple --release v0.2.0
   dart run sing_box_flutter build --target apple
 
 install: download and verify native release artifacts.
@@ -47,10 +47,22 @@ Python 3.11+ is required. Pass --help after a subcommand for its options.''');
     exitCode = 69;
     return;
   }
+  // Resolve caller-owned manifests before the child switches to the package.
+  final forwarded = arguments.skip(1).toList();
+  for (var index = 0; index < forwarded.length; index++) {
+    for (final option in ['--wgc-config', '--from-dir']) {
+      if (forwarded[index] == option && index + 1 < forwarded.length) {
+        forwarded[index + 1] = File(forwarded[index + 1]).absolute.path;
+      } else if (forwarded[index].startsWith('$option=')) {
+        final path = forwarded[index].substring(option.length + 1);
+        forwarded[index] = '$option=${File(path).absolute.path}';
+      }
+    }
+  }
   try {
     final process = await Process.start(
       python,
-      [executable.path, ...arguments.skip(1)],
+      [executable.path, ...forwarded],
       workingDirectory: root.path,
       mode: ProcessStartMode.inheritStdio,
     );

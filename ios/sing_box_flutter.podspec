@@ -3,7 +3,7 @@ Pod::Spec.new do |s|
   s.version          = '0.1.0'
   s.summary          = 'Native sing-box VPN integration for Flutter and iOS Packet Tunnel extensions.'
   s.description      = <<-DESC
-Flutter channels manage VPN preferences and an App Group configuration handoff.
+Flutter channels manage VPN preferences and a shared device-only Keychain configuration handoff.
 The separate PacketTunnel subspec runs the pinned libbox core in a Network Extension.
 Install the native Libbox.xcframework artifact before running pod install.
                        DESC
@@ -22,7 +22,7 @@ Install the native Libbox.xcframework artifact before running pod install.
   s.subspec 'Core' do |core|
     core.source_files = 'Classes/Shared/**/*.swift'
     core.vendored_frameworks = 'Frameworks/Libbox.xcframework'
-    core.frameworks = 'Network', 'NetworkExtension', 'Security', 'SystemConfiguration', 'CoreFoundation', 'UIKit'
+    core.frameworks = 'Network', 'NetworkExtension', 'Security', 'LocalAuthentication', 'SystemConfiguration', 'CoreFoundation', 'UIKit'
     core.libraries = 'resolv'
     core.resource_bundles = {
       'sing_box_flutter_privacy' => ['sing_box_flutter/Sources/sing_box_flutter/PrivacyInfo.xcprivacy']

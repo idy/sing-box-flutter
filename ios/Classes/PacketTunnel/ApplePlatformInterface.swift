@@ -27,9 +27,9 @@ final class ApplePlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, L
 
     func openTun(_ options: LibboxTunOptionsProtocol?, ret0_: UnsafeMutablePointer<Int32>?) throws {
         guard let options, let ret0_, let provider else { throw TunnelFailure.invalidArguments }
-        guard !hasTunnel else { throw TunnelFailure(code: "multiple_tun", message: "Only one TUN inbound is supported on iOS.") }
+        guard !hasTunnel else { throw TunnelFailure(code: "multiple_tun", message: "Only one TUN inbound is supported on Apple platforms.") }
         if !strings(options.getIncludePackage()).isEmpty || !strings(options.getExcludePackage()).isEmpty || options.getStrictRoute() {
-            throw TunnelFailure(code: "unsupported_tun_option", message: "Per-app routing and strict_route are not supported by this iOS backend.")
+            throw TunnelFailure(code: "unsupported_tun_option", message: "Per-app routing and strict_route are not supported by this Apple backend.")
         }
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
         settings.mtu = NSNumber(value: options.getMTU())
@@ -258,7 +258,13 @@ final class ApplePlatformInterface: NSObject, LibboxPlatformInterfaceProtocol, L
     func includeAllNetworks() -> Bool { provider?.protocolConfiguration.includeAllNetworks ?? false }
     func localDNSTransport() -> LibboxLocalDNSTransportProtocol? { nil }
     func readWIFIState() -> LibboxWIFIState? { nil }
-    func tailscaleHostname() -> String { "sing-box-ios" }
+    func tailscaleHostname() -> String {
+        #if os(macOS)
+        return "sing-box-macos"
+        #else
+        return "sing-box-ios"
+        #endif
+    }
     func registerMyInterface(_ name: String?) {} // No privileged helper; NE owns the utun.
 
     func findConnectionOwner(_ ipProtocol: Int32, sourceAddress: String?, sourcePort: Int32, destinationAddress: String?, destinationPort: Int32) throws -> LibboxConnectionOwner { throw TunnelFailure.unsupported }

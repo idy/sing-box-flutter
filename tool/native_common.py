@@ -22,8 +22,9 @@ TS_OMIT_TAGS = (
     "ts_omit_webclient", "ts_omit_doctor", "ts_omit_capture", "ts_omit_kube",
     "ts_omit_aws", "ts_omit_synology", "ts_omit_bird",
 )
-REQUIRED_TAGS = ("with_tailscale", "with_gvisor", "with_quic", "with_wireguard",
-                 "with_utls", "with_clash_api", *TS_OMIT_TAGS)
+UPSTREAM_REQUIRED_TAGS = ("with_tailscale", "with_gvisor", "with_quic", "with_wireguard",
+                          "with_utls", "with_clash_api", *TS_OMIT_TAGS)
+REQUIRED_TAGS = (*UPSTREAM_REQUIRED_TAGS, "with_wgc")
 ARTIFACTS = {"android": "android/libs/libbox.aar", "apple": "ios/Frameworks/Libbox.xcframework"}
 
 
@@ -48,8 +49,12 @@ def load_pins(root: Path = ROOT) -> dict:
 
 
 def pin_identity(pins: dict) -> dict:
-    return {key: pins[key] for key in ("sing_box_version", "sing_box_revision",
-                                     "tailscale_go_revision", "gomobile_version")}
+    from wgc_overlay import source_digest
+    identity = {key: pins[key] for key in ("sing_box_version", "sing_box_revision",
+                                          "tailscale_go_revision", "gomobile_version", "wgc_version")}
+    identity["wgc_source_sha256"] = source_digest(ROOT / "core")
+    identity["wgc_overlay_sha256"] = sha256(ROOT / "tool/wgc_overlay.py")
+    return identity
 
 
 def sha256(path: Path) -> str:
@@ -223,17 +228,54 @@ def artifact_hashes(path: Path) -> dict[str, str]:
     return hashes
 
 
+def sync_apple_framework(root: Path = ROOT) -> None:
+    """Expose one combined Apple framework to both CocoaPods platform folders."""
+    framework = root / ARTIFACTS["apple"]
+    if not framework.is_dir():
+        raise BuildError("Combined Apple framework is missing")
+    mirror = root / "macos/Frameworks/Libbox.xcframework"
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    if mirror.is_symlink():
+        if mirror.resolve() != framework.resolve():
+            raise BuildError("Unexpected macOS framework link")
+    elif mirror.exists():
+        if artifact_hashes(mirror) != artifact_hashes(framework):
+            raise BuildError("Different macOS framework already exists")
+    else:
+        mirror.symlink_to("../../ios/Frameworks/Libbox.xcframework", target_is_directory=True)
+
+
+def legal_files(root: Path = ROOT) -> dict[str, Path]:
+    files = {"LICENSE": root / "LICENSE", "THIRD_PARTY_NOTICES.md": root / "THIRD_PARTY_NOTICES.md"}
+    for name in ("LICENSE", "NOTICE"):
+        path = root / "core" / name
+        if path.is_file():
+            files["core/" + name] = path
+    dependencies = root / "third_party/licenses"
+    for path in sorted(dependencies.rglob("*")):
+        if path.is_file():
+            files["dependencies/" + path.relative_to(dependencies).as_posix()] = path
+    return files
+
+
 def archive_name(pins: dict, target: str) -> str:
     return f"libbox-{pins['sing_box_version']}-{target}.tar.gz"
 
 
-def validate_metadata(metadata: dict, pins: dict, target: str) -> None:
+def validate_metadata(metadata: dict, pins: dict, target: str, *, allow_custom: bool = False) -> None:
     if (metadata.get("schema") != 1 or metadata.get("target") != target
             or metadata.get("pins") != pin_identity(pins)):
         raise BuildError("Release metadata does not match project pins/target")
     dependency = metadata.get("tailscale_dependency", {})
     if pins["tailscale_go_revision"] not in (dependency.get("toolchain_revision"), dependency.get("next_toolchain_revision")):
         raise BuildError("Release Tailscale dependency runtime contract differs from the toolchain pin")
+    wgc = metadata.get("wgc", {})
+    expected = pin_identity(pins)
+    if (wgc.get("source_sha256") != expected["wgc_source_sha256"]
+            or wgc.get("overlay_sha256") != expected["wgc_overlay_sha256"]):
+        raise BuildError("Release WGC source/registration overlay differs from this package")
+    if not allow_custom and wgc.get("extensions") != []:
+        raise BuildError("Custom WGC extensions require a local build, not the official release installer")
     tags = metadata.get("tags", [])
     if not set(REQUIRED_TAGS).issubset(tags):
         raise BuildError("Release metadata is missing required mobile features")

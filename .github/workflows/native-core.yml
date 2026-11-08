@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - native-core.json
+      - core/**
+      - ios/**
+      - macos/**
+      - third_party/**
       - tool/**
       - tests/**
       - .github/workflows/native-core.yml
@@ -32,10 +36,10 @@ jobs:
       - name: Inspect build and install plans
         run: |
           python3 -B tool/build_libbox.py --target all --dry-run
-          python3 -B tool/install_libbox.py --target all --release v0.1.0 --dry-run
+          python3 -B tool/install_libbox.py --target all --release v0.2.0 --dry-run
 
   build:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     needs: validate
     strategy:
       fail-fast: false
@@ -52,7 +56,7 @@ jobs:
         id: select
         shell: bash
         run: |
-          if [ '${{ inputs.target }}' = 'all' ] || [ '${{ inputs.target }}' = '${{ matrix.target }}' ]; then
+          if [ '${{ github.event_name }}' = 'pull_request' ] || [ '${{ inputs.target }}' = 'all' ] || [ '${{ inputs.target }}' = '${{ matrix.target }}' ]; then
             printf 'enabled=true\n' >> "$GITHUB_OUTPUT"
           else
             printf 'enabled=false\n' >> "$GITHUB_OUTPUT"
@@ -117,6 +121,13 @@ jobs:
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
         working-directory: example/android
         run: bash gradlew :sing_box_flutter:testDebugUnitTest
+      - name: Check Apple Keychain and shared provider integration
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'apple'
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter precache --ios --macos
+          bash ios/Tests/run-apple-tests.sh 2>&1 | tee .build/logs/apple-security-and-link.log
       - name: Execute Apple native runtime smoke
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'apple'
         shell: bash
@@ -145,7 +156,7 @@ jobs:
             .build/logs/*.log
 
   release-inputs:
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'all'
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'all')
     needs: build
     runs-on: ubuntu-24.04
     steps:

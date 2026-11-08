@@ -18,7 +18,7 @@ sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, RELEASE_REPO, ROOT, archive_name,
                            artifact_hashes, build_directory, download, load_pins,
                            parse_manifest, project_lock, safe_extract, sha256,
-                           validate_metadata, write_json)
+                           sync_apple_framework, validate_metadata, write_json)
 
 
 def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: Path,
@@ -50,16 +50,18 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
         # Do not allow a release to install anything except its declared artifact.
         for path in staging.rglob("*"):
             name_in_archive = path.relative_to(staging).as_posix()
-            if (name_in_archive in ("native-build.json", "LICENSE.sing-box") or name_in_archive == relative
+            if (name_in_archive in ("native-build.json", "LICENSE.sing-box", "Legal") or name_in_archive.startswith("Legal/") or name_in_archive == relative
                     or name_in_archive.startswith(relative + "/")
                     or (path.is_dir() and relative.startswith(name_in_archive + "/"))):
                 continue
             raise BuildError("Release archive contains an unexpected file")
         metadata = json.loads((staging / "native-build.json").read_text())
-        validate_metadata(metadata, pins, target)
+        validate_metadata(metadata, pins, target, allow_custom=isinstance(source, Path))
         license_path = staging / "LICENSE.sing-box"
         if not license_path.is_file() or sha256(license_path) != metadata.get("license_sha256"):
             raise BuildError("Release upstream license is missing or changed")
+        if artifact_hashes(staging / "Legal") != metadata.get("legal_sha256"):
+            raise BuildError("Release WGC/dependency license notices are missing or changed")
         artifact = staging / relative
         if artifact_hashes(artifact) != metadata.get("artifact_sha256"):
             raise BuildError("Release artifact does not match its build metadata")
@@ -88,6 +90,13 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
                     backup.rename(destination)
                 raise
             print(f"{target}: installed {relative}")
+        if target == "apple":
+            sync_apple_framework()
+        legal_destination = ROOT / ".build/legal" / target
+        legal_destination.parent.mkdir(parents=True, exist_ok=True)
+        if legal_destination.exists():
+            shutil.rmtree(legal_destination)
+        shutil.copytree(staging / "Legal", legal_destination)
         write_json(cache / "installed" / f"{target}.json", {
             "schema": 1, "release_source": release_source, "manifest_sha256": manifest_sha256,
             "download": provenance, "build": metadata,

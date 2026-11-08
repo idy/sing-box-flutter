@@ -5,7 +5,9 @@ separately signed Packet Tunnel Network Extension are required for a real VPN.
 The plugin does not create an extension target or provision Apple capabilities.
 
 The Flutter process manages VPN preferences with `NETunnelProviderManager`, checks
-configuration with libbox, and passes configuration through an App Group container.
+configuration with libbox, and stores the configuration in a device-only shared
+Keychain item. VPN preferences carry its opaque persistent reference. The App Group
+contains runtime directories and status.
 The actual sing-box service, TUN descriptor, and network monitor run exclusively in
 the extension process. Canceling a Flutter event subscription, detaching its engine,
 or terminating the host app does not stop the VPN.
@@ -57,6 +59,10 @@ Both targets' entitlements include:
 <key>com.apple.security.application-groups</key>
 <array>
   <string>group.dev.example.app</string>
+</array>
+<key>keychain-access-groups</key>
+<array>
+  <string>$(AppIdentifierPrefix)dev.example.app.vpn</string>
 </array>
 <key>com.apple.developer.networking.networkextension</key>
 <array>
@@ -140,6 +146,7 @@ final vpn = SingBoxFlutter();
 await vpn.initialize(
   appGroup: 'group.dev.example.app',
   providerBundleIdentifier: 'dev.example.app.PacketTunnel',
+  keychainAccessGroup: 'TEAMID.dev.example.app.vpn',
   notificationTitle: 'Example VPN',
 );
 final allowed = await vpn.requestPermission();
@@ -157,9 +164,12 @@ configuration fails startup rather than reporting a packet tunnel connection.
 `initialize` to complete. VPN consent cancellation returns `false`; signing,
 configuration, and preference failures return a platform error.
 
-Each start writes an atomic, versioned App Group configuration with a new session
-identifier. The provider can load it when started from iOS Settings without a
-running Flutter engine. Calling `start` while the tunnel is active or transitioning
+Each start updates an owner-scoped Keychain item and saves its persistent reference
+and a new non-secret session identifier in VPN preferences. The provider can load
+it when started from iOS Settings without a running Flutter engine. Use the fully
+expanded access group (for example `TEAMID.dev.example.app.vpn`) in Dart; use
+`$(AppIdentifierPrefix)dev.example.app.vpn` in both targets' Keychain entitlements.
+Both targets must be entitled for the same resolved group. Calling `start` while the tunnel is active or transitioning
 returns `busy`; wait for `disconnected` after `stop` before changing configuration.
 The plugin serializes method requests, and the extension serializes libbox
 start/stop/sleep/wake operations. It observes OS connection changes, including VPN
@@ -195,15 +205,20 @@ provider's startup result, with a bounded timeout for message replies.
 
 ## Shared data and diagnostics
 
-The group contains `SingBoxFlutter/configuration.json`, `status.json`, isolated
-`Validation` directories for host-side config checks, and `Runtime` directories for
-the extension. The directory is excluded from backups and uses
-`completeUntilFirstUserAuthentication` data protection with restricted POSIX
-permissions. This supports reconnecting while the device is locked after the first
-unlock. Configurations, Tailscale state, libbox crash reports, and core snapshots
-can contain credentials. Treat the App Group as sensitive storage and do not
-upload its contents as unredacted diagnostics. The last configuration is retained
-after stop so the system can start the saved VPN again.
+The group contains `SingBoxFlutter/status.json`, isolated `Validation` directories
+for host-side config checks, and `Runtime` directories for the extension. The full
+configuration is retained in a shared, non-synchronizable device-only Keychain item
+so the system can restart the VPN after first unlock. The provider verifies the
+item's service, derived account, access group, accessibility, and session identity.
+
+For existing 0.1.0 profiles, `requestPermission` migrates the old
+`configuration.json` once and removes it only after the Keychain reference is saved
+and reloaded successfully. The extension never reads that plaintext file.
+
+The runtime directory is excluded from backups and has restricted POSIX permissions
+and first-unlock file protection on iOS. Tailscale state, libbox crash reports, and
+core snapshots may still contain credentials. Treat the App Group as sensitive
+storage and do not upload its contents as unredacted diagnostics.
 
 Flutter errors and events use fixed, bounded messages rather than upstream error
 text, because parse errors can echo JSON or authentication keys. Check signing,

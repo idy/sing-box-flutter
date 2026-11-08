@@ -29,6 +29,7 @@ class VpnExample extends StatefulWidget {
 class _VpnExampleState extends State<VpnExample> {
   static const appGroup = String.fromEnvironment('APP_GROUP');
   static const provider = String.fromEnvironment('TUNNEL_BUNDLE_ID');
+  static const keychainGroup = String.fromEnvironment('KEYCHAIN_ACCESS_GROUP');
   final _plugin = SingBoxFlutter();
   final _config = TextEditingController(text: defaultConfiguration);
   StreamSubscription<VpnStatus>? _subscription;
@@ -58,16 +59,20 @@ class _VpnExampleState extends State<VpnExample> {
 
   Future<void> _initialize() async {
     if (_initialized) return;
-    if (defaultTargetPlatform == TargetPlatform.iOS &&
-        (appGroup.isEmpty || provider.isEmpty)) {
+    final apple = defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.macOS;
+    if (apple &&
+        (appGroup.isEmpty || provider.isEmpty || keychainGroup.isEmpty)) {
       throw StateError(
         'Configure the Packet Tunnel target, then set APP_GROUP and '
-        'TUNNEL_BUNDLE_ID with --dart-define. See doc/ios-setup.md.',
+        'TUNNEL_BUNDLE_ID and KEYCHAIN_ACCESS_GROUP with --dart-define. '
+        'See doc/ios-setup.md.',
       );
     }
     await _plugin.initialize(
       appGroup: appGroup.isEmpty ? null : appGroup,
       providerBundleIdentifier: provider.isEmpty ? null : provider,
+      keychainAccessGroup: keychainGroup.isEmpty ? null : keychainGroup,
       notificationTitle: 'sing_box_flutter example',
     );
     _subscription = _plugin.status.listen(

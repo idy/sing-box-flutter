@@ -27,11 +27,13 @@ void main() {
     await plugin.initialize(
       appGroup: 'group.dev.idy.example',
       providerBundleIdentifier: 'dev.idy.example.PacketTunnel',
+      keychainAccessGroup: 'TEAMID.dev.idy.example.vpn',
     );
     expect(calls.map((call) => call.method), ['initialize']);
     expect(calls.single.arguments, {
       'appGroup': 'group.dev.idy.example',
       'providerBundleIdentifier': 'dev.idy.example.PacketTunnel',
+      'keychainAccessGroup': 'TEAMID.dev.idy.example.vpn',
       'notificationTitle': 'sing-box',
     });
   });

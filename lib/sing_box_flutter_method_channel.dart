@@ -26,12 +26,15 @@ class MethodChannelSingBoxFlutter extends SingBoxFlutterPlatform {
   Future<void> initialize({
     String? appGroup,
     String? providerBundleIdentifier,
+    String? keychainAccessGroup,
     required String notificationTitle,
   }) =>
       methodChannel.invokeMethod<void>('initialize', {
         if (appGroup != null) 'appGroup': appGroup,
         if (providerBundleIdentifier != null)
           'providerBundleIdentifier': providerBundleIdentifier,
+        if (keychainAccessGroup != null)
+          'keychainAccessGroup': keychainAccessGroup,
         'notificationTitle': notificationTitle,
       });
 
