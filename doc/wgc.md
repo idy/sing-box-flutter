@@ -69,7 +69,10 @@ Compile the registration package through a build manifest:
 Remote entries require both checksum pins. Obtain `Sum` and `GoModSum` from
 `go mod download -json` using a trusted module source, then review and commit them
 as `sum` and `go_mod_sum` in the manifest. The build enforces these values even
-when `GOPRIVATE` or `GONOSUMDB` disables the public checksum database.
+when `GOPRIVATE` or `GONOSUMDB` disables the public checksum database. Commit the
+module's complete `go.sum` as well: its authenticated dependency checksums are
+promoted into the main build. Any resolved checksum missing from the trusted
+upstream, adapter or extension locks is rejected before compilation.
 
 ```bash
 dart run sing_box_flutter build --target apple --wgc-config wgc.core.json

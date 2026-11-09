@@ -49,10 +49,10 @@ def load_pins(root: Path = ROOT) -> dict:
 
 
 def pin_identity(pins: dict) -> dict:
-    from wgc_overlay import source_digest
+    from source_inputs import adapter_digest
     identity = {key: pins[key] for key in ("sing_box_version", "sing_box_revision",
                                           "tailscale_go_revision", "gomobile_version", "wgc_version")}
-    identity["wgc_source_sha256"] = source_digest(ROOT / "native/wgc")
+    identity["wgc_source_sha256"] = adapter_digest(ROOT / "native/wgc")
     identity["wgc_overlay_sha256"] = sha256(ROOT / "tool/wgc_overlay.py")
     return identity
 

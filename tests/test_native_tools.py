@@ -16,7 +16,136 @@ from native_common import (ARTIFACTS, BuildError, ROOT, REQUIRED_TAGS, archive_n
                            build_directory, load_pins, parse_manifest, pin_identity, safe_extract,
                            sha256, validate_metadata)
 from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, resolved_tailscale_dependency, verify_dependency_toolchain
+from source_inputs import ADAPTER_INPUTS, adapter_digest, source_digest
 import install_libbox
+
+
+class SourceInputTests(unittest.TestCase):
+    CONTENTS = {
+        "endpoint.go": b"package wgc\n",
+        "endpoint_test.go": b"package wgc\n// endpoint tests\n",
+        "rebind.go": b"package wgc\n// rebind\n",
+        "rebind_test.go": b"package wgc\n// rebind tests\n",
+        "transport.go": b"package wgc\n// transport\n",
+        "go.mod": b"module example.com/wgc\n",
+        "go.sum": b"example.com/dependency v1.0.0 h1:fixture\n",
+    }
+
+    def adapter_fixture(self, root, *, reverse=False):
+        root.mkdir(parents=True)
+        for name in sorted(self.CONTENTS, reverse=reverse):
+            (root / name).write_bytes(self.CONTENTS[name])
+        return root
+
+    def test_canonical_digest_preserves_framing_and_creation_order(self):
+        self.assertEqual(ADAPTER_INPUTS, set(self.CONTENTS))
+        expected = "9be2dd5774320f3515b49ebaf02cd83c312d74aca57bfbeea62c874f0c9b3d67"
+        with tempfile.TemporaryDirectory() as temp:
+            for reverse in (False, True):
+                root = self.adapter_fixture(Path(temp) / str(reverse), reverse=reverse)
+                with self.subTest(reverse=reverse):
+                    self.assertEqual(adapter_digest(root), expected)
+                    self.assertEqual(source_digest(root), expected)
+
+    def test_vcs_metadata_does_not_change_published_adapter_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.adapter_fixture(Path(temp) / "adapter")
+            before = adapter_digest(root)
+            (root / ".git").write_text("gitdir: /checkout/.git/worktrees/adapter\n")
+            for name in (".hg", ".svn"):
+                (root / name).mkdir()
+                (root / name / "metadata").write_bytes(b"checkout-only data")
+            self.assertEqual(adapter_digest(root), before)
+
+    def test_pub_ignored_debug_log_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.adapter_fixture(Path(temp) / "adapter")
+            before = adapter_digest(root)
+            (root / "debug.log").write_bytes(b"checkout-only debug output\n")
+            self.assertNotEqual(source_digest(root), before)
+            with self.assertRaisesRegex(BuildError, r"unexpected: debug\.log"):
+                adapter_digest(root)
+
+    def test_missing_canonical_inputs_are_named(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.adapter_fixture(Path(temp) / "adapter")
+            for name, content in self.CONTENTS.items():
+                with self.subTest(name=name):
+                    (root / name).unlink()
+                    with self.assertRaisesRegex(BuildError, "missing: " + name.replace(".", r"\.")):
+                        adapter_digest(root)
+                    (root / name).write_bytes(content)
+
+    def test_each_canonical_input_contributes_to_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.adapter_fixture(Path(temp) / "adapter")
+            before = adapter_digest(root)
+            for name, content in self.CONTENTS.items():
+                with self.subTest(name=name):
+                    (root / name).write_bytes(content + b"// changed\n")
+                    self.assertNotEqual(adapter_digest(root), before)
+                    (root / name).write_bytes(content)
+
+    def test_unexpected_source_files_and_directories_are_rejected(self):
+        for name in ("extra.go", "assets"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = self.adapter_fixture(Path(temp) / "adapter")
+                extra = root / name
+                if name == "assets":
+                    extra.mkdir()
+                    (extra / "payload.bin").write_bytes(b"\0\xff")
+                else:
+                    extra.write_text("package wgc\n")
+                with self.assertRaisesRegex(BuildError, "unexpected: " + name.replace(".", r"\.")):
+                    adapter_digest(root)
+
+    def test_canonical_paths_must_be_regular_files_without_symlinks(self):
+        for kind in ("directory", "symlink", "dangling-symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                root = self.adapter_fixture(Path(temp) / "adapter")
+                path = root / "endpoint.go"
+                path.unlink()
+                if kind == "directory":
+                    path.mkdir()
+                else:
+                    target = Path(temp) / "outside.go"
+                    if kind == "symlink":
+                        target.write_bytes(self.CONTENTS["endpoint.go"])
+                    path.symlink_to(target)
+                with self.assertRaisesRegex(BuildError, r"regular file.*endpoint\.go"):
+                    adapter_digest(root)
+
+    def test_missing_and_symlinked_adapter_roots_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaisesRegex(BuildError, "directory is missing"):
+                adapter_digest(root / "missing")
+            actual = self.adapter_fixture(root / "actual")
+            (root / "link").symlink_to(actual, target_is_directory=True)
+            with self.assertRaisesRegex(BuildError, "directory must not be a symlink"):
+                adapter_digest(root / "link")
+
+    def test_pin_identity_checks_adapter_inputs_before_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            adapter = self.adapter_fixture(root / "native/wgc")
+            (root / "tool").mkdir()
+            (root / "tool/wgc_overlay.py").write_bytes(b"overlay fixture\n")
+            pins = load_pins()
+            with mock.patch("native_common.ROOT", root):
+                before = pin_identity(pins)
+                self.assertEqual(before["wgc_source_sha256"], adapter_digest(adapter))
+                (adapter / "debug.log").write_bytes(b"debug output\n")
+                with self.assertRaisesRegex(BuildError, r"unexpected: debug\.log"):
+                    pin_identity(pins)
+                (adapter / "debug.log").unlink()
+                (adapter / "endpoint.go").unlink()
+                with self.assertRaisesRegex(BuildError, r"missing: endpoint\.go"):
+                    pin_identity(pins)
+                (adapter / "endpoint.go").write_bytes(b"package wgc\n// changed\n")
+                after = pin_identity(pins)
+                self.assertEqual(after["wgc_source_sha256"], adapter_digest(adapter))
+                self.assertNotEqual(after["wgc_source_sha256"], before["wgc_source_sha256"])
 
 
 class PinTests(unittest.TestCase):

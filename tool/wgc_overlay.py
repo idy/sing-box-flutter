@@ -2,46 +2,20 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
 import tempfile
 
 from native_common import BuildError, ROOT, build_directory, sha256
+from source_inputs import adapter_digest, source_digest
 
 MODULE = "github.com/idy/sing-box-flutter/native/wgc"
 REGISTRY_SHA256 = "cbc7bc06391fe555828782df7bc1ce0844e446a82647448739dbb3e8e3eef19e"
 IMPORT_PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]+$")
 VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*$")
 CHECKSUM = re.compile(r"^h1:[A-Za-z0-9+/]{43}=$")
-
-
-def source_digest(root: Path) -> str:
-    """Conservatively hash module contents, including assembly and embedded data."""
-    if not (root / "go.mod").is_file():
-        raise BuildError("WGC source module is missing")
-    files = []
-    vcs = {".git", ".hg", ".svn"}
-    for directory, folders, names in os.walk(root):
-        folders[:] = sorted(name for name in folders if name not in vcs)
-        for name in [*folders, *names]:
-            path = Path(directory) / name
-            if name not in vcs and path.is_symlink():
-                raise BuildError("WGC source inputs must not be symlinks")
-        files.extend(Path(directory) / name for name in names
-                     if name not in vcs and (Path(directory) / name).is_file())
-    files.sort()
-    digest = hashlib.sha256()
-    for path in files:
-        if path.is_symlink():
-            raise BuildError("WGC source inputs must not be symlinks")
-        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def extension_checksums(entry: dict) -> dict[str, str]:
@@ -118,6 +92,31 @@ def seed_module_checksums(source: Path, module: str, locked: dict[str, str]) -> 
     sums.write_text(original + ("\n" if original and not original.endswith("\n") else "") + additions)
 
 
+def checksum_entries(text: str) -> dict[tuple[str, str], str]:
+    entries = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 3 or not parts[1].startswith("v") or not parts[2].startswith("h1:"):
+            continue
+        key, value = (parts[0], parts[1]), parts[2]
+        if key in entries and entries[key] != value:
+            raise BuildError("Conflicting entries in module checksum lock")
+        entries[key] = value
+    return entries
+
+
+def pin_checksum_text(source: Path, text: str, trusted: dict) -> None:
+    grouped = {}
+    for key, value in checksum_entries(text).items():
+        if key in trusted and trusted[key] != value:
+            raise BuildError("Dependency checksum conflicts with the authenticated lock")
+        trusted[key] = value
+        module, version = key
+        grouped.setdefault(module, {})[version] = value
+    for module, locked in grouped.items():
+        seed_module_checksums(source, module, locked)
+
+
 def seed_wgc_checksums(source: Path, root: Path, module_root: Path | None = None) -> None:
     version = json.loads((root / "native-core.json").read_text())["wgc_version"]
     wanted = {version, version + "/go.mod"}
@@ -159,7 +158,7 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
                       f'\twgc "{MODULE}"\n' + '\n'.join(imports) + '\n)\n\n'
                       'func registerWGCEndpoint(registry *endpoint.Registry) {\n'
                       '\twgc.RegisterEndpoint(registry)\n}\n')
-    provenance = {"module": MODULE, "source_sha256": source_digest(root / "native/wgc"),
+    provenance = {"module": MODULE, "source_sha256": adapter_digest(root / "native/wgc"),
                   "overlay_sha256": sha256(root / "tool/wgc_overlay.py"),
                   "upstream_registry_sha256": REGISTRY_SHA256,
                   "extensions": [{k: v for k, v in item.items() if k != "path"} for item in extensions]}
@@ -183,18 +182,44 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
             if "path" in item:
                 options.append(f"-replace={item['module']}={item['path']}")
             run([go, "mod", "edit", *options], cwd=source, env=env)
-        # Go reads the main module's go.sum, including when private scopes skip sumdb.
+        # Go reads only the main module's sums, so promote authenticated module locks.
+        trusted = checksum_entries(originals[source / "go.sum"].decode())
+        pin_checksum_text(source, (adapter_snapshot / "go.sum").read_text(), trusted)
         seed_wgc_checksums(source, root, adapter_snapshot)
         for item in prepared:
             if "path" not in item:
-                seed_module_checksums(source, item["module"], extension_checksums(item))
+                locked = extension_checksums(item)
+                seed_module_checksums(source, item["module"], locked)
+                trusted.update({(item["module"], version): value for version, value in locked.items()})
+        for item in prepared:
+            if "path" in item:
+                module_root = Path(item["path"])
+            else:
+                downloaded = json.loads(run([go, "mod", "download", "-json", f"{item['module']}@{item['version']}"],
+                                            cwd=source, env=env, capture=True))
+                if downloaded.get("Sum") != item["sum"] or downloaded.get("GoModSum") != item["go_mod_sum"]:
+                    raise BuildError("Downloaded WGC extension does not match its pinned checksums")
+                module_root = Path(downloaded["Dir"])
+            dependency_sums = module_root / "go.sum"
+            if dependency_sums.is_file():
+                pin_checksum_text(source, dependency_sums.read_text(), trusted)
         tidy_env = dict(env, GOFLAGS="-trimpath -buildvcs=false")
         run([go, "mod", "tidy"], cwd=source, env=tidy_env)
-        for item in extensions:
-            selected = run([go, "list", "-m", "-f", "{{.Version}}", item["module"]],
-                           cwd=source, env=env, capture=True)
-            if selected != item["version"]:
-                raise BuildError(f"WGC extension {item['module']} resolved to {selected}, expected {item['version']}")
+        for item in prepared:
+            selected = json.loads(run([go, "list", "-m", "-json", item["module"]],
+                                      cwd=source, env=env, capture=True))
+            if selected.get("Version") != item["version"]:
+                raise BuildError(f"WGC extension {item['module']} resolved to {selected.get('Version')}, expected {item['version']}")
+            if "path" in item:
+                if Path(selected.get("Dir", "")).resolve() != Path(item["path"]).resolve():
+                    raise BuildError("Local WGC extension resolved outside its verified snapshot")
+            elif (selected.get("Replace") or selected.get("Sum") != item["sum"] or
+                    selected.get("GoModSum") != item["go_mod_sum"]):
+                raise BuildError("Resolved WGC extension source differs from its pinned module")
+        if extensions:
+            for key, value in checksum_entries((source / "go.sum").read_text()).items():
+                if trusted.get(key) != value:
+                    raise BuildError(f"Unpinned extension dependency {key[0]}@{key[1]}; update the module go.sum from a trusted source")
         run([go, "mod", "verify"], cwd=source, env=env)
         provenance["go_sum_sha256"] = sha256(source / "go.sum")
         yield provenance
