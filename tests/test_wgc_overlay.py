@@ -14,6 +14,7 @@ from wgc_overlay import MODULE, load_extensions, source_digest, wgc_overlay
 from source_inputs import ADAPTER_INPUTS
 
 EXTENSION_LOCK = {"sum": "h1:" + "A" * 43 + "=", "go_mod_sum": "h1:" + "B" * 42 + "A="}
+WGC_LOCK = {"v1.2.3": EXTENSION_LOCK["sum"], "v1.2.3/go.mod": EXTENSION_LOCK["go_mod_sum"]}
 
 
 class OverlayTests(unittest.TestCase):
@@ -35,7 +36,7 @@ class OverlayTests(unittest.TestCase):
         (root / "native/wgc").mkdir(parents=True)
         (root / "native/wgc/go.mod").write_text("module github.com/idy/sing-box-flutter/native/wgc\n")
         (root / "native-core.json").write_text(json.dumps({"wgc_version": "v1.2.3"}))
-        (root / "native/wgc/go.sum").write_text("github.com/idy/wgc v1.2.3 h1:locked-module\ngithub.com/idy/wgc v1.2.3/go.mod h1:locked-mod\n")
+        (root / "native/wgc/go.sum").write_text("".join(f"github.com/idy/wgc {version} {checksum}\n" for version, checksum in WGC_LOCK.items()))
         for name in ADAPTER_INPUTS - {"go.mod", "go.sum"}:
             (root / "native/wgc" / name).write_text("package core\n")
         (root / "tool").mkdir()
@@ -61,8 +62,8 @@ class OverlayTests(unittest.TestCase):
             def fake_run(args, **kwargs):
                 if args[1:3] == ["mod", "tidy"]:
                     self.assertEqual(kwargs["env"]["GONOSUMDB"], "github.com/idy/wgc")
-                    self.assertIn("github.com/idy/wgc v1.2.3 h1:locked-module", (source / "go.sum").read_text())
-                    self.assertIn("github.com/idy/wgc v1.2.3/go.mod h1:locked-mod", (source / "go.sum").read_text())
+                    for version, checksum in WGC_LOCK.items():
+                        self.assertIn(f"github.com/idy/wgc {version} {checksum}", (source / "go.sum").read_text())
                     (source / "go.sum").write_text("new dependency checksums\n")
                 return ""
             with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
@@ -181,13 +182,43 @@ class OverlayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source, registry, _ = self.fixture(root)
-            (root / "native/wgc/go.sum").write_text("github.com/idy/wgc v1.2.3 h1:locked-module\n")
+            (root / "native/wgc/go.sum").write_text(f"github.com/idy/wgc v1.2.3 {WGC_LOCK['v1.2.3']}\n")
             runner = mock.Mock(return_value="")
             with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
                 with self.assertRaisesRegex(BuildError, "checksums are required"):
                     with wgc_overlay(source, Path("go"), {}, runner, [], root):
                         self.fail("Missing WGC lock reached resolution")
             self.assertFalse(any(call.args[0][1:3] == ["mod", "tidy"] for call in runner.call_args_list))
+
+    def test_invalid_wgc_checksum_formats_fail_before_resolution_and_restore_inputs(self):
+        invalid = [
+            "h2:" + "A" * 43 + "=",  # Unsupported hash algorithm.
+            "sha256:" + "0" * 64,
+            "h1:short",
+            "h1:" + "A" * 42 + "*=",  # Invalid Base64 alphabet.
+            "h1:" + "A" * 43,  # Missing padding.
+            "h1:" + "A" * 42 + "==",  # Wrong digest length.
+            "h1:" + "A" * 42 + "B=",  # Nonzero Base64 padding bits.
+        ]
+        for version in WGC_LOCK:
+            for checksum in invalid:
+                with self.subTest(version=version, checksum=checksum), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    source, registry, builder = self.fixture(root)
+                    locked = dict(WGC_LOCK, **{version: checksum})
+                    (root / "native/wgc/go.sum").write_text("".join(
+                        f"github.com/idy/wgc {v} {value}\n" for v, value in locked.items()))
+                    originals = {p: p.read_bytes() for p in [registry, builder, source / "go.mod", source / "go.sum"]}
+                    runner = mock.Mock(return_value="")
+                    with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                        with self.assertRaisesRegex(BuildError, "must use valid h1"):
+                            with wgc_overlay(source, Path("go"), {"GONOSUMDB": "github.com/idy/wgc"}, runner, [], root):
+                                self.fail("Invalid WGC checksum reached compilation")
+                    self.assertTrue(all(call.args[0][1:3] == ["mod", "edit"] for call in runner.call_args_list))
+                    for path, original in originals.items():
+                        self.assertEqual(path.read_bytes(), original)
+                    self.assertFalse((source / "include/wgc_flutter.go").exists())
+                    self.assertFalse((source / ".wgc-inputs").exists())
 
     def test_remote_checksum_conflicts_fail_before_resolution(self):
         for suffix in ("", "/go.mod"):

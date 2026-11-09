@@ -14,7 +14,8 @@ MODULE = "github.com/idy/sing-box-flutter/native/wgc"
 REGISTRY_SHA256 = "cbc7bc06391fe555828782df7bc1ce0844e446a82647448739dbb3e8e3eef19e"
 IMPORT_PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]+$")
 VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*$")
-CHECKSUM = re.compile(r"^h1:[A-Za-z0-9+/]{43}=$")
+# A SHA-256 digest encodes as 43 Base64 characters with two zero padding bits.
+CHECKSUM = re.compile(r"^h1:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$")
 
 
 def extension_checksums(entry: dict) -> dict[str, str]:
@@ -124,6 +125,8 @@ def seed_wgc_checksums(source: Path, root: Path, module_root: Path | None = None
     for line in lock_file.read_text().splitlines():
         fields = line.split()
         if len(fields) == 3 and fields[0] == "github.com/idy/wgc" and fields[1] in wanted:
+            if not CHECKSUM.fullmatch(fields[2]):
+                raise BuildError("Checked-in WGC module and go.mod checksums must use valid h1 SHA-256 hashes")
             locked[fields[1]] = fields[2]
     if set(locked) != wanted:
         raise BuildError("Checked-in WGC module and go.mod checksums are required")
