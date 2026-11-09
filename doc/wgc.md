@@ -64,8 +64,9 @@ Compile the registration package through a build manifest:
 dart run sing_box_flutter build --target apple --wgc-config wgc.core.json
 ```
 
-A local extension may specify `path`, relative to the manifest. Export private
-module settings such as `GOPRIVATE`; Git/SSH credentials remain in the normal
+A local extension may specify `path`, relative to the manifest, and omit `version`.
+The default matches the module's major version, such as `v2.0.0` for a `/v2` module.
+Export private module settings such as `GOPRIVATE`; Git/SSH credentials remain in the normal
 user environment, not the manifest. `GONOPROXY`, `GONOSUMDB`, and explicit
 `GOPROXY` settings are retained under the pinned Go toolchain. Build support and
 local encrypted round trips do not establish signed-device VPN acceptance.

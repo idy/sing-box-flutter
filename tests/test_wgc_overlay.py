@@ -149,6 +149,25 @@ class ExtensionTests(unittest.TestCase):
             self.assertEqual(entries[0]["source_sha256"], source_digest(extension))
             self.assertEqual(entries[0]["version"], "v0.0.0")
 
+    def test_local_extension_versions_match_the_module_major(self):
+        for module, explicit, expected in [
+            ("example.com/transport/v2", None, "v2.0.0"),
+            ("example.com/transport/v10", None, "v10.0.0"),
+            ("gopkg.in/transport.v3", None, "v3.0.0"),
+            ("example.com/transport/v2", "v2.7.3", "v2.7.3"),
+        ]:
+            with self.subTest(module=module, explicit=explicit), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                extension = root / "transport"
+                extension.mkdir()
+                (extension / "go.mod").write_text(f"module {module}\n")
+                entry = {"package": module + "/register", "module": module, "path": "transport"}
+                if explicit is not None:
+                    entry["version"] = explicit
+                config = root / "wgc.core.json"
+                config.write_text(json.dumps({"extensions": [entry]}))
+                self.assertEqual(load_extensions(config)[0]["version"], expected)
+
     def test_arbitrary_go_imports_and_reserved_modules_are_rejected(self):
         for package, module in [("bad\"\nimport os", "example.com/bad"),
                                 ("example.com/a/../b", "example.com/a"),

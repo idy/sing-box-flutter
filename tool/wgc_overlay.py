@@ -55,6 +55,11 @@ def load_extensions(config: Path | None) -> list[dict]:
         if not isinstance(item, dict) or set(item) - {"package", "module", "version", "path"}:
             raise BuildError("Invalid WGC extension entry")
         package, module, version = item.get("package"), item.get("module"), item.get("version", "v0.0.0")
+        if "version" not in item and isinstance(module, str):
+            pattern = r"\.v([0-9]+)(?:-unstable)?$" if module.startswith("gopkg.in/") else r"/v([1-9][0-9]*)$"
+            suffix = re.search(pattern, module)
+            if suffix:
+                version = f"v{suffix[1]}.0.0"
         if (not all(isinstance(v, str) for v in (package, module, version)) or
                 not IMPORT_PATH.fullmatch(package) or not IMPORT_PATH.fullmatch(module) or
                 ".." in package or ".." in module or not VERSION.fullmatch(version) or
