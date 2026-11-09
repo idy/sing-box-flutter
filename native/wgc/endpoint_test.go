@@ -230,45 +230,69 @@ func TestStockWireGuardRoundTripThroughRegisteredTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer udp.Close()
-	var packet []byte
-	for attempt := 0; attempt < 8 && packet == nil; attempt++ {
-		if _, err := udp.Write([]byte("sing-box-wgc")); err != nil {
-			t.Fatal(err)
+	originalConnection, originalDevice := ep.conn, ep.device
+	for round := 0; round < 2; round++ {
+		if round == 1 {
+			previous, changed := ep.binding.snapshot()
+			// Model the old interface disappearing before its update notification.
+			_ = previous.Transport.Close()
+			ep.InterfaceUpdated(ctx)
+			select {
+			case <-changed:
+			case <-ctx.Done():
+				t.Fatal("handover did not reopen the transport")
+			}
 		}
-		select {
-		case packet = <-tun.received:
-		case <-time.After(300 * time.Millisecond):
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
+		payload := fmt.Sprintf("sing-box-wgc-%d", round)
+		var packet []byte
+		for attempt := 0; attempt < 8 && packet == nil; attempt++ {
+			if _, err := udp.Write([]byte(payload)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case candidate := <-tun.received:
+				if len(candidate) >= 28 {
+					headerLength := int(candidate[0]&15) * 4
+					if headerLength+8 <= len(candidate) && bytes.Equal(candidate[headerLength+8:], []byte(payload)) {
+						packet = candidate
+					}
+				}
+			case <-time.After(300 * time.Millisecond):
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		}
+		if len(packet) < 28 || packet[0]>>4 != 4 || packet[9] != 17 {
+			t.Fatal("stock peer did not receive IPv4 UDP")
+		}
+		h := int(packet[0]&15) * 4
+		if !bytes.Equal(packet[h+8:], []byte(payload)) {
+			t.Fatal("WGC payload changed")
+		}
+		reply := append([]byte(nil), packet...)
+		copy(reply[12:16], packet[16:20])
+		copy(reply[16:20], packet[12:16])
+		copy(reply[h:h+2], packet[h+2:h+4])
+		copy(reply[h+2:h+4], packet[h:h+2])
+		reply[h+6], reply[h+7], reply[10], reply[11] = 0, 0, 0, 0
+		var sum uint32
+		for i := 0; i < h; i += 2 {
+			sum += uint32(binary.BigEndian.Uint16(reply[i : i+2]))
+		}
+		for sum>>16 != 0 {
+			sum = (sum & 0xffff) + (sum >> 16)
+		}
+		binary.BigEndian.PutUint16(reply[10:12], ^uint16(sum))
+		tun.outbound <- reply
+		_ = udp.SetReadDeadline(time.Now().Add(3 * time.Second))
+		output := make([]byte, 64)
+		n, err := udp.Read(output)
+		if err != nil || string(output[:n]) != payload || writes.Load() == 0 {
+			t.Fatalf("WGC round trip failed: %v", err)
 		}
 	}
-	if len(packet) < 28 || packet[0]>>4 != 4 || packet[9] != 17 {
-		t.Fatal("stock peer did not receive IPv4 UDP")
-	}
-	h := int(packet[0]&15) * 4
-	if !bytes.Equal(packet[h+8:], []byte("sing-box-wgc")) {
-		t.Fatal("WGC payload changed")
-	}
-	reply := append([]byte(nil), packet...)
-	copy(reply[12:16], packet[16:20])
-	copy(reply[16:20], packet[12:16])
-	copy(reply[h:h+2], packet[h+2:h+4])
-	copy(reply[h+2:h+4], packet[h:h+2])
-	reply[h+6], reply[h+7], reply[10], reply[11] = 0, 0, 0, 0
-	var sum uint32
-	for i := 0; i < h; i += 2 {
-		sum += uint32(binary.BigEndian.Uint16(reply[i : i+2]))
-	}
-	for sum>>16 != 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	binary.BigEndian.PutUint16(reply[10:12], ^uint16(sum))
-	tun.outbound <- reply
-	_ = udp.SetReadDeadline(time.Now().Add(3 * time.Second))
-	output := make([]byte, 64)
-	n, err := udp.Read(output)
-	if err != nil || string(output[:n]) != "sing-box-wgc" || writes.Load() == 0 {
-		t.Fatalf("WGC round trip failed: %v", err)
+	if ep.conn != originalConnection || ep.device != originalDevice {
+		t.Fatal("handover restarted the WGC session or userspace stack")
 	}
 	_ = ep.Close()
 	if _, err := ep.ListenPacket(ctx, M.ParseSocksaddr("10.7.0.1:53")); !errors.Is(err, net.ErrClosed) {

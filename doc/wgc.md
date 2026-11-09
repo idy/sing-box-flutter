@@ -39,8 +39,9 @@ and configure the server to allow the inner address `10.7.0.2`:
 ```
 
 `pre_shared_key` is optional. TCP and UDP use the existing sing-box stack and
-resolver. UDP is the default outer transport. The host's existing Android/iOS VPN
-setup, storage, lifecycle, consent, and status API are unchanged. Install the
+resolver. UDP is the default outer transport. Interface updates reopen the outer
+transport while preserving the WGC connection and userspace stack. The host's existing
+Android/iOS VPN setup, storage, lifecycle, consent, and status API are unchanged. Install the
 matching WGC-enabled native artifacts; an unmodified upstream libbox does not
 register this endpoint.
 

@@ -40,6 +40,8 @@ func RegisterEndpoint(registry *endpoint.Registry) {
 	endpoint.Register[Options](registry, "wgc", NewEndpoint)
 }
 
+var _ adapter.InterfaceUpdateListener = (*Endpoint)(nil)
+
 type Endpoint struct {
 	endpoint.Adapter
 	ctx                 context.Context
@@ -48,6 +50,9 @@ type Endpoint struct {
 	privateKey, peerKey wireguard.Key
 	psk                 *wireguard.Key
 	factory             TransportFactory
+	binding             *rebindTransport
+	updates             chan struct{}
+	rebinders           sync.WaitGroup
 	mu                  sync.Mutex
 	closed              bool
 	startDone           chan struct{}
@@ -140,6 +145,7 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) (err er
 		return err
 	}
 	e.startDone = make(chan struct{})
+	e.updates = make(chan struct{}, 1)
 	runCtx, cancel := context.WithCancel(e.ctx)
 	e.cancel, e.runCtx = cancel, runCtx
 	e.stopScope = context.AfterFunc(scope.Context(), cancel)
@@ -147,11 +153,12 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) (err er
 	defer func() { e.mu.Lock(); e.startErr = err; close(e.startDone); e.mu.Unlock() }()
 	timer := time.AfterFunc(C.StartTimeout, cancel)
 	defer timer.Stop()
-	transport, err := e.factory(runCtx, e.options.PeerEndpoint, e.options.TransportOptions)
-	if err != nil || transport == nil {
+	slot, err := e.openTransport(runCtx)
+	if err != nil {
 		cancel()
-		return errors.New("WGC transport startup failed")
+		return err
 	}
+	transport := &rebindTransport{active: slot, changed: make(chan struct{}), request: func() { e.InterfaceUpdated(runCtx) }}
 	conn, err := wireguard.NewConn(transport, wireguard.Config{
 		StaticPrivateKey: &e.privateKey, DisableStats: true, SharedWriteQueue: true,
 		MaxPeers: 1, ReadQueueSize: 128, WriteQueueSize: 128,
@@ -187,13 +194,15 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) (err er
 		_ = device.Close()
 		return net.ErrClosed
 	}
-	e.conn, e.device = conn, device
+	e.conn, e.device, e.binding = conn, device, transport
 	// Use sing-box's resolver, including its normal DNS routing and candidate handling.
 	e.dialer = dialer.NewResolveDialer(runCtx, device, false, "", adapter.DNSQueryOptions{}, 0)
 	e.receivers.Add(1)
 	e.senders.Add(1)
+	e.rebinders.Add(1)
 	go e.receive(runCtx, conn, device)
 	go e.send(runCtx, conn, device)
+	go e.watchInterfaces(runCtx, transport, conn)
 	e.mu.Unlock()
 	go func() { <-runCtx.Done(); _ = e.Close() }()
 	return nil
@@ -279,6 +288,7 @@ func (e *Endpoint) Close() error {
 			_ = device.Close()
 			e.senders.Wait()
 		}
+		e.rebinders.Wait()
 	})
 	return nil
 }

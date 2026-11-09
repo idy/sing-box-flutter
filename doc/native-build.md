@@ -102,8 +102,11 @@ including assembly and embedded data. After resolving extensions, the build chec
 the selected Tailscale dependency's toolchain contract again and records its actual
 version/checksums. Custom transport registrations can be compiled with `--wgc-config`; see
 [WGC configuration](wgc.md). Exported `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, and
-`GOPROXY` settings are retained under the pinned compiler. Required WGC license
-text is collected from the pinned dependency for the native release archive.
+`GOPROXY` settings are retained under the pinned compiler. Before dependency
+resolution, both checked-in WGC module checksums are copied into the main module's
+`go.sum` and conflicting entries are rejected, including when `GONOSUMDB` covers WGC.
+Required WGC license text is collected from the pinned dependency for the native
+release archive.
 
 The official entry point remains `go run ./cmd/internal/build_libbox -target
 android` or `-target apple -platform ios,iossimulator`. The tool applies the small,

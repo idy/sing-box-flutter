@@ -77,6 +77,29 @@ def load_extensions(config: Path | None) -> list[dict]:
     return extensions
 
 
+def seed_wgc_checksums(source: Path, root: Path) -> None:
+    version = json.loads((root / "native-core.json").read_text())["wgc_version"]
+    wanted = {version, version + "/go.mod"}
+    locked = {}
+    for line in (root / "native/wgc/go.sum").read_text().splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[0] == "github.com/idy/wgc" and fields[1] in wanted:
+            locked[fields[1]] = fields[2]
+    if set(locked) != wanted:
+        raise BuildError("Checked-in WGC module and go.mod checksums are required")
+    sums = source / "go.sum"
+    original = sums.read_text()
+    present = set()
+    for line in original.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[0] == "github.com/idy/wgc" and fields[1] in locked:
+            if fields[2] != locked[fields[1]]:
+                raise BuildError("Resolved WGC checksum conflicts with the checked-in lock")
+            present.add(fields[1])
+    additions = "".join(f"github.com/idy/wgc {v} {locked[v]}\n" for v in sorted(wanted - present))
+    sums.write_text(original + ("\n" if original and not original.endswith("\n") else "") + additions)
+
+
 @contextlib.contextmanager
 def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], root: Path = ROOT):
     """Register WGC in the same libbox instance; restore upstream inputs on all exits."""
@@ -118,6 +141,9 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
             if "path" in item:
                 options.append(f"-replace={item['module']}={item['path']}")
             run([go, "mod", "edit", *options], cwd=source, env=env)
+        # Dependency go.sum files are not consulted by Go's main-module resolver.
+        # Seed both locked WGC entries even when private scopes disable sumdb.
+        seed_wgc_checksums(source, root)
         tidy_env = dict(env, GOFLAGS="-trimpath -buildvcs=false")
         run([go, "mod", "tidy"], cwd=source, env=tidy_env)
         run([go, "mod", "verify"], cwd=source, env=env)

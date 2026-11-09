@@ -26,6 +26,8 @@ class OverlayTests(unittest.TestCase):
         (source / "go.sum").write_text("original sums\n")
         (root / "native/wgc").mkdir(parents=True)
         (root / "native/wgc/go.mod").write_text("module github.com/idy/sing-box-flutter/native/wgc\n")
+        (root / "native-core.json").write_text(json.dumps({"wgc_version": "v1.2.3"}))
+        (root / "native/wgc/go.sum").write_text("github.com/idy/wgc v1.2.3 h1:locked-module\ngithub.com/idy/wgc v1.2.3/go.mod h1:locked-mod\n")
         (root / "native/wgc/endpoint.go").write_text("package core\n")
         (root / "tool").mkdir()
         (root / "tool/wgc_overlay.py").write_bytes((ROOT / "tool/wgc_overlay.py").read_bytes())
@@ -38,11 +40,14 @@ class OverlayTests(unittest.TestCase):
             originals = {p: p.read_bytes() for p in [registry, builder, source / "go.mod", source / "go.sum"]}
             def fake_run(args, **kwargs):
                 if args[1:3] == ["mod", "tidy"]:
+                    self.assertEqual(kwargs["env"]["GONOSUMDB"], "github.com/idy/wgc")
+                    self.assertIn("github.com/idy/wgc v1.2.3 h1:locked-module", (source / "go.sum").read_text())
+                    self.assertIn("github.com/idy/wgc v1.2.3/go.mod h1:locked-mod", (source / "go.sum").read_text())
                     (source / "go.sum").write_text("new dependency checksums\n")
                 return ""
             with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
                 with self.assertRaisesRegex(RuntimeError, "compilation failure"):
-                    with wgc_overlay(source, Path("go"), {}, fake_run, [], root) as provenance:
+                    with wgc_overlay(source, Path("go"), {"GONOSUMDB": "github.com/idy/wgc"}, fake_run, [], root) as provenance:
                         self.assertIn("registerWGCEndpoint(registry)", registry.read_text())
                         self.assertIn('"with_wgc"', builder.read_text())
                         self.assertIn("wgc.RegisterEndpoint(registry)", (source / "include/wgc_flutter.go").read_text())
@@ -52,6 +57,34 @@ class OverlayTests(unittest.TestCase):
             for path, original in originals.items():
                 self.assertEqual(path.read_bytes(), original)
             self.assertFalse((source / "include/wgc_flutter.go").exists())
+
+    def test_conflicting_wgc_checksums_fail_before_resolution_and_restore_inputs(self):
+        for version in ("v1.2.3", "v1.2.3/go.mod"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source, registry, builder = self.fixture(root)
+                original = f"github.com/idy/wgc {version} h1:untrusted\n"
+                (source / "go.sum").write_text(original)
+                runner = mock.Mock(return_value="")
+                with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                    with self.assertRaisesRegex(BuildError, "checksum conflicts"):
+                        with wgc_overlay(source, Path("go"), {"GONOSUMDB": "github.com/idy/wgc"}, runner, [], root):
+                            self.fail("Untrusted WGC checksum reached compilation")
+                self.assertFalse(any(call.args[0][1:3] == ["mod", "tidy"] for call in runner.call_args_list))
+                self.assertEqual((source / "go.sum").read_text(), original)
+                self.assertNotIn("registerWGCEndpoint", registry.read_text())
+
+    def test_missing_wgc_lock_fails_before_resolution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, registry, _ = self.fixture(root)
+            (root / "native/wgc/go.sum").write_text("github.com/idy/wgc v1.2.3 h1:locked-module\n")
+            runner = mock.Mock(return_value="")
+            with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                with self.assertRaisesRegex(BuildError, "checksums are required"):
+                    with wgc_overlay(source, Path("go"), {}, runner, [], root):
+                        self.fail("Missing WGC lock reached resolution")
+            self.assertFalse(any(call.args[0][1:3] == ["mod", "tidy"] for call in runner.call_args_list))
 
     def test_unreviewed_upstream_registry_is_never_modified(self):
         with tempfile.TemporaryDirectory() as temp:
