@@ -326,6 +326,90 @@ func TestPacketLoopFailureRecoversEndpoint(t *testing.T) {
 	}
 }
 
+func TestCanceledReadFailureReleasesBlockedReceiver(t *testing.T) {
+	for _, stop := range []string{"close", "context", "scope"} {
+		t.Run(stop, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			created, err := NewEndpoint(ctx, nil, nil, "", testOptions(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ep := created.(*Endpoint)
+			fault := make(chan struct{})
+			var initial *faultDevice
+			var calls atomic.Int32
+			ep.newDevice = func(options wgstack.DeviceOptions) (wgstack.Device, error) {
+				base, err := wgstack.NewDevice(options)
+				if err == nil && calls.Add(1) == 1 {
+					initial = &faultDevice{Device: base, fault: fault, done: make(chan struct{}), blocked: make(chan struct{}), released: make(chan struct{})}
+					return initial, nil
+				}
+				return base, err
+			}
+			scope := adapter.NewScope(context.Background(), nil)
+			startTestEndpoint(t, ep, scope)
+			// Release the injection even on failure, before endpoint cleanup joins it.
+			t.Cleanup(func() { _ = initial.Close() })
+			runCtx := ep.runCtx
+			// Model a receiver that entered Write while the session was still live.
+			ep.receivers.Add(1)
+			go func() {
+				defer ep.receivers.Done()
+				_, _ = initial.Write([][]byte{{1}}, 0)
+			}()
+			select {
+			case <-initial.blocked:
+			case <-time.After(time.Second):
+				t.Fatal("receiver did not enter its stack write")
+			}
+			closed := make(chan error, 1)
+			go func() {
+				switch stop {
+				case "close":
+					closed <- ep.Close()
+				case "context":
+					cancel()
+					closed <- ep.Close()
+				case "scope":
+					closed <- scope.Close()
+				}
+			}()
+			select {
+			case <-runCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("shutdown did not cancel the session")
+			}
+			// Cancellation must precede the Read error, with Write still blocked.
+			select {
+			case <-initial.released:
+				t.Fatal("receiver was released before the read failure")
+			default:
+			}
+			close(fault)
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("shutdown left a receiver blocked after a canceled-context read error")
+			}
+			select {
+			case <-initial.released:
+			default:
+				t.Fatal("shutdown did not release the blocked receiver")
+			}
+			if calls.Load() != 1 {
+				t.Fatal("intentional shutdown restarted the endpoint")
+			}
+			if active, _ := ep.binding.snapshot(); active != nil {
+				t.Fatal("shutdown leaked its transport")
+			}
+		})
+	}
+}
+
 func TestShutdownDoesNotRecoverEndpoint(t *testing.T) {
 	for _, stop := range []string{"close", "context", "scope"} {
 		t.Run(stop, func(t *testing.T) {

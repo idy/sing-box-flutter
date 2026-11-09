@@ -84,24 +84,26 @@ List<String> forwardPathArguments(
     home = environment['HOME'];
   }
 
+  String append(String base, String path) {
+    final hasSeparator =
+        base.endsWith('/') || (Platform.isWindows && base.endsWith('\\'));
+    return '$base${hasSeparator ? '' : Platform.pathSeparator}$path';
+  }
+
   String resolve(String path) {
     if (path == '~' ||
         path.startsWith('~/') ||
         (Platform.isWindows && path.startsWith('~\\'))) {
       // Leave unresolved home paths for Python's expanduser fallback.
       if (home == null || home.isEmpty) return path;
-      path = path == '~'
-          ? home
-          : File.fromUri(
-              Directory(home).uri.resolveUri(Uri.file(path.substring(2))),
-            ).path;
+      path = path == '~' ? home : append(home, path.substring(2));
     } else if (path.startsWith('~')) {
       // Python also supports ~user on Unix; do not anchor it to the caller.
       return path;
     }
-    return File.fromUri(
-      callerDirectory.uri.resolveUri(Uri.file(path)),
-    ).path;
+    // Keep dot segments intact: the filesystem must follow symlinks before '..'.
+    if (File(path).isAbsolute) return path;
+    return append(callerDirectory.absolute.path, path);
   }
 
   final forwarded = List<String>.of(arguments);

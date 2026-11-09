@@ -283,12 +283,10 @@ func (e *Endpoint) send(ctx context.Context, conn *wireguard.Conn, device wgstac
 	for {
 		count, err := device.Read(buffers, sizes, 0)
 		if err != nil {
-			if ctx.Err() == nil {
-				cancel()
-				// A broken reader cannot drain the stack. Closing it releases any
-				// receiver blocked injecting a packet before recovery joins it.
-				_ = device.Close()
-			}
+			cancel()
+			// A broken reader cannot drain the stack, even during shutdown.
+			// Close it before joining any receiver blocked injecting a packet.
+			_ = device.Close()
 			return
 		}
 		// Continue draining during shutdown until the receiver releases its stack writes.

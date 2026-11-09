@@ -69,6 +69,46 @@ void main() {
     }
   }
 
+  for (final option in ['--wgc-config', '--from-dir']) {
+    for (final equalsForm in [false, true]) {
+      for (final origin in ['caller', 'home', 'absolute']) {
+        test(
+            '$option preserves symlink/.. semantics ($origin, equals=$equalsForm)',
+            () {
+          final base = origin == 'home' ? home : caller;
+          final external = Directory('${fixture.path}/external')..createSync();
+          final child = Directory('${external.path}/child')..createSync();
+          Link('${base.path}/link').createSync(child.path);
+          final name = option == '--wgc-config' ? 'wgc.core.json' : 'artifacts';
+          final target = '${external.path}/$name';
+          if (option == '--wgc-config') {
+            File(target).writeAsStringSync('selected manifest');
+            File('${base.path}/$name').writeAsStringSync('wrong manifest');
+          } else {
+            Directory(target).createSync();
+            Directory('${base.path}/$name').createSync();
+          }
+          final prefix = switch (origin) {
+            'home' => '~/',
+            'absolute' => '${base.path}/',
+            _ => '',
+          };
+          final input = '${prefix}link/../$name';
+          final forwarded = cli.forwardPathArguments(
+            equalsForm ? ['$option=$input'] : [option, input],
+            callerDirectory: caller,
+            environment: environment,
+          );
+          final path = equalsForm
+              ? forwarded.last.substring(option.length + 1)
+              : forwarded.last;
+          expect(FileSystemEntity.identicalSync(path, target), isTrue);
+          expect(path, contains('link/../'));
+        }, skip: Platform.isWindows);
+      }
+    }
+  }
+
   test('preserves absolute paths and unrelated or incomplete options', () {
     final absolute = File.fromUri(home.uri.resolve('absolute.json')).path;
     final arguments = [
