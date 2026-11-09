@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:path/path.dart' as p;
+
 /// Installs or builds the pinned native core in this plugin's package directory.
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty || arguments.first == '--help') {
@@ -72,9 +74,13 @@ List<String> forwardPathArguments(
   List<String> arguments, {
   required Directory callerDirectory,
   required Map<String, String> environment,
+  p.Context? pathContext,
 }) {
+  final paths =
+      pathContext ?? p.Context(current: callerDirectory.absolute.path);
+  final windows = paths.style == p.Style.windows;
   final String? home;
-  if (Platform.isWindows) {
+  if (windows) {
     home = environment['USERPROFILE'] ??
         (environment.containsKey('HOMEDRIVE') &&
                 environment.containsKey('HOMEPATH')
@@ -84,26 +90,20 @@ List<String> forwardPathArguments(
     home = environment['HOME'];
   }
 
-  String append(String base, String path) {
-    final hasSeparator =
-        base.endsWith('/') || (Platform.isWindows && base.endsWith('\\'));
-    return '$base${hasSeparator ? '' : Platform.pathSeparator}$path';
-  }
-
   String resolve(String path) {
     if (path == '~' ||
         path.startsWith('~/') ||
-        (Platform.isWindows && path.startsWith('~\\'))) {
+        (windows && path.startsWith('~\\'))) {
       // Leave unresolved home paths for Python's expanduser fallback.
       if (home == null || home.isEmpty) return path;
-      path = path == '~' ? home : append(home, path.substring(2));
+      path = path == '~' ? home : paths.join(home, path.substring(2));
     } else if (path.startsWith('~')) {
       // Python also supports ~user on Unix; do not anchor it to the caller.
       return path;
     }
-    // Keep dot segments intact: the filesystem must follow symlinks before '..'.
-    if (File(path).isAbsolute) return path;
-    return append(callerDirectory.absolute.path, path);
+    // join anchors Windows rooted paths to the caller's drive or UNC share
+    // without normalizing dot segments before the filesystem follows symlinks.
+    return paths.join(paths.current, path);
   }
 
   final forwarded = List<String>.of(arguments);

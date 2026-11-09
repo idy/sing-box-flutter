@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 
 import '../bin/sing_box_flutter.dart' as cli;
 
@@ -144,12 +145,48 @@ void main() {
     );
   });
 
+  for (final current in [r'D:\projects\caller', r'\\server\share\caller']) {
+    for (final option in ['--wgc-config', '--from-dir']) {
+      for (final equalsForm in [false, true]) {
+        test('Windows rooted paths ($current, $option, equals=$equalsForm)',
+            () {
+          final paths = p.Context(style: p.Style.windows, current: current);
+          final root = current.startsWith(r'\\') ? r'\\server\share' : 'D:';
+          final cases = {
+            r'\artifacts': '$root\\artifacts',
+            '/artifacts': '$root\\artifacts',
+            r'\link\..\artifacts': '$root\\link\\..\\artifacts',
+            '/link/../artifacts': '$root\\link/../artifacts',
+            r'link\..\wgc.core.json': '$current\\link\\..\\wgc.core.json',
+            r'C:\cache\link\..\artifacts': r'C:\cache\link\..\artifacts',
+            r'\\other\share\link\..\artifacts':
+                r'\\other\share\link\..\artifacts',
+            r'~\link\..\artifacts': r'C:\Users\tester\link\..\artifacts',
+          };
+          for (final entry in cases.entries) {
+            final forwarded = cli.forwardPathArguments(
+              equalsForm ? ['$option=${entry.key}'] : [option, entry.key],
+              callerDirectory: caller,
+              environment: {'USERPROFILE': r'C:\Users\tester'},
+              pathContext: paths,
+            );
+            expect(forwarded,
+                equalsForm ? ['$option=${entry.value}'] : [option, entry.value],
+                reason: entry.key);
+          }
+        });
+      }
+    }
+  }
+
   test('Windows falls back to HOMEDRIVE and HOMEPATH', () {
     expect(
       cli.forwardPathArguments(['--from-dir=~\\artifacts'],
           callerDirectory: caller,
-          environment: {'HOMEDRIVE': 'C:', 'HOMEPATH': r'\Users\tester'}),
+          environment: {'HOMEDRIVE': 'C:', 'HOMEPATH': r'\Users\tester'},
+          pathContext:
+              p.Context(style: p.Style.windows, current: r'D:\caller')),
       [r'--from-dir=C:\Users\tester\artifacts'],
     );
-  }, skip: !Platform.isWindows);
+  });
 }
