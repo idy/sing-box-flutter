@@ -10,7 +10,9 @@ from unittest import mock
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
 from native_common import BuildError, ROOT, load_pins, pin_identity, sha256, validate_metadata, REQUIRED_TAGS
-from wgc_overlay import load_extensions, source_digest, wgc_overlay
+from wgc_overlay import MODULE, load_extensions, source_digest, wgc_overlay
+
+EXTENSION_LOCK = {"sum": "h1:" + "A" * 43 + "=", "go_mod_sum": "h1:" + "B" * 42 + "A="}
 
 
 class OverlayTests(unittest.TestCase):
@@ -67,10 +69,15 @@ class OverlayTests(unittest.TestCase):
                 {"package": "example.com/a/register", "module": "example.com/a", "version": "v1.2.3"},
                 {"package": "example.com/b/register", "module": "example.com/b", "version": "v1.4.0"},
             ]
+            for entry in extensions:
+                entry.update(EXTENSION_LOCK)
             selected = {"example.com/a": "v1.2.3", "example.com/b": "v1.4.0"}
-            env = {"GOFLAGS": "-mod=readonly", "GOWORK": "off"}
+            env = {"GOFLAGS": "-mod=readonly", "GOWORK": "off", "GONOSUMDB": "example.com/*"}
             def fake_run(args, **kwargs):
                 if args[1:3] == ["mod", "tidy"]:
+                    for entry in extensions:
+                        self.assertIn(f"{entry['module']} {entry['version']} {entry['sum']}\n", (source / "go.sum").read_text())
+                        self.assertIn(f"{entry['module']} {entry['version']}/go.mod {entry['go_mod_sum']}\n", (source / "go.sum").read_text())
                     (source / "go.mod").write_text("module github.com/sagernet/sing-box\n// resolved dependencies\n")
                     (source / "go.sum").write_text("resolved checksums\n")
                 if args[1:3] == ["list", "-m"]:
@@ -103,6 +110,8 @@ class OverlayTests(unittest.TestCase):
                 {"package": "example.com/a", "module": "example.com/a", "version": "v1.0.0"},
                 {"package": "example.com/b", "module": "example.com/b", "version": "v1.0.0"},
             ]
+            for entry in extensions:
+                entry.update(EXTENSION_LOCK)
             selected = {"example.com/a": "v1.0.0", "example.com/b": "v1.1.0"}
             env = {"GOFLAGS": "-mod=readonly", "GOWORK": "off"}
             def fake_run(args, **kwargs):
@@ -155,6 +164,88 @@ class OverlayTests(unittest.TestCase):
                     with wgc_overlay(source, Path("go"), {}, runner, [], root):
                         self.fail("Missing WGC lock reached resolution")
             self.assertFalse(any(call.args[0][1:3] == ["mod", "tidy"] for call in runner.call_args_list))
+
+    def test_remote_checksum_conflicts_fail_before_resolution(self):
+        for suffix in ("", "/go.mod"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source, registry, _ = self.fixture(root)
+                original = f"example.com/transport v1.2.3{suffix} h1:untrusted\n"
+                (source / "go.sum").write_text(original)
+                entry = {"package": "example.com/transport", "module": "example.com/transport", "version": "v1.2.3", **EXTENSION_LOCK}
+                runner = mock.Mock(return_value="")
+                with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                    with self.assertRaisesRegex(BuildError, "checksum conflicts"):
+                        with wgc_overlay(source, Path("go"), {}, runner, [entry], root):
+                            self.fail("Conflicting remote checksum reached compilation")
+                self.assertFalse(any(call.args[0][1:3] == ["mod", "tidy"] for call in runner.call_args_list))
+                self.assertEqual((source / "go.sum").read_text(), original)
+
+    def test_local_modules_compile_from_verified_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, registry, _ = self.fixture(root)
+            local = root / "local"
+            local.mkdir()
+            (local / "go.mod").write_text("module example.com/transport\n")
+            (local / "register.go").write_text("package transport\n// original\n")
+            config = root / "extensions.json"
+            config.write_text(json.dumps({"extensions": [{"package": "example.com/transport", "module": "example.com/transport", "path": "local"}]}))
+            extensions = load_extensions(config)
+            original_adapter = (root / "native/wgc/endpoint.go").read_bytes()
+            replacements = {}
+
+            def runner(args, **kwargs):
+                if args[1:3] == ["mod", "edit"]:
+                    for flag in args[3:]:
+                        if str(flag).startswith("-replace="):
+                            module, path = str(flag)[len("-replace="):].split("=", 1)
+                            replacements[module] = Path(path)
+                if args[1:3] == ["mod", "tidy"]:
+                    (local / "register.go").write_text("package transport\n// edited during build\n")
+                    (root / "native/wgc/endpoint.go").write_text("package core\n// edited during build\n")
+                return "v0.0.0" if args[1:3] == ["list", "-m"] else ""
+
+            with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                with wgc_overlay(source, Path("go"), {}, runner, extensions, root) as provenance:
+                    snapshot = replacements["example.com/transport"]
+                    self.assertNotEqual(snapshot.resolve(), local.resolve())
+                    self.assertIn("// original", (snapshot / "register.go").read_text())
+                    self.assertEqual(source_digest(snapshot), extensions[0]["source_sha256"])
+                    self.assertEqual(provenance["extensions"][0]["source_sha256"], source_digest(snapshot))
+                    adapter_snapshot = replacements[MODULE]
+                    self.assertNotEqual(adapter_snapshot.resolve(), (root / "native/wgc").resolve())
+                    self.assertEqual((adapter_snapshot / "endpoint.go").read_bytes(), original_adapter)
+                    self.assertEqual(source_digest(adapter_snapshot), provenance["source_sha256"])
+            self.assertFalse(snapshot.exists())
+            self.assertFalse(adapter_snapshot.exists())
+            self.assertNotIn("path", provenance["extensions"][0])
+
+    def test_local_changes_before_snapshot_are_rejected(self):
+        for change in ("contents", "symlink"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source, registry, _ = self.fixture(root)
+                local = root / "local"
+                local.mkdir()
+                (local / "go.mod").write_text("module example.com/transport\n")
+                code = local / "register.go"
+                code.write_text("package transport\n")
+                config = root / "extensions.json"
+                config.write_text(json.dumps({"extensions": [{"package": "example.com/transport", "module": "example.com/transport", "path": "local"}]}))
+                entries = load_extensions(config)
+                if change == "contents":
+                    code.write_text("package transport\n// changed\n")
+                else:
+                    (root / "outside").write_text("outside data")
+                    (local / "link").symlink_to(root / "outside")
+                runner = mock.Mock(return_value="")
+                with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                    with self.assertRaises(BuildError):
+                        with wgc_overlay(source, Path("go"), {}, runner, entries, root):
+                            self.fail("Changed local source reached compilation")
+                runner.assert_not_called()
+                self.assertFalse(list((root / ".build").glob("wgc-inputs-*")))
 
     def test_unreviewed_upstream_registry_is_never_modified(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -218,6 +309,30 @@ class OverlayTests(unittest.TestCase):
 
 
 class ExtensionTests(unittest.TestCase):
+    def test_remote_extensions_require_persisted_checksum_pins(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "extensions.json"
+            base = {"package": "example.com/transport", "module": "example.com/transport", "version": "v1.2.3"}
+            for pins in ({}, {"sum": EXTENSION_LOCK["sum"]}, {**EXTENSION_LOCK, "sum": "bad"},
+                         {**EXTENSION_LOCK, "go_mod_sum": "bad"}):
+                with self.subTest(pins=pins):
+                    config.write_text(json.dumps({"extensions": [{**base, **pins}]}))
+                    with self.assertRaisesRegex(BuildError, "checksum"):
+                        load_extensions(config)
+            config.write_text(json.dumps({"extensions": [{**base, **EXTENSION_LOCK}]}))
+            loaded = load_extensions(config)[0]
+            self.assertEqual(loaded["sum"], EXTENSION_LOCK["sum"])
+            self.assertEqual(loaded["go_mod_sum"], EXTENSION_LOCK["go_mod_sum"])
+
+    def test_conflicting_module_checksum_pins_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / "extensions.json"
+            first = {"package": "example.com/transport/a", "module": "example.com/transport", "version": "v1.2.3", **EXTENSION_LOCK}
+            second = {**first, "package": "example.com/transport/b", "sum": EXTENSION_LOCK["go_mod_sum"]}
+            config.write_text(json.dumps({"extensions": [first, second]}))
+            with self.assertRaises(BuildError):
+                load_extensions(config)
+
     def test_compiled_local_extension_records_source_identity(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

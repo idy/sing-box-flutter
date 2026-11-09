@@ -57,8 +57,19 @@ I/O on Close. Select them with `"transport": "your-name"` on the endpoint.
 Compile the registration package through a build manifest:
 
 ```json
-{"extensions": [{"package": "example.com/team/transport/register", "module": "example.com/team/transport", "version": "v1.2.3"}]}
+{"extensions": [{
+  "package": "example.com/team/transport/register",
+  "module": "example.com/team/transport",
+  "version": "v1.2.3",
+  "sum": "h1:<trusted-module-checksum>",
+  "go_mod_sum": "h1:<trusted-go.mod-checksum>"
+}]}
 ```
+
+Remote entries require both checksum pins. Obtain `Sum` and `GoModSum` from
+`go mod download -json` using a trusted module source, then review and commit them
+as `sum` and `go_mod_sum` in the manifest. The build enforces these values even
+when `GOPRIVATE` or `GONOSUMDB` disables the public checksum database.
 
 ```bash
 dart run sing_box_flutter build --target apple --wgc-config wgc.core.json
@@ -66,6 +77,9 @@ dart run sing_box_flutter build --target apple --wgc-config wgc.core.json
 
 A local extension may specify `path`, relative to the manifest, and omit `version`.
 The default matches the module's major version, such as `v2.0.0` for a `/v2` module.
+The loader computes `source_sha256` for local entries; omit `sum` and `go_mod_sum`.
+The build copies local modules into private snapshots and verifies each copy;
+edits to the original directory after capture apply to the next build.
 Export private module settings such as `GOPRIVATE`; Git/SSH credentials remain in the normal
 user environment, not the manifest. `GONOPROXY`, `GONOSUMDB`, and explicit
 `GOPROXY` settings are retained under the pinned Go toolchain. Build support and

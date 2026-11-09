@@ -98,7 +98,11 @@ registers that adapter in the pinned libbox build and restores the upstream inpu
 afterward. The adapter source and registration hashes are recorded in native
 metadata so the installer cannot mix an unmodified libbox with a WGC-enabled
 package. Module fingerprints conservatively include all files except VCS metadata,
-including assembly and embedded data. After resolving extensions, the build checks
+including assembly and embedded data. The adapter and local extensions compile
+from private snapshots whose fingerprints must match the recorded source inputs.
+Remote extensions require module and `go.mod` checksum pins in the manifest;
+these are enforced in the main module even when private scopes disable sumdb.
+After resolving extensions, the build checks
 the selected Tailscale dependency's toolchain contract again and records its actual
 version/checksums. Custom transport registrations can be compiled with `--wgc-config`; see
 [WGC configuration](wgc.md). Exported `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, and
