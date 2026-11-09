@@ -8,12 +8,15 @@ import tarfile
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
-from native_common import (BuildError, ROOT, REQUIRED_TAGS, build_directory, load_pins,
-                           parse_manifest, pin_identity, safe_extract, sha256, validate_metadata)
+from native_common import (ARTIFACTS, BuildError, ROOT, REQUIRED_TAGS, archive_name, artifact_hashes,
+                           build_directory, load_pins, parse_manifest, pin_identity, safe_extract,
+                           sha256, validate_metadata)
 from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, resolved_tailscale_dependency, verify_dependency_toolchain
+import install_libbox
 
 
 class PinTests(unittest.TestCase):
@@ -120,6 +123,61 @@ class SafeExtractionTests(unittest.TestCase):
                         [('a', 'symlink', 'b'), ('b', 'symlink', 'a')]):
             with self.subTest(entries=entries), self.assertRaises(BuildError):
                 self.extract(entries)
+
+
+class InstallerTests(unittest.TestCase):
+    def release_fixture(self, root, links=False):
+        payload = root / "payload"
+        legal = payload / "Legal"
+        legal.mkdir(parents=True)
+        (legal / "LICENSE").write_text("dependency notice\n")
+        if links:
+            for name in ("repeat", "again"):
+                (legal / name).symlink_to(".", target_is_directory=True)
+        (payload / "LICENSE.sing-box").write_text("upstream notice\n")
+        artifact = payload / ARTIFACTS["android"]
+        artifact.parent.mkdir(parents=True)
+        with zipfile.ZipFile(artifact, "w") as aar:
+            aar.writestr("AndroidManifest.xml", "manifest")
+            aar.writestr("classes.jar", "classes")
+        metadata = {"license_sha256": sha256(payload / "LICENSE.sing-box"),
+                    "legal_sha256": artifact_hashes(legal), "artifact_sha256": artifact_hashes(artifact)}
+        (payload / "native-build.json").write_text(json.dumps(metadata))
+        pins = load_pins()
+        source, cache = root / "release", root / "cache"
+        source.mkdir()
+        cache.mkdir()
+        name = archive_name(pins, "android")
+        with tarfile.open(source / name, "w:gz") as archive:
+            for entry in ("Legal", "LICENSE.sing-box", "native-build.json", ARTIFACTS["android"]):
+                archive.add(payload / entry, arcname=entry)
+        return pins, source, {name: sha256(source / name)}, cache
+
+    def test_regular_legal_notices_install(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pins, source, sums, cache = self.release_fixture(root)
+            plugin = root / "plugin"
+            with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"):
+                install_libbox.install_one("android", pins, source, sums, cache, False, "test-manifest")
+            self.assertTrue((plugin / ARTIFACTS["android"]).is_file())
+            self.assertEqual((plugin / ".build/legal/android/LICENSE").read_text(), "dependency notice\n")
+
+    def test_legal_directory_links_are_rejected_before_replacing_core(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pins, source, sums, cache = self.release_fixture(root, links=True)
+            plugin = root / "plugin"
+            previous = plugin / ARTIFACTS["android"]
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"previous-core")
+            # Guard the old copying path so a regression cannot expand the links.
+            with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"), mock.patch("install_libbox.shutil.copytree") as copying:
+                with self.assertRaisesRegex(BuildError, "legal.*symlink"):
+                    install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+                copying.assert_not_called()
+            self.assertEqual(previous.read_bytes(), b"previous-core")
+            self.assertFalse((cache / "installed/android.json").exists())
 
 
 class ToolchainTests(unittest.TestCase):

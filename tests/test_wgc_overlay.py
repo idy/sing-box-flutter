@@ -114,6 +114,19 @@ class OverlayTests(unittest.TestCase):
             code.write_text("package register\nfunc init() {}\n")
             self.assertNotEqual(source_digest(root), before)
 
+    def test_binary_contents_cannot_hide_a_separate_source_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "go.mod").write_text("module example.com/transport\n")
+            (root / "transport.go").write_text("package transport\n")
+            registration = b"package transport\nfunc init() {}\n"
+            (root / "payload.bin").write_bytes(b"X")
+            (root / "register.go").write_bytes(registration)
+            before = source_digest(root)
+            (root / "payload.bin").write_bytes(b"X\0register.go\0" + registration)
+            (root / "register.go").unlink()
+            self.assertNotEqual(source_digest(root), before)
+
     def test_source_identity_includes_assembly_and_embedded_assets(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

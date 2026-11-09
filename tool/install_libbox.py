@@ -46,6 +46,9 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
     staging = Path(tempfile.mkdtemp(prefix=f"install-{target}-", dir=cache))
     try:
         safe_extract(archive, staging)
+        legal = staging / "Legal"
+        if legal.is_symlink() or any(path.is_symlink() for path in legal.rglob("*")):
+            raise BuildError("Release legal notices must not contain symlinks")
         relative = ARTIFACTS[target]
         # Do not allow a release to install anything except its declared artifact.
         for path in staging.rglob("*"):

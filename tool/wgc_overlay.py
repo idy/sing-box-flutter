@@ -36,7 +36,7 @@ def source_digest(root: Path) -> str:
         if path.is_symlink():
             raise BuildError("WGC source inputs must not be symlinks")
         digest.update(path.relative_to(root).as_posix().encode() + b"\0")
-        digest.update(path.read_bytes())
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
         digest.update(b"\0")
     return digest.hexdigest()
 
