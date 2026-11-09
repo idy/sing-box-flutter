@@ -44,6 +44,8 @@ struct PreflightSmoke {
         try implicitDirectChecks(full)
         try opaqueMapChecks(full)
         try caseFoldingChecks(full, minimal)
+        try precedenceChecks(full, minimal)
+        try parserChecks(full, minimal)
         // Deliberately beyond preflight: references, key material and unknown
         // protocol fields must still be rejected by the extension's real core.
         try ConfigPreflight.check(#"{"inbounds":[{"type":"tun"}],"endpoints":[{"type":"wgc","private_key":"not-a-key"}],"route":{"final":"missing"}}"#, capabilities: minimal, requireTUN: true)
@@ -56,7 +58,7 @@ struct PreflightSmoke {
         precondition(decodedSession.coreFingerprint == nil)
         let event = TunnelStatus("error", message: String(repeating: "a", count: 1000)).event
         precondition(event["type"] as? String == "status" && (event["message"] as? String)?.count == 240)
-        print("Foundation preflight: scoped shapes, field-name folding, transports, TLS, ACME, implicit direct, opaque maps and existing contract checks passed.")
+        print("Foundation preflight: ordered parsing, member precedence, scoped shapes, field-name folding, transports, TLS, ACME, implicit direct, opaque maps and existing contract checks passed.")
     }
 
     private static func scopedPrimitiveChecks(_ full: CoreCapabilities) throws {
@@ -139,13 +141,14 @@ struct PreflightSmoke {
         let withoutTLS = withFeatures(full, ["tls": []])
         for outer in ["", #""enabled":true,"#, #""enabled":false,"#] {
             for feature in ["utls", "reality", "ech"] {
-                for settings in ["{}", #"{"enabled":false}"#] {
+                // Null resets the native pointer, like an omitted feature.
+                for settings in ["{}", #"{"enabled":false}"#, "null"] {
                     try ConfigPreflight.check("{\"outbounds\":[{\"type\":\"http\",\"tls\":{\(outer)\"\(feature)\":\(settings)}}]}", capabilities: withoutTLS)
                 }
                 let active = "{\"outbounds\":[{\"type\":\"http\",\"tls\":{\(outer)\"\(feature)\":{\"enabled\":true}}}]}"
                 try rejects(active, capabilities: withoutTLS)
                 try ConfigPreflight.check(active, capabilities: full)
-                for settings in ["false", "null", "[]", #""settings""#, #"{"enabled":"false"}"#, #"{"enabled":0}"#, #"{"enabled":1}"#, #"{"enabled":null}"#] {
+                for settings in ["false", "[]", #""settings""#, #"{"enabled":"false"}"#, #"{"enabled":0}"#, #"{"enabled":1}"#, #"{"enabled":null}"#] {
                     try rejects("{\"outbounds\":[{\"type\":\"http\",\"tls\":{\(outer)\"\(feature)\":\(settings)}}]}", capabilities: full)
                 }
             }
@@ -161,9 +164,10 @@ struct PreflightSmoke {
             try ConfigPreflight.check(config, capabilities: selected, requireTUN: true)
             try rejects(config, capabilities: unselected, requireTUN: true)
         }
-        for acme in ["true", "null", "[]", #""acme""#, #"{"domain":1}"#, #"{"domain":["example.com",false]}"#] {
+        for acme in ["true", "[]", #""acme""#, #"{"domain":1}"#, #"{"domain":["example.com",false]}"#] {
             try rejects(#"{"inbounds":[{"type":"trojan","tls":{"acme":\#(acme)}}]}"#, capabilities: selected)
         }
+        try ConfigPreflight.check(#"{"inbounds":[{"type":"trojan","tls":{"acme":null}}]}"#, capabilities: unselected)
         try rejects(#"{"inbounds":[{"type":"trojan","tls":{"acme":{},"utls":{"enabled":true}}}]}"#, capabilities: selected)
         try rejects(#"{"inbounds":[{"type":"trojan","tls":{"acme":{},"certificate_provider":{"type":"unknown"}}}]}"#, capabilities: selected)
         // Mutual exclusion and issuance details remain engine checks.
@@ -195,7 +199,7 @@ struct PreflightSmoke {
     }
 
     /// Mirrors the pinned decoder: option fields fold ASCII case plus U+212A/U+017F,
-    /// union discriminators and map keys stay exact, and every spelling is checked.
+    /// union discriminators and map keys stay exact, and the later spelling wins.
     private static func caseFoldingChecks(_ full: CoreCapabilities, _ minimal: CoreCapabilities) throws {
         let kelvin = "\u{212A}", longS = "\u{17F}"
         try ConfigPreflight.check(#"{"HTTP_Clients":[{"tag":"c","version":1,"TLS":{"ech":{"enabled":false}}}],"Route":{"Final":"fixture"},"$SCHEMA":"x"}"#, capabilities: minimal)
@@ -220,7 +224,7 @@ struct PreflightSmoke {
             #"{"outbounds":[{"type":"http","tls":{"Certificate_Provider":{"type":"tailscale"}}}]}"#,
             #"{"DNS":{"Servers":[{"type":"udp"}]}}"#,
             #"{"Experimental":{"Clash_API":{}}}"#,
-            #"{"inbounds":[{"type":"trojan","tls":{"Acme":{}}}]}"#
+            #"{"inbounds":[{"type":"trojan","tls":{"Acme":{"domain":"example.com"}}}]}"#
         ] {
             try rejects(config, capabilities: limited)
         }
@@ -276,7 +280,7 @@ struct PreflightSmoke {
         let noDirect = withFeatures(full, ["outbounds": ["http"], "endpoints": ["wgc"]])
         try ConfigPreflight.check(#"{"Endpoints":[{"type":"wgc","tag":"vpn"}],"Route":{"Final":"vpn"}}"#, capabilities: noDirect)
         try rejects(#"{"Endpoints":[{"type":"wgc","tag":"vpn"}],"Route":{"FINAL":""}}"#, capabilities: noDirect)
-        // Either route spelling may be decoded last, so an empty final may take effect.
+        // The later Route spelling merges in and sets an empty final.
         try rejects(#"{"Endpoints":[{"type":"wgc","tag":"vpn"}],"route":{"final":"vpn"},"Route":{"Final":""}}"#, capabilities: noDirect)
 
         // Opaque and map-typed values keep exact keys; map values are still options.
@@ -284,6 +288,162 @@ struct PreflightSmoke {
         try ConfigPreflight.check(#"{"endpoints":[{"type":"wgc","transport":"app","Transport_Options":{"tls":"opaque","Transport":{"type":"private-protocol"},"ech":{"enabled":true}}}]}"#, capabilities: minimal)
         try ConfigPreflight.check(#"{"inbounds":[{"type":"trojan","Fallback_For_ALPN":{"TLS":{"server":"192.0.2.1","Server_Port":443}}}],"services":[{"type":"ssm-api","Servers":{"Transport":"ss-in","TLS":"ss-in"}}],"outbounds":[{"type":"tor","Torrc":{"Enabled":"1"}}]}"#, capabilities: full)
         try rejects(#"{"inbounds":[{"type":"trojan","fallback_for_alpn":{"h2":{"Server_Port":70000}}}]}"#, capabilities: full)
+    }
+
+    /// Member order decides, as in the pinned decoder: the later member wins, null
+    /// resets pointer and slice fields, and option unions first collapse a repeated
+    /// exact key to its first position with its last value and drop empty values.
+    private static func precedenceChecks(_ full: CoreCapabilities, _ minimal: CoreCapabilities) throws {
+        let noTLS = withFeatures(full, ["tls": []])
+        let http = #""type":"http","tag":"h","server":"192.0.2.1","server_port":8080"#
+        let vmess = #""type":"vmess","tag":"v","server":"192.0.2.1","server_port":443,"uuid":"11111111-1111-4111-8111-111111111111""#
+        let trojan = #""type":"trojan","tag":"t","listen_port":1"#
+        func outbound(_ fields: String) -> String { "{\"outbounds\":[{\(fields)}]}" }
+        func inbound(_ fields: String) -> String { "{\"inbounds\":[{\(fields)}]}" }
+
+        // Later spellings win inside one object and across split objects; null resets.
+        for tls in [
+            #""enabled":true,"utls":{"enabled":true,"ENABLED":false}"#,
+            #""enabled":true,"utls":{"enabled":true},"UTLS":{"enabled":false}"#,
+            #""enabled":true,"utls":{"enabled":true},"UTLS":null"#
+        ] {
+            try ConfigPreflight.check(outbound(#"\#(http),"tls":{\#(tls)}"#), capabilities: noTLS)
+        }
+        for tls in [#""enabled":true,"utls":{"ENABLED":false,"enabled":true}"#, #""enabled":true,"UTLS":null,"utls":{"enabled":true}"#] {
+            try rejects(outbound(#"\#(http),"tls":{\#(tls)}"#), capabilities: noTLS)
+        }
+        // A union collapses a repeated exact key, at any depth, to its first position
+        // with its last value, then drops empty objects.
+        for fields in [
+            #"\#(http),"tls":{"utls":{"enabled":true}},"tls":{"enabled":true}"#,
+            #"\#(http),"tls":{"enabled":true,"utls":{"enabled":true},"UTLS":{"enabled":false},"utls":{"enabled":true}}"#,
+            #"\#(http),"tls":{"enabled":true,"utls":{"enabled":true},"utls":{}}"#,
+            #"\#(http),"tls":{"enabled":true,"utls":{"enabled":true},"utls":null}"#
+        ] {
+            try ConfigPreflight.check(outbound(fields), capabilities: noTLS)
+        }
+        // HTTP clients decode TLS plainly, applying every member in order.
+        for config in [
+            #"{"http_clients":[{"tag":"c","version":1,"tls":{"enabled":true,"utls":{"enabled":true},"UTLS":{"enabled":false},"utls":{"enabled":true}}}]}"#,
+            #"{"http_clients":[{"tag":"c","version":1,"tls":{"utls":{"enabled":true}},"tls":{"enabled":true}}]}"#
+        ] {
+            try rejects(config, capabilities: noTLS)
+        }
+
+        // Top-level options are plain too: repeated root keys apply in order.
+        let noAPI = withFeatures(full, ["api": []])
+        for config in [
+            #"{"experimental":{"clash_api":{}},"experimental":null}"#,
+            #"{"experimental":{"clash_api":{},"Clash_API":null}}"#,
+            #"{"experimental":{"clash_api":{},"clash_api":null}}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: noAPI)
+        }
+        for config in [#"{"experimental":{"clash_api":{}},"experimental":{"cache_file":{}}}"#, #"{"experimental":{"v2ray_api":null,"V2Ray_API":{}}}"#] {
+            try rejects(config, capabilities: noAPI)
+        }
+        for config in [#"{"inbounds":[],"Inbounds":[{"type":"tun"}]}"#, #"{"inbounds":[{"type":"tun"},{"type":"tun"}],"Inbounds":[{"type":"tun"}]}"#] {
+            try ConfigPreflight.check(config, capabilities: minimal, requireTUN: true)
+        }
+        for config in [#"{"inbounds":[{"type":"tun"}],"inbounds":[]}"#, #"{"inbounds":[{"type":"tun"}],"Inbounds":null}"#] {
+            try rejects(config, capabilities: minimal, requireTUN: true)
+        }
+        let noDirect = withFeatures(full, ["outbounds": ["http"], "endpoints": ["wgc"]])
+        let endpoint = #""endpoints":[{"type":"wgc","tag":"vpn"}]"#
+        try ConfigPreflight.check(#"{\#(endpoint),"route":{"final":""},"Route":{"final":"vpn"}}"#, capabilities: noDirect)
+        try ConfigPreflight.check(#"{"outbounds":[],"Outbounds":[{\#(http)}]}"#, capabilities: noDirect)
+        try rejects(#"{\#(endpoint),"route":{"final":"vpn"},"route":null}"#, capabilities: noDirect)
+        try rejects(#"{"outbounds":[{\#(http)}],"outbounds":[]}"#, capabilities: noDirect)
+
+        // Unions read the last non-null exact type, but every array entry still decodes.
+        try ConfigPreflight.check(#"{"outbounds":[{"type":"unknown-x","type":"direct"}]}"#, capabilities: full)
+        try ConfigPreflight.check(#"{"outbounds":[{"type":"direct","type":null}]}"#, capabilities: full)
+        try rejects(#"{"outbounds":[{"type":1,"type":"direct"}]}"#, capabilities: full)
+        try rejects(#"{"outbounds":[{"type":"unknown-x"}],"Outbounds":[]}"#, capabilities: full)
+        // DNS options are a union whose nested servers arrive collapsed; any fakeip fails.
+        try ConfigPreflight.check(#"{"dns":{"servers":[{"type":"unknown-x"}],"servers":[]}}"#, capabilities: full)
+        for config in [
+            #"{"dns":{"servers":[{"type":"unknown-x"}],"Servers":[]}}"#,
+            #"{"dns":{"servers":[{"type":"udp","type":null,"server":"1.1.1.1"}]}}"#,
+            #"{"dns":{"fakeip":null}}"#,
+            #"{"dns":{"fakeip":{}},"dns":null}"#
+        ] {
+            try rejects(config, capabilities: full)
+        }
+
+        // Null resets pointer and slice fields without requiring any feature.
+        let bare = withFeatures(full, ["tls": [], "transports": [], "api": [], "certificate_providers": []])
+        for config in [
+            #"{"log":null,"dns":null,"ntp":null,"certificate":null,"route":null,"experimental":null,"inbounds":null,"outbounds":null,"endpoints":null,"services":null,"certificate_providers":null,"http_clients":null,"network_namespaces":null,"$schema":null}"#,
+            outbound(#"\#(vmess),"tls":null,"multiplex":null,"transport":null"#),
+            outbound(#"\#(http),"tls":{"utls":null,"reality":null,"ech":null}"#),
+            inbound(#"\#(trojan),"tls":{"acme":null,"certificate_provider":null,"ech":null,"reality":null}"#)
+        ] {
+            try ConfigPreflight.check(config, capabilities: bare)
+        }
+        // Every V2Ray transport type decodes; only the effective one is constructed.
+        let grpcOnly = withFeatures(full, ["transports": ["grpc"]])
+        for transport in [#""transport":{"type":"ws"},"Transport":{"type":"grpc"}"#, #""transport":{"type":"ws"},"Transport":null"#, #""transport":{}"#] {
+            try ConfigPreflight.check(outbound(#"\#(vmess),\#(transport)"#), capabilities: grpcOnly)
+        }
+        try rejects(outbound(#"\#(vmess),"transport":{"type":"grpc"},"Transport":{"type":"ws"}"#), capabilities: grpcOnly)
+        // Inline ACME needs the provider only when an effective, non-empty object remains.
+        for tls in [#""enabled":true,"acme":{"domain":["example.com"]},"ACME":null"#, #""enabled":true,"acme":{}"#, #""enabled":true,"acme":{"domain":[]}"#] {
+            try ConfigPreflight.check(inbound(#"\#(trojan),"tls":{\#(tls)}"#), capabilities: full)
+        }
+        try rejects(inbound(#"\#(trojan),"tls":{"enabled":true,"ACME":null,"acme":{"domain":"example.com"}}"#), capabilities: full)
+        // A rule set's tag is its last exact member; its URL is the collapsed one.
+        try ConfigPreflight.check(#"{"route":{"rule_set":[{"type":"remote","tag":"a","url":"https://e.example/a.srs","url":"https://e.example/{tag}.srs","tag":["a","b"]}]}}"#, capabilities: full)
+    }
+
+    /// The ordered parser accepts RFC 8259 only (the native decoder also accepts
+    /// comments and trailing commas) and bounds nesting at 128 levels.
+    private static func parserChecks(_ full: CoreCapabilities, _ minimal: CoreCapabilities) throws {
+        // JSON escapes decode before field matching: t\u0075n is tun, \u212a folds to k.
+        try ConfigPreflight.check(#"{"inbounds":[{"type":"t\u0075n"}],"networ\u212a_namespaces":[]}"#, capabilities: minimal, requireTUN: true)
+        try ConfigPreflight.check(#"{"outbounds":[{"type":"direct","tag":"\ud83d\ude00 \ud800 \udc00x \ud800A \"\\\/\b\f\n\r\t"}]}"#, capabilities: minimal)
+        // An unpaired surrogate becomes U+FFFD, as in Go, rather than disappearing.
+        try rejects(#"{"inbounds":[{"type":"tun\ud800"}]}"#, capabilities: minimal, requireTUN: true)
+        for invalid in ["", " ", "\n"] {
+            do {
+                try ConfigPreflight.check(invalid, capabilities: full)
+                fatalError("Empty configuration accepted")
+            } catch let failure as TunnelFailure { precondition(failure.code == "invalid_config") }
+        }
+        for invalid in [
+            "{} {}", #"{"outbounds":[]}x"#, #"{"route"}"#, #"{'route':{}}"#, #"{"route":{"final":"a}}"#,
+            #"{"inbounds":[{"type":"tun","mtu":01}]}"#, #"{"inbounds":[{"type":"tun","mtu":1.}]}"#,
+            #"{"inbounds":[{"type":"tun","mtu":.5}]}"#, #"{"inbounds":[{"type":"tun","mtu":+1}]}"#,
+            #"{"inbounds":[{"type":"tun","mtu":-}]}"#, #"{"inbounds":[{"type":"tun","mtu":1e}]}"#,
+            #"{"inbounds":[{"type":"tun","mtu":NaN}]}"#, #"{"inbounds":[{"type":"tun","mtu":Infinity}]}"#,
+            #"{"inbounds":[{"type":"tun","auto_route":True}]}"#, #"{"outbounds":[{"type":"direct","tag":"\x"}]}"#,
+            #"{"outbounds":[{"type":"direct","tag":"\u12"}]}"#, "{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"a\u{1}b\"}]}"
+        ] {
+            try rejects(invalid, capabilities: full)
+        }
+        try depthChecks(full)
+    }
+
+    /// The app and the extension run preflight on 512 KiB dispatch threads. The
+    /// deepest accepted configuration must fit there in this unoptimized build;
+    /// one level more is rejected (sing-box itself allows 10000).
+    private static func depthChecks(_ full: CoreCapabilities) throws {
+        func config(depth: Int) -> String {
+            let nested = depth - 3 // Inside the root, the outbounds array and one outbound.
+            return #"{"outbounds":[{"type":"http","x":"# + String(repeating: #"{"x":"#, count: nested - 1) + "{}" +
+                String(repeating: "}", count: nested - 1) + "}]}"
+        }
+        var outcome: (deepest: Bool, deeper: Bool)?
+        let done = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            outcome = ((try? ConfigPreflight.check(config(depth: 128), capabilities: full)) != nil,
+                       (try? ConfigPreflight.check(config(depth: 129), capabilities: full)) != nil)
+            done.signal()
+        }
+        thread.stackSize = 512 * 1024
+        thread.start()
+        done.wait()
+        precondition(outcome?.deepest == true && outcome?.deeper == false, "Nesting bound changed")
     }
 
     private static func withFeatures(_ base: CoreCapabilities, _ overrides: [String: [String]]) -> CoreCapabilities {

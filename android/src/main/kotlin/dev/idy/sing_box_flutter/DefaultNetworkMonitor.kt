@@ -28,14 +28,20 @@ internal class DefaultNetworkMonitor(private val service: SingBoxVpnService) {
     @Volatile private var running = false
     private var callbackThread: HandlerThread? = null
     private var handler: Handler? = null
+    // The listener seed (on libbox's start thread) and connectivity callbacks (on
+    // callbackThread) both publish. Each reads currentNetwork inside this lock and
+    // delivers before releasing it, so a seed read before a newer network can never
+    // be delivered after it: whichever publication runs last reads the newest path.
+    // Delivery calls into libbox, which may call getInterfaces but never this lock.
+    private val publication = Any()
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = dispatch { select(network) }
         override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) = dispatch {
-            if (network == currentNetwork) update(network)
+            if (network == currentNetwork) publish()
         }
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) = dispatch {
-            if (network == currentNetwork) update(network)
+            if (network == currentNetwork) publish()
         }
         override fun onLost(network: Network) = dispatch {
             if (network == currentNetwork) select(null)
@@ -80,7 +86,7 @@ internal class DefaultNetworkMonitor(private val service: SingBoxVpnService) {
 
     fun setListener(value: InterfaceUpdateListener?) {
         listener = value
-        if (value != null) update(currentNetwork)
+        if (value != null) publish()
     }
 
     fun close() {
@@ -119,29 +125,33 @@ internal class DefaultNetworkMonitor(private val service: SingBoxVpnService) {
         currentNetwork = network
         // Updates Android's VPN underlay along with libbox's interface monitor.
         service.setUnderlyingNetworks(network?.let { arrayOf(it) } ?: emptyArray())
-        update(network)
+        publish()
     }
 
-    private fun update(network: Network?, attempt: Int = 0) {
-        val target = listener ?: return
-        if (!running) return
-        if (network == null) {
-            target.updateDefaultInterface("", -1, false, false)
-            return
+    /** Publishes the current path; see [publication] for the ordering guarantee. */
+    private fun publish(attempt: Int = 0) {
+        synchronized(publication) {
+            val target = listener ?: return
+            if (!running) return
+            val network = currentNetwork
+            if (network == null) {
+                target.updateDefaultInterface("", -1, false, false)
+                return
+            }
+            val properties = connectivity.getLinkProperties(network)
+            val capabilities = connectivity.getNetworkCapabilities(network)
+            val name = properties?.interfaceName
+            val index = name?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
+            if (index == null || index <= 0 || capabilities == null) {
+                // LinkProperties may arrive after onAvailable; retry off the lifecycle and UI threads.
+                if (attempt < 10) handler?.postDelayed({
+                    if (running && currentNetwork == network) publish(attempt + 1)
+                }, 100)
+                else target.updateDefaultInterface("", -1, false, false)
+                return
+            }
+            target.updateDefaultInterface(name, index,
+                !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED), false)
         }
-        val properties = connectivity.getLinkProperties(network)
-        val capabilities = connectivity.getNetworkCapabilities(network)
-        val name = properties?.interfaceName
-        val index = name?.let { runCatching { NetworkInterface.getByName(it)?.index }.getOrNull() }
-        if (index == null || index <= 0 || capabilities == null) {
-            // LinkProperties may arrive after onAvailable; retry off the lifecycle and UI threads.
-            if (attempt < 10) handler?.postDelayed({
-                if (running && currentNetwork == network) update(network, attempt + 1)
-            }, 100)
-            else target.updateDefaultInterface("", -1, false, false)
-            return
-        }
-        target.updateDefaultInterface(name, index,
-            !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED), false)
     }
 }

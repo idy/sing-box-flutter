@@ -55,15 +55,17 @@ if selectable
     raise 'Invalid receipt features' unless features.is_a?(Hash) && features.keys.sort == groups.sort && features.values.all? { |v| v.is_a?(Array) && v.all? { |x| x.is_a?(String) && !x.empty? } && v.uniq == v }
     apple = receipt.fetch('artifacts').fetch('apple')
     recipe_checker = File.expand_path('../tool/core_recipe.py', __dir__)
+    artifact_digest = nil
     recipe_python = [ENV['SINGBOX_PYTHON'], 'python3.14', 'python3.13', 'python3.12', 'python3.11', 'python3', 'python'].compact.uniq.find do |python|
       begin
-        _output, _error, status = Open3.capture3(python, '-I', recipe_checker, '--project-dir', host_root.to_s, '--target', 'apple')
+        output, _error, status = Open3.capture3(python, '-I', recipe_checker, '--project-dir', host_root.to_s, '--target', 'apple', '--print-artifact-digest')
+        artifact_digest = output.strip if status.success?
         status.success?
       rescue SystemCallError
         false
       end
     end
-    raise 'Stale selected core recipe or missing Python 3; set SINGBOX_PYTHON and rebuild.' unless recipe_python
+    raise 'Stale selected core recipe or missing Python 3; set SINGBOX_PYTHON and rebuild.' unless recipe_python && artifact_digest.match?(/\A[0-9a-f]{64}\z/)
     resolve = lambda do |relative|
       raise 'Artifact paths must be project relative' unless relative.is_a?(String) && !relative.empty? && !Pathname.new(relative).absolute? && !relative.include?('\\')
       parts = relative.split('/')
@@ -129,7 +131,8 @@ end
 profile_guard = if selectable
                   <<-SCRIPT
 set -eu
-#{Shellwords.escape(recipe_python)} -I #{Shellwords.escape(recipe_checker)} --project-dir #{Shellwords.escape(host_root.to_s)} --target apple
+# Xcode links the framework chosen at pod install; reject a receipt naming another.
+#{Shellwords.escape(recipe_python)} -I #{Shellwords.escape(recipe_checker)} --project-dir #{Shellwords.escape(host_root.to_s)} --target apple --installed-artifact #{Shellwords.escape(apple.fetch('path'))} --installed-sha256 #{Shellwords.escape(artifact_digest)}
 current_fingerprint=$(/usr/bin/plutil -extract fingerprint raw -o - #{Shellwords.escape(receipt_path.to_s)})
 current_pubspec_hash=$(/usr/bin/shasum -a 256 #{Shellwords.escape(host_root.join('pubspec.yaml').to_s)})
 current_pubspec_hash=${current_pubspec_hash%% *}

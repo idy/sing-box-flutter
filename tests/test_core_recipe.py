@@ -87,8 +87,32 @@ class CurrentRecipe(unittest.TestCase):
         artifact.write_bytes(b"replaced after pod install")
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("stale or invalid", result.stderr)
+        self.assertIn("changed after it was built", result.stderr)
         artifact.write_bytes(b"fixture artifact")
+        # CocoaPods bakes the installed path and digest; the build guard binds to them.
+        printed = subprocess.run(command + ["--print-artifact-digest"], capture_output=True, text=True)
+        self.assertEqual(printed.returncode, 0, printed.stderr)
+        digest = printed.stdout.strip()
+        self.assertEqual(digest, canonical_hash(receipt["artifacts"]["android"]["sha256"]))
+        installed = command + ["--installed-artifact", ".dart_tool/sing_box_flutter/libbox.aar",
+                               "--installed-sha256", digest]
+        self.assertEqual(subprocess.run(installed, capture_output=True, text=True).returncode, 0)
+        rebuilt = cache / "rebuilt/libbox.aar"
+        rebuilt.parent.mkdir()
+        rebuilt.write_bytes(b"fixture artifact")
+        receipt["artifacts"]["android"]["path"] = ".dart_tool/sing_box_flutter/rebuilt/libbox.aar"
+        write_json(cache / "native.json", receipt)
+        self.assertEqual(subprocess.run(command, capture_output=True, text=True).returncode, 0)
+        result = subprocess.run(installed, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("since pod install", result.stderr)
+        receipt["artifacts"]["android"]["path"] = ".dart_tool/sing_box_flutter/libbox.aar"
+        artifact.write_bytes(b"replaced and re-recorded")
+        receipt["artifacts"]["android"]["sha256"] = {"libbox.aar": sha256(artifact)}
+        write_json(cache / "native.json", receipt)
+        self.assertEqual(subprocess.run(command, capture_output=True, text=True).returncode, 0)
+        self.assertEqual(subprocess.run(installed, capture_output=True, text=True).returncode, 1)
+        self.assertNotEqual(subprocess.run(command + ["--installed-artifact", "x"], capture_output=True).returncode, 0)
         write_json(cache / "core-capabilities.json", {**capabilities, "features": {}})
         self.assertEqual(subprocess.run(command, capture_output=True, text=True).returncode, 1)
 

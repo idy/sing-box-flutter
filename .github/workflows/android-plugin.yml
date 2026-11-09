@@ -41,23 +41,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Reuse only a successful Native core run of this exact revision from this
-          # repository. A pull_request run can rewrite native-core.yml, so it controls
-          # both the selected AAR and the receipt and checksums that describe it.
+          # Reuse only a successful Native core run of this exact default-branch revision
+          # from this repository. Any other producer controls both the selected AAR and
+          # the receipt and checksums that describe it: a pull_request run can rewrite
+          # native-core.yml, and a dispatch from another branch runs that branch's copy.
+          # Validation dispatched from another branch also runs its own copy of this
+          # workflow, so it never reuses a selected core and always builds from source.
           eligible=false
-          if [[ "$CORE_RUN_ID" =~ ^[0-9]+$ ]] &&
+          default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch) || default_branch=
+          if [[ "$CORE_RUN_ID" =~ ^[0-9]+$ ]] && [ -n "$default_branch" ] &&
+            [ "$GITHUB_REF" = "refs/heads/$default_branch" ] &&
             producer=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CORE_RUN_ID" \
-              --jq '[.status, .conclusion, .event, .path, .head_sha, .head_repository.full_name] | map(. // "") | join("|")'); then
-            IFS='|' read -r run_status run_conclusion run_event run_path run_sha run_repository <<< "$producer"
+              --jq '[.status, .conclusion, .event, .path, .head_sha, .head_repository.full_name, .head_branch] | map(. // "") | join("|")'); then
+            # head_branch is last: a branch name may contain the separator.
+            IFS='|' read -r run_status run_conclusion run_event run_path run_sha run_repository run_branch <<< "$producer"
             if [ "$run_status" = completed ] && [ "$run_conclusion" = success ] &&
               { [ "$run_event" = workflow_dispatch ] || [ "$run_event" = push ]; } &&
               [ "$run_path" = .github/workflows/native-core.yml ] &&
-              [ "$run_repository" = "$GITHUB_REPOSITORY" ] && [ "$run_sha" = "$GITHUB_SHA" ]; then
+              [ "$run_repository" = "$GITHUB_REPOSITORY" ] && [ "$run_sha" = "$GITHUB_SHA" ] &&
+              [ "$run_branch" = "$default_branch" ]; then
               eligible=true
             fi
           fi
           if [ "$eligible" != true ]; then
-            echo "The supplied run is not a successful trusted Native core run of this revision; the selected core will be built from source."
+            echo "The supplied run is not a successful Native core run of this default-branch revision; the selected core will be built from source."
           fi
           printf 'eligible=%s\n' "$eligible" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4

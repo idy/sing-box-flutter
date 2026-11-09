@@ -6,137 +6,182 @@ import CoreFoundation
 /// resolve references, parse keys/certificates, or run Go option constructors.
 /// NativeCore.check and service creation in PacketTunnel remain authoritative.
 ///
-/// Like the native decoder, option field names match case-insensitively. Member
-/// order is not available here, so when one field is spelled several ways, each
-/// spelling is checked as if it were the one that takes effect.
+/// The configuration is parsed with every object member kept in source order,
+/// so checks follow the pinned native decoder: option field names match
+/// case-insensitively, the later member of a field wins, and null resets pointer
+/// and slice fields. Option unions (protocol entries, DNS, rules and rule sets)
+/// re-read their options through badjson, which first collapses a repeated exact
+/// key to its first position with its last value and drops empty objects and
+/// arrays. Shape and component-type errors are checked on every member the
+/// decoder reads; capability checks that depend on precedence use the value
+/// that takes effect.
 enum ConfigPreflight {
-    /// Object members with keys exactly as written. Reading them from NSDictionary
-    /// keeps keys that Swift String equality would merge, such as "K" and U+212A.
+    /// Object members with keys exactly as written, in source order, repeats included.
     private typealias Members = [(key: String, value: Any)]
+    private struct JSONObject { let members: Members }
 
     static func check(_ config: String, capabilities: CoreCapabilities, requireTUN: Bool = false) throws {
         do {
-            guard let data = config.data(using: .utf8) else { throw TunnelFailure.invalidConfig }
-            let root = try members(JSONSerialization.jsonObject(with: data))
-            let objects: Set<String> = ["log", "dns", "ntp", "certificate", "route", "experimental"]
-            let arrays: Set<String> = ["inbounds", "outbounds", "endpoints", "services", "certificate_providers", "http_clients", "network_namespaces"]
-            for (key, value) in root {
+            var parser = Parser(config)
+            guard let root = try parser.document() as? JSONObject else { throw TunnelFailure.invalidConfig }
+            // Top-level options decode plainly: every member applies in source order.
+            for (key, value) in root.members {
                 let field = fieldName(key)
-                if objects.contains(field) { _ = try members(value) }
-                else if arrays.contains(field) { _ = try objectArray(value) }
-                else if field != "$schema" || !(value is String) { throw TunnelFailure.invalidConfig }
+                guard rootObjects.contains(field) || rootArrays.contains(field) || field == "$schema" else { throw TunnelFailure.invalidConfig }
+                if value is NSNull { continue } // Root fields are pointers, slices or a string.
+                if rootObjects.contains(field) { _ = try object(value) }
+                else if rootArrays.contains(field) { _ = try objectArray(value) }
+                else if !(value is String) { throw TunnelFailure.invalidConfig }
             }
-            for group in ["inbounds", "outbounds", "endpoints", "services", "certificate_providers"] {
-                for list in values(root, group) {
-                    for component in try objectArray(list) { try typed(component, group: group, capabilities: capabilities) }
+            try walk(root.members.map { Pending(value: $0.value, path: [fieldName($0.key)], union: false, endpointType: nil) }, capabilities)
+            if let experimental = merged(root.members, "experimental", union: false) {
+                for api in ["clash_api", "v2ray_api"] where merged(experimental, api, union: false) != nil {
+                    guard capabilities.supports("api", api) else { throw TunnelFailure.invalidConfig }
                 }
             }
-            let inboundLists = try values(root, "inbounds").map(objectArray)
-            for inbounds in inboundLists.isEmpty ? [[]] : inboundLists {
-                let tunCount = inbounds.filter { discriminator($0) == "tun" }.count
-                if tunCount > 1 { throw TunnelFailure(code: "multiple_tun", message: "Only one TUN inbound is supported on iOS.") }
-                if requireTUN && tunCount != 1 { throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound on iOS.") }
-            }
-            for dns in values(root, "dns") {
-                let dns = try members(dns)
-                for list in values(dns, "servers") {
-                    for server in try objectArray(list) { try typed(server, group: "dns", capabilities: capabilities) }
-                }
-                if !values(dns, "fakeip").isEmpty { throw TunnelFailure.invalidConfig } // Removed legacy DNS syntax.
-            }
-            for experimental in values(root, "experimental") {
-                for (key, value) in try members(experimental) {
-                    let field = fieldName(key)
-                    guard ["cache_file", "clash_api", "v2ray_api", "debug"].contains(field) else { throw TunnelFailure.invalidConfig }
-                    _ = try members(value)
-                    if ["clash_api", "v2ray_api"].contains(field), !capabilities.supports("api", field) { throw TunnelFailure.invalidConfig }
-                }
-            }
+            let inbounds = effectiveArray(root.members, "inbounds")
+            let tunCount = inbounds.filter { ($0 as? JSONObject).flatMap { discriminator($0.members) } == "tun" }.count
+            if tunCount > 1 { throw TunnelFailure(code: "multiple_tun", message: "Only one TUN inbound is supported on iOS.") }
+            if requireTUN && tunCount != 1 { throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound on iOS.") }
             // Endpoints become the default only through an explicit route.final.
             // Otherwise the engine creates direct when no outbound is configured.
-            let outboundLists = try values(root, "outbounds").map(objectArray)
-            let finals = try values(root, "route").flatMap { values(try members($0), "final") }
-            let mayLackOutbound = outboundLists.isEmpty || outboundLists.contains { $0.isEmpty }
-            let mayLackFinal = finals.isEmpty || finals.contains { ($0 as? String ?? "").isEmpty }
-            if !capabilities.supports("outbounds", "direct"), mayLackOutbound, mayLackFinal { throw TunnelFailure.invalidConfig }
-            for (key, value) in root { try walk(value, capabilities: capabilities, path: [fieldName(key)]) }
+            let final = merged(root.members, "route", union: false).flatMap { lastValue($0, "final") as? String } ?? ""
+            if !capabilities.supports("outbounds", "direct"), effectiveArray(root.members, "outbounds").isEmpty, final.isEmpty {
+                throw TunnelFailure.invalidConfig
+            }
         } catch let failure as TunnelFailure { throw failure }
-        catch { throw TunnelFailure.invalidConfig } // Never include JSON parser diagnostics.
+        catch { throw TunnelFailure.invalidConfig } // Never include parser diagnostics.
     }
 
-    /// Option unions read their exact `type` discriminator; the native decoder
-    /// rejects any other spelling as an unknown field of the selected options.
-    private static func typed(_ component: Members, group: String, capabilities: CoreCapabilities) throws {
-        guard let type = discriminator(component), !type.isEmpty, capabilities.supports(group, type),
-              onlyExactSpelling(component, "type") else { throw TunnelFailure.invalidConfig }
+    /// A value still to check. `union` is true when a badjson union has already
+    /// re-encoded it; `endpointType` is the owning endpoint's type.
+    private struct Pending {
+        let value: Any
+        let path: [String]
+        let union: Bool
+        let endpointType: String?
     }
 
-    private static func walk(_ value: Any, capabilities: CoreCapabilities, path: [String], endpointType: String? = nil) throws {
-        if let array = value as? [Any] {
-            for item in array { try walk(item, capabilities: capabilities, path: path + ["[]"], endpointType: endpointType) }
-            return
+    /// Visits every value with an explicit work list, in source order, so nesting
+    /// depth never grows the stack (frames are large in unoptimized builds).
+    private static func walk(_ start: [Pending], _ capabilities: CoreCapabilities) throws {
+        var pending = Array(start.reversed())
+        while let item = pending.popLast() {
+            var children: [Pending] = []
+            if let array = item.value as? [Any] {
+                children = array.map { Pending(value: $0, path: item.path + ["[]"], union: item.union, endpointType: item.endpointType) }
+            } else if let node = item.value as? JSONObject {
+                children = try checkObject(node, capabilities, path: item.path, union: item.union, endpointType: item.endpointType)
+            }
+            pending.append(contentsOf: children.reversed())
         }
-        guard value is NSDictionary else { return }
-        let dictionary = try members(value)
+    }
+
+    /// Checks one object and returns the member values to visit next.
+    private static func checkObject(_ node: JSONObject, _ capabilities: CoreCapabilities, path: [String], union: Bool, endpointType: String?) throws -> [Pending] {
+        // What this object's own decoder reads, such as a union's `type`.
+        let delivered = union ? collapsed(node.members) : node.members
+        // A union boundary re-reads its options, and everything inside, through badjson.
+        let boundary = typedPaths[path] != nil || unionPaths.contains(path)
+        let inUnion = union || boundary
+        let members = inUnion ? collapsed(node.members) : node.members
+        let effective = inUnion ? withoutEmpty(members) : members
+        let componentType = discriminator(delivered)
         // Track the owning endpoint only at its schema boundary. Nested type
         // fields must not change how an unrelated option is interpreted.
-        let componentType = discriminator(dictionary)
         let endpointType = path == ["endpoints", "[]"] ? componentType : endpointType
-        let ruleSetDefinition = path == ["route", "rule_set", "[]"]
         let openVPNPush = endpointType == "openvpn-server" && path == ["endpoints", "[]", "push"]
         let openVPNDNS = endpointType == "openvpn-server" && path == ["endpoints", "[]", "push", "dns_servers", "[]"]
-        if ruleSetDefinition { try checkRuleSetTags(dictionary) }
-        for (key, item) in dictionary {
+        let stringTransport = openVPNDNS || (path == ["endpoints", "[]"] && endpointType == "wgc")
+        if let group = typedPaths[path] { try typed(delivered, group: group, capabilities: capabilities) }
+        if path == ["route", "rule_set", "[]"] { try checkRuleSet(delivered, effective) }
+        // Removed legacy DNS syntax: the decoder fails on any fakeip value, null included.
+        if path == ["dns"], delivered.contains(where: { fieldName($0.key) == "fakeip" }) { throw TunnelFailure.invalidConfig }
+        if path == ["experimental"] {
+            for (key, item) in delivered {
+                guard experimentalFields.contains(fieldName(key)), item is JSONObject || item is NSNull else { throw TunnelFailure.invalidConfig }
+            }
+        }
+        try checkEffective(effective, union: inUnion, stringTransport: stringTransport, capabilities: capabilities)
+        var children: [Pending] = []
+        for (key, item) in members {
+            // The parent discriminator is checked above from `delivered`.
+            if boundary, isExact(key, "type") { continue }
             let field = fieldName(key)
             // Opaque application maps and WGC transport options have their own schemas.
             if opaqueFields.contains(field) { continue }
-            // Map keys are data, not field names: keep them exact and check only values.
-            if mapFields.contains(field), item is NSDictionary {
-                for (_, entry) in try members(item) {
-                    try walk(entry, capabilities: capabilities, path: path + [field, "{}"], endpointType: endpointType)
+            if field == "servers", path == ["dns"] {
+                _ = try objectArray(item)
+            } else if mapFields.contains(field), let map = item as? JSONObject {
+                // Map keys are data, not field names: keep them exact and check only values.
+                for (_, entry) in inUnion ? collapsed(map.members) : map.members {
+                    children.append(Pending(value: entry, path: path + [field, "{}"], union: inUnion, endpointType: endpointType))
                 }
                 continue
             }
-            if field == "tls" {
-                let tls = try members(item)
-                for feature in ["utls", "reality", "ech"] {
-                    for settings in values(tls, feature) {
-                        for enabled in values(try members(settings), "enabled") {
-                            guard isBool(enabled) else { throw TunnelFailure.invalidConfig }
-                            if enabled as? Bool == true, !capabilities.supports("tls", feature) { throw TunnelFailure.invalidConfig }
-                        }
-                    }
-                }
-                // Inline ACME is deprecated, but remains available in this pin.
-                for acme in values(tls, "acme") {
-                    _ = try members(acme)
-                    if !capabilities.supports("certificate_providers", "acme") { throw TunnelFailure.invalidConfig }
-                }
-            } else if field == "transport" {
-                if openVPNDNS || (path == ["endpoints", "[]"] && endpointType == "wgc") {
+            if field == "transport" {
+                if stringTransport {
                     guard item is String else { throw TunnelFailure.invalidConfig }
-                } else {
-                    try typed(members(item), group: "transports", capabilities: capabilities)
-                }
+                } else if let transport = item as? JSONObject {
+                    try checkTypeSpelling(inUnion ? collapsed(transport.members) : transport.members)
+                } else if !(item is NSNull) { throw TunnelFailure.invalidConfig }
             }
             // Validate common option envelopes and primitive shapes, without
             // pretending to duplicate the engine's per-protocol schema.
             if field == "certificate_provider" {
-                if item is NSDictionary { try typed(members(item), group: "certificate_providers", capabilities: capabilities) }
-                else if !(item is String) { throw TunnelFailure.invalidConfig }
+                // Each inline provider is decoded through the compiled registry.
+                if let provider = item as? JSONObject {
+                    try typed(inUnion ? collapsed(provider.members) : provider.members, group: "certificate_providers", capabilities: capabilities)
+                } else if !(item is String || item is NSNull) { throw TunnelFailure.invalidConfig }
             }
-            if ["domain_resolver", "default_domain_resolver", "stun_domain_resolver"].contains(field), !(item is String) { _ = try members(item) }
-            if field == "udp_over_tcp", !isBool(item) { _ = try members(item) }
+            if ["domain_resolver", "default_domain_resolver", "stun_domain_resolver"].contains(field), !(item is String) { _ = try object(item) }
+            if field == "udp_over_tcp", !isBool(item) { _ = try object(item) }
             // Route/DNS rules reference rule sets by tag; route.rule_set defines objects.
             if field == "rule_set", path == ["route"] || (!(item is String) && !(item is [String])) { _ = try objectArray(item) }
-            if field == "push", endpointType == "openvpn-server", path == ["endpoints", "[]"] { _ = try members(item) }
+            if field == "push", endpointType == "openvpn-server", path == ["endpoints", "[]"] { _ = try object(item) }
             if field == "dns_servers", openVPNPush { _ = try objectArray(item) }
-            if objectKeys.contains(field) { _ = try members(item) }
+            if objectKeys.contains(field), !(item is NSNull) { _ = try object(item) } // Null resets these pointers.
             if arrayObjectKeys.contains(field) { _ = try objectArray(item) }
             if let shape = expectedPrimitiveShape(for: field, path: path, componentType: componentType) {
                 try validatePrimitive(item, as: shape)
             }
-            try walk(item, capabilities: capabilities, path: path + [field], endpointType: endpointType)
+            children.append(Pending(value: item, path: path + [field], union: inUnion, endpointType: endpointType))
+        }
+        return children
+    }
+
+    /// Capability checks whose outcome depends on which member takes effect.
+    private static func checkEffective(_ effective: Members, union: Bool, stringTransport: Bool, capabilities: CoreCapabilities) throws {
+        if let tls = merged(effective, "tls", union: union) {
+            for feature in ["utls", "reality", "ech"] {
+                guard let settings = merged(tls, feature, union: union), let enabled = lastValue(settings, "enabled"),
+                      isBool(enabled), enabled as? Bool == true else { continue }
+                if !capabilities.supports("tls", feature) { throw TunnelFailure.invalidConfig }
+            }
+            // Inline ACME is deprecated, but remains available in this pin.
+            if merged(tls, "acme", union: union) != nil, !capabilities.supports("certificate_providers", "acme") {
+                throw TunnelFailure.invalidConfig
+            }
+        }
+        // Every V2Ray transport type decodes; only the effective one is constructed.
+        if !stringTransport, let transport = merged(effective, "transport", union: union) {
+            guard let type = discriminator(transport), !type.isEmpty, capabilities.supports("transports", type) else {
+                throw TunnelFailure.invalidConfig
+            }
+        }
+    }
+
+    /// Option unions read `type` from every member they receive and keep the last
+    /// non-null one. Another spelling stays in the options, where the decoder
+    /// rejects it as an unknown field.
+    private static func typed(_ delivered: Members, group: String, capabilities: CoreCapabilities) throws {
+        try checkTypeSpelling(delivered)
+        guard let type = discriminator(delivered), !type.isEmpty, capabilities.supports(group, type) else { throw TunnelFailure.invalidConfig }
+    }
+
+    private static func checkTypeSpelling(_ delivered: Members) throws {
+        for (key, value) in delivered where fieldName(key) == "type" {
+            guard isExact(key, "type"), value is String || value is NSNull else { throw TunnelFailure.invalidConfig }
         }
     }
 
@@ -176,28 +221,31 @@ enum ConfigPreflight {
         }
     }
 
-    private static func checkRuleSetTags(_ definition: Members) throws {
-        // `type` and `tag` are exact union fields; the remaining fields fold case.
-        guard onlyExactSpelling(definition, "type"), onlyExactSpelling(definition, "tag") else { throw TunnelFailure.invalidConfig }
-        let value = exactValue(definition, "tag")
+    private static func checkRuleSet(_ delivered: Members, _ effective: Members) throws {
+        // `type` and `tag` are decoded plainly from every member and must be spelled
+        // exactly; the remaining options come from the union's collapsed members.
+        try checkTypeSpelling(delivered)
+        var value: Any?
+        for (key, item) in delivered where fieldName(key) == "tag" {
+            guard isExact(key, "tag"), item is String || item is [String] else { throw TunnelFailure.invalidConfig }
+            value = item
+        }
         let tags: [String]
         if let tag = value as? String { tags = [tag] }
         else if let list = value as? [String] { tags = list }
         else { throw TunnelFailure.invalidConfig }
         guard !tags.isEmpty, tags.allSatisfy({ !$0.isEmpty }) else { throw TunnelFailure.invalidConfig }
         if tags.count > 1 {
-            func placeholders(_ field: String, allowEmpty: Bool) -> Bool {
-                values(definition, field).allSatisfy { value in
-                    guard let text = value as? String else { return false }
-                    return (allowEmpty && text.isEmpty) || text.contains("{tag}")
-                }
+            func placeholder(_ field: String, required: Bool) -> Bool {
+                guard let value = lastValue(effective, field) else { return !required }
+                guard let text = value as? String else { return false }
+                return (!required && text.isEmpty) || text.contains("{tag}")
             }
-            switch discriminator(definition) {
+            switch discriminator(delivered) {
             case "remote":
-                guard !values(definition, "url").isEmpty, placeholders("url", allowEmpty: false),
-                      placeholders("initial_path", allowEmpty: true) else { throw TunnelFailure.invalidConfig }
+                guard placeholder("url", required: true), placeholder("initial_path", required: false) else { throw TunnelFailure.invalidConfig }
             case "local":
-                guard !values(definition, "path").isEmpty, placeholders("path", allowEmpty: false) else { throw TunnelFailure.invalidConfig }
+                guard placeholder("path", required: true) else { throw TunnelFailure.invalidConfig }
             default: throw TunnelFailure.invalidConfig // Inline rule sets support one tag.
             }
         }
@@ -218,40 +266,275 @@ enum ConfigPreflight {
         return String(folded)
     }
 
-    /// Every member the native decoder assigns to `field`, in no particular order.
-    private static func values(_ members: Members, _ field: String) -> [Any] {
-        members.filter { fieldName($0.key) == field }.map { $0.value }
-    }
+    /// Compares scalars: Swift String equality would match "K" with U+212A.
     private static func isExact(_ key: String, _ field: String) -> Bool {
         key.unicodeScalars.elementsEqual(field.unicodeScalars)
     }
-    private static func exactValue(_ members: Members, _ field: String) -> Any? {
-        members.first { isExact($0.key, field) }?.value
+    private static func discriminator(_ members: Members) -> String? {
+        members.last { isExact($0.key, "type") && !($0.value is NSNull) }?.value as? String
     }
-    private static func onlyExactSpelling(_ members: Members, _ field: String) -> Bool {
-        members.allSatisfy { fieldName($0.key) != field || isExact($0.key, field) }
+    /// A scalar field keeps its last non-null value.
+    private static func lastValue(_ members: Members, _ field: String) -> Any? {
+        members.last { fieldName($0.key) == field && !($0.value is NSNull) }?.value
     }
-    private static func discriminator(_ members: Members) -> String? { exactValue(members, "type") as? String }
+    /// A slice field keeps its last array; null resets it.
+    private static func effectiveArray(_ members: Members, _ field: String) -> [Any] {
+        members.last { fieldName($0.key) == field }?.value as? [Any] ?? []
+    }
+    /// The members a pointer-to-struct field ends with: each object after the
+    /// last null merges in source order. nil when the field is absent or reset.
+    private static func merged(_ members: Members, _ field: String, union: Bool) -> Members? {
+        var result: Members?
+        for (key, value) in members where fieldName(key) == field {
+            if value is NSNull { result = nil }
+            else if let object = value as? JSONObject {
+                result = (result ?? []) + (union ? withoutEmpty(collapsed(object.members)) : object.members)
+            }
+        }
+        return result
+    }
+    /// badjson keeps a repeated exact key at its first position with its last value.
+    private static func collapsed(_ members: Members) -> Members {
+        var result: Members = []
+        var positions: [[UInt8]: Int] = [:]
+        for member in members {
+            let key = Array(member.key.utf8)
+            if let position = positions[key] {
+                result[position].value = member.value
+            } else {
+                positions[key] = result.count
+                result.append(member)
+            }
+        }
+        return result
+    }
+    /// badjson drops members whose value is an empty object or array, recursively.
+    private static func withoutEmpty(_ members: Members) -> Members {
+        members.filter { !isEmptyUnionValue($0.value) }
+    }
+    private static func isEmptyUnionValue(_ value: Any) -> Bool {
+        if let object = value as? JSONObject { return collapsed(object.members).allSatisfy { isEmptyUnionValue($0.value) } }
+        if let array = value as? [Any] { return array.allSatisfy(isEmptyUnionValue) }
+        return false
+    }
 
     private static func isBool(_ value: Any) -> Bool {
         guard let number = value as? NSNumber else { return false }
         return CFGetTypeID(number) == CFBooleanGetTypeID()
     }
-    private static func members(_ value: Any) throws -> Members {
-        guard let dictionary = value as? NSDictionary else { throw TunnelFailure.invalidConfig }
-        return try dictionary.map { member in
-            guard let key = member.key as? String else { throw TunnelFailure.invalidConfig }
-            return (key: key, value: member.value)
+    private static func object(_ value: Any) throws -> JSONObject {
+        guard let object = value as? JSONObject else { throw TunnelFailure.invalidConfig }
+        return object
+    }
+    private static func objectArray(_ value: Any) throws -> [JSONObject] {
+        guard let array = value as? [Any] else { throw TunnelFailure.invalidConfig }
+        return try array.map(object)
+    }
+
+    /// Strict RFC 8259 parser that keeps every object member in order, with keys
+    /// as written. Like Go, an unpaired UTF-16 surrogate escape becomes U+FFFD.
+    private struct Parser {
+        /// Far deeper than real configurations. Parsing recurses, and unoptimized
+        /// builds use about 1 KiB of stack per nested object; 128 levels stay well
+        /// inside the 512 KiB dispatch threads that run preflight.
+        private static let maximumDepth = 128
+        private let bytes: [UInt8]
+        private var index = 0
+
+        init(_ text: String) { bytes = Array(text.utf8) }
+
+        mutating func document() throws -> Any {
+            let value = try parseValue(depth: 0)
+            skipWhitespace()
+            guard index == bytes.count else { throw TunnelFailure.invalidConfig }
+            return value
+        }
+
+        private mutating func parseValue(depth: Int) throws -> Any {
+            skipWhitespace()
+            guard index < bytes.count else { throw TunnelFailure.invalidConfig }
+            switch bytes[index] {
+            case UInt8(ascii: "{"): return try parseObject(depth: depth + 1)
+            case UInt8(ascii: "["): return try parseArray(depth: depth + 1)
+            case UInt8(ascii: "\""): return try parseString()
+            case UInt8(ascii: "t"): try literal("true"); return NSNumber(value: true)
+            case UInt8(ascii: "f"): try literal("false"); return NSNumber(value: false)
+            case UInt8(ascii: "n"): try literal("null"); return NSNull()
+            default: return try parseNumber()
+            }
+        }
+
+        private mutating func parseObject(depth: Int) throws -> JSONObject {
+            guard depth <= Self.maximumDepth else { throw TunnelFailure.invalidConfig }
+            index += 1
+            var members: Members = []
+            skipWhitespace()
+            if consume(UInt8(ascii: "}")) { return JSONObject(members: members) }
+            repeat {
+                skipWhitespace()
+                guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else { throw TunnelFailure.invalidConfig }
+                let key = try parseString()
+                skipWhitespace()
+                guard consume(UInt8(ascii: ":")) else { throw TunnelFailure.invalidConfig }
+                let value = try parseValue(depth: depth)
+                members.append((key: key, value: value))
+                skipWhitespace()
+            } while consume(UInt8(ascii: ","))
+            guard consume(UInt8(ascii: "}")) else { throw TunnelFailure.invalidConfig }
+            return JSONObject(members: members)
+        }
+
+        private mutating func parseArray(depth: Int) throws -> [Any] {
+            guard depth <= Self.maximumDepth else { throw TunnelFailure.invalidConfig }
+            index += 1
+            var items: [Any] = []
+            skipWhitespace()
+            if consume(UInt8(ascii: "]")) { return items }
+            repeat {
+                let item = try parseValue(depth: depth)
+                items.append(item)
+                skipWhitespace()
+            } while consume(UInt8(ascii: ","))
+            guard consume(UInt8(ascii: "]")) else { throw TunnelFailure.invalidConfig }
+            return items
+        }
+
+        private mutating func parseString() throws -> String {
+            index += 1
+            var output: [UInt8] = []
+            while index < bytes.count {
+                let byte = bytes[index]
+                index += 1
+                switch byte {
+                case UInt8(ascii: "\""):
+                    return String(decoding: output, as: UTF8.self)
+                case UInt8(ascii: "\\"):
+                    guard index < bytes.count else { throw TunnelFailure.invalidConfig }
+                    let escape = bytes[index]
+                    index += 1
+                    switch escape {
+                    case UInt8(ascii: "\""), UInt8(ascii: "\\"), UInt8(ascii: "/"): output.append(escape)
+                    case UInt8(ascii: "b"): output.append(0x08)
+                    case UInt8(ascii: "f"): output.append(0x0C)
+                    case UInt8(ascii: "n"): output.append(0x0A)
+                    case UInt8(ascii: "r"): output.append(0x0D)
+                    case UInt8(ascii: "t"): output.append(0x09)
+                    case UInt8(ascii: "u"):
+                        guard var code = hex(at: index) else { throw TunnelFailure.invalidConfig }
+                        index += 4
+                        if (0xD800...0xDBFF).contains(code), let low = lowSurrogate() {
+                            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                        } else if (0xD800...0xDFFF).contains(code) {
+                            code = 0xFFFD
+                        }
+                        UTF8.encode(Unicode.Scalar(code) ?? "\u{FFFD}") { output.append($0) }
+                    default: throw TunnelFailure.invalidConfig
+                    }
+                case 0..<0x20: throw TunnelFailure.invalidConfig
+                default: output.append(byte)
+                }
+            }
+            throw TunnelFailure.invalidConfig
+        }
+
+        /// Consumes a following `\uDC00`-`\uDFFF` escape; anything else stays unread.
+        private mutating func lowSurrogate() -> UInt32? {
+            guard index + 6 <= bytes.count, bytes[index] == UInt8(ascii: "\\"), bytes[index + 1] == UInt8(ascii: "u"),
+                  let code = hex(at: index + 2), (0xDC00...0xDFFF).contains(code) else { return nil }
+            index += 6
+            return code
+        }
+
+        private func hex(at start: Int) -> UInt32? {
+            guard start + 4 <= bytes.count else { return nil }
+            var code: UInt32 = 0
+            for byte in bytes[start..<start + 4] {
+                let digit: UInt8
+                switch byte {
+                case UInt8(ascii: "0")...UInt8(ascii: "9"): digit = byte - UInt8(ascii: "0")
+                case UInt8(ascii: "a")...UInt8(ascii: "f"): digit = byte - UInt8(ascii: "a") + 10
+                case UInt8(ascii: "A")...UInt8(ascii: "F"): digit = byte - UInt8(ascii: "A") + 10
+                default: return nil
+                }
+                code = code << 4 | UInt32(digit)
+            }
+            return code
+        }
+
+        private mutating func parseNumber() throws -> NSNumber {
+            let start = index
+            _ = consume(UInt8(ascii: "-"))
+            if !consume(UInt8(ascii: "0")) {
+                guard index < bytes.count, (UInt8(ascii: "1")...UInt8(ascii: "9")).contains(bytes[index]) else { throw TunnelFailure.invalidConfig }
+                skipDigits()
+            }
+            var integral = true
+            if consume(UInt8(ascii: ".")) {
+                integral = false
+                try requireDigits()
+            }
+            if consume(UInt8(ascii: "e")) || consume(UInt8(ascii: "E")) {
+                integral = false
+                if !consume(UInt8(ascii: "+")) { _ = consume(UInt8(ascii: "-")) }
+                try requireDigits()
+            }
+            let text = String(decoding: bytes[start..<index], as: UTF8.self)
+            if integral, let value = Int64(text) { return NSNumber(value: value) }
+            if integral, let value = UInt64(text) { return NSNumber(value: value) }
+            guard let value = Double(text) else { throw TunnelFailure.invalidConfig }
+            return NSNumber(value: value)
+        }
+
+        private mutating func requireDigits() throws {
+            let start = index
+            skipDigits()
+            guard index > start else { throw TunnelFailure.invalidConfig }
+        }
+
+        private mutating func skipDigits() {
+            while index < bytes.count, (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[index]) { index += 1 }
+        }
+
+        private mutating func literal(_ word: String) throws {
+            let expected = Array(word.utf8)
+            guard index + expected.count <= bytes.count, bytes[index..<index + expected.count].elementsEqual(expected) else {
+                throw TunnelFailure.invalidConfig
+            }
+            index += expected.count
+        }
+
+        private mutating func consume(_ byte: UInt8) -> Bool {
+            guard index < bytes.count, bytes[index] == byte else { return false }
+            index += 1
+            return true
+        }
+
+        private mutating func skipWhitespace() {
+            while index < bytes.count {
+                switch bytes[index] {
+                case 0x20, 0x09, 0x0A, 0x0D: index += 1
+                default: return
+                }
+            }
         }
     }
-    private static func objectArray(_ value: Any) throws -> [Members] {
-        guard let array = value as? [Any] else { throw TunnelFailure.invalidConfig }
-        return try array.map(members)
-    }
+
+    private static let rootObjects: Set<String> = ["log", "dns", "ntp", "certificate", "route", "experimental"]
+    private static let rootArrays: Set<String> = ["inbounds", "outbounds", "endpoints", "services", "certificate_providers", "http_clients", "network_namespaces"]
+    private static let experimentalFields: Set<String> = ["cache_file", "clash_api", "v2ray_api", "debug"]
+    /// Option unions whose entries name a compiled component type.
+    private static let typedPaths: [[String]: String] = [
+        ["inbounds", "[]"]: "inbounds", ["outbounds", "[]"]: "outbounds", ["endpoints", "[]"]: "endpoints",
+        ["services", "[]"]: "services", ["certificate_providers", "[]"]: "certificate_providers", ["dns", "servers", "[]"]: "dns",
+    ]
+    /// Other objects reachable from plain options whose decoders use badjson.
+    /// HTTP clients decode their TLS and dial options plainly.
+    private static let unionPaths: Set<[String]> = [["dns"], ["network_namespaces", "[]"], ["route", "rules", "[]"], ["route", "rule_set", "[]"]]
     private static let opaqueFields: Set<String> = ["transport_options", "headers", "predefined", "environment", "env"]
     /// Pinned option maps whose values are options (or strings) keyed by user data.
     private static let mapFields: Set<String> = ["servers", "torrc", "handshake_for_server_name", "fallback_for_alpn", "interface_address", "network_interface_address"]
-    private static let objectKeys: Set<String> = ["tls", "utls", "reality", "ech", "multiplex"]
+    /// Pointer options; null resets them.
+    private static let objectKeys: Set<String> = ["tls", "utls", "reality", "ech", "acme", "multiplex"]
     private static let arrayObjectKeys: Set<String> = ["rules", "peers"]
     private static let boolKeys: Set<String> = ["enabled", "disabled", "timestamp", "insecure", "disable_sni", "auto_route", "strict_route", "auto_redirect", "auto_detect_interface", "system_interface", "accept_routes", "accept_dns", "exit_node_allow_lan_access", "sniff", "sniff_override_destination", "domain_unmap", "udp_fragment", "udp_disable_domain_unmapping", "disable_cache", "disable_expire", "reverse_mapping", "store_fakeip", "store_dns", "store_rdrc", "independent_cache", "tcp_fast_open", "tcp_multi_path", "reuse_addr", "zero_rtt_handshake", "fragment", "record_fragment", "kernel_tx", "kernel_rx", "prefer_go"]
     private static let stringKeys: Set<String> = ["type", "tag", "server", "server_name", "server_key", "private_key", "public_key", "peer_public_key", "peer_endpoint", "password", "username", "uuid", "detour", "final", "default", "hostname", "state_directory", "stack", "dns_mode", "level", "output", "listen", "external_controller", "secret", "default_interface", "bind_interface", "interface_name", "network_namespace", "packet_encoding", "congestion_control", "flow", "fingerprint", "engine", "min_version", "max_version", "client_authentication"]

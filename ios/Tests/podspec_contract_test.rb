@@ -116,6 +116,29 @@ Dir.mktmpdir('sing box pod contract ') do |directory|
   FileUtils.mkdir_p(target.join('sing_box_flutter_capabilities.bundle'))
   raise 'Manifest copy failed' unless system({ 'TARGET_BUILD_DIR' => target.to_s }, '/bin/sh', '-c', phase[:script] || phase['script'])
   raise 'Wrong bundled manifest' unless target.join('sing_box_flutter_capabilities.bundle/core-capabilities.json').read == manifest.read
+  run_phase = -> { system({ 'TARGET_BUILD_DIR' => target.to_s }, '/bin/sh', '-c', phase[:script] || phase['script'], out: File::NULL, err: File::NULL) }
+  # Xcode links the framework chosen at pod install. A newer valid receipt for
+  # another artifact of the same profile still needs pod install.
+  rebuilt = base.join('apple-rebuilt/Libbox.xcframework')
+  FileUtils.mkdir_p(rebuilt.dirname)
+  FileUtils.cp_r(framework, rebuilt)
+  installed_path = receipt['artifacts']['apple']['path']
+  receipt['artifacts']['apple']['path'] = rebuilt.relative_path_from(host).to_s
+  save_receipt.call
+  raise 'Receipt for another framework accepted by cached Pods' if run_phase.call
+  receipt['artifacts']['apple']['path'] = installed_path
+  save_receipt.call
+  # Rewriting the installed framework and its receipt hashes is not the pod-installed artifact.
+  installed_binary = framework.join(slices.first['LibraryIdentifier'], slices.first['LibraryPath'], 'Libbox')
+  installed_bytes = installed_binary.read
+  installed_binary.write('changed after pod install')
+  receipt['artifacts']['apple']['sha256'] = tree_hashes.call
+  save_receipt.call
+  raise 'Framework changed after pod install accepted' if run_phase.call
+  installed_binary.write(installed_bytes)
+  receipt['artifacts']['apple']['sha256'] = tree_hashes.call
+  save_receipt.call
+  raise 'Installed framework rejected' unless run_phase.call
   # Native add-to-app Podfiles can explicitly identify their separate module.
   native_host = host.join('native-ios-host')
   FileUtils.mkdir_p(native_host)
