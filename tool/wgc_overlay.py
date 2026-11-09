@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
@@ -16,13 +17,20 @@ VERSION = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*$")
 
 
 def source_digest(root: Path) -> str:
-    """Hash compile inputs with their paths, excluding build caches and tests."""
-    files = sorted(p for p in root.rglob("*") if p.is_file() and
-                   (p.name in ("go.mod", "go.sum") or
-                    (p.suffix in (".go", ".c", ".h") and not p.name.endswith("_test.go"))) and
-                   not any(part.startswith(".") for part in p.relative_to(root).parts))
-    if not files or not (root / "go.mod").is_file():
+    """Conservatively hash module contents, including assembly and embedded data."""
+    if not (root / "go.mod").is_file():
         raise BuildError("WGC source module is missing")
+    files = []
+    vcs = {".git", ".hg", ".svn"}
+    for directory, folders, names in os.walk(root):
+        folders[:] = sorted(name for name in folders if name not in vcs)
+        for name in [*folders, *names]:
+            path = Path(directory) / name
+            if name not in vcs and path.is_symlink():
+                raise BuildError("WGC source inputs must not be symlinks")
+        files.extend(Path(directory) / name for name in names
+                     if name not in vcs and (Path(directory) / name).is_file())
+    files.sort()
     digest = hashlib.sha256()
     for path in files:
         if path.is_symlink():

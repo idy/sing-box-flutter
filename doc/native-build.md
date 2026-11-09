@@ -97,7 +97,10 @@ The `native/wgc` module is only a sing-box endpoint adapter; it directly depends
 registers that adapter in the pinned libbox build and restores the upstream inputs
 afterward. The adapter source and registration hashes are recorded in native
 metadata so the installer cannot mix an unmodified libbox with a WGC-enabled
-package. Custom transport registrations can be compiled with `--wgc-config`; see
+package. Module fingerprints conservatively include all files except VCS metadata,
+including assembly and embedded data. After resolving extensions, the build checks
+the selected Tailscale dependency's toolchain contract again and records its actual
+version/checksums. Custom transport registrations can be compiled with `--wgc-config`; see
 [WGC configuration](wgc.md). Exported `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, and
 `GOPROXY` settings are retained under the pinned compiler. Required WGC license
 text is collected from the pinned dependency for the native release archive.

@@ -299,6 +299,18 @@ def verify_dependency_toolchain(revision: str, current: str, next_revision: str)
                          + ", ".join(sorted(expected)) + ". Resolve the pin conflict explicitly; mismatch overrides are not used")
 
 
+def resolved_tailscale_dependency(go: Path, env: dict, source: Path, pins: dict) -> dict:
+    tailscale = json.loads(network_run([go, "mod", "download", "-json", "github.com/sagernet/tailscale"],
+                                       cwd=source, env=env, capture=True))
+    dependency_dir = Path(tailscale["Dir"])
+    current = (dependency_dir / "go.toolchain.rev").read_text().strip()
+    next_revision = (dependency_dir / "go.toolchain.next.rev").read_text().strip()
+    verify_dependency_toolchain(pins["tailscale_go_revision"], current, next_revision)
+    return {"module": tailscale["Path"], "version": tailscale["Version"],
+            "sum": tailscale["Sum"], "go_mod_sum": tailscale["GoModSum"],
+            "toolchain_revision": current, "next_toolchain_revision": next_revision}
+
+
 def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict, dict]:
     # Stay in the verified core module. An @version go install outside the module
     # queries unrelated latest versions for deprecation notices; this uses go.mod.
@@ -310,15 +322,7 @@ def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict,
     # before compiling any tool from it, then check the dependency runtime contract.
     network_run([go, "mod", "download"], cwd=source, env=env)
     run([go, "mod", "verify"], cwd=source, env=env)
-    tailscale = json.loads(network_run([go, "mod", "download", "-json", "github.com/sagernet/tailscale"],
-                                       cwd=source, env=env, capture=True))
-    dependency_dir = Path(tailscale["Dir"])
-    current = (dependency_dir / "go.toolchain.rev").read_text().strip()
-    next_revision = (dependency_dir / "go.toolchain.next.rev").read_text().strip()
-    verify_dependency_toolchain(pins["tailscale_go_revision"], current, next_revision)
-    dependency = {"module": tailscale["Path"], "version": tailscale["Version"],
-                  "sum": tailscale["Sum"], "go_mod_sum": tailscale["GoModSum"],
-                  "toolchain_revision": current, "next_toolchain_revision": next_revision}
+    dependency = resolved_tailscale_dependency(go, env, source, pins)
     # Rebuild rather than executing stale or altered cached mobile tools.
     network_run([go, "install", "-trimpath", f"{GOMOBILE_MODULE}/cmd/gomobile",
                  f"{GOMOBILE_MODULE}/cmd/gobind"], cwd=source, env=env)
@@ -446,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                         shutil.rmtree(output) if output.is_dir() else output.unlink()
                     with mobile_profile(source) as profile_provenance, wgc_overlay(source, go, env, run, extensions) as wgc_provenance:
                         wgc_license = retain_wgc_license(go, env, source, cache, pins)
+                        tailscale_dependency = resolved_tailscale_dependency(go, env, source, pins)
                         effective_tags = upstream_tags(source, target)
                         run(args_go, cwd=source, env=env)
                     if not output.exists():

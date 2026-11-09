@@ -13,7 +13,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
 from native_common import (BuildError, ROOT, REQUIRED_TAGS, build_directory, load_pins,
                            parse_manifest, pin_identity, safe_extract, sha256, validate_metadata)
-from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, verify_dependency_toolchain
+from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, resolved_tailscale_dependency, verify_dependency_toolchain
 
 
 class PinTests(unittest.TestCase):
@@ -176,6 +176,27 @@ class ToolchainTests(unittest.TestCase):
                 "GOPRIVATE": "git.example.com/team/*", "GONOPROXY": "none",
             })
             self.assertEqual(explicit["GONOPROXY"], "none")
+
+    def test_resolved_tailscale_upgrade_is_verified_and_recorded(self):
+        pins = load_pins()
+        for compatible in (True, False):
+            with self.subTest(compatible=compatible), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                (root / "go.toolchain.rev").write_text(pins["tailscale_go_revision"] if compatible else "1" * 40)
+                (root / "go.toolchain.next.rev").write_text("2" * 40)
+                selected = {"Path": "github.com/sagernet/tailscale", "Version": "v1.99.0",
+                            "Dir": str(root), "Sum": "h1:resolved", "GoModSum": "h1:resolved-mod"}
+                with mock.patch("build_libbox.network_run", return_value=json.dumps(selected)) as download:
+                    if not compatible:
+                        with self.assertRaisesRegex(BuildError, "runtime requirement"):
+                            resolved_tailscale_dependency(Path("verified-go"), {}, root, pins)
+                    else:
+                        identity = resolved_tailscale_dependency(Path("verified-go"), {}, root, pins)
+                        self.assertEqual(identity["version"], selected["Version"])
+                        self.assertEqual(identity["sum"], selected["Sum"])
+                        self.assertEqual(identity["go_mod_sum"], selected["GoModSum"])
+                        self.assertEqual(identity["toolchain_revision"], pins["tailscale_go_revision"])
+                    self.assertIn("github.com/sagernet/tailscale", download.call_args.args[0])
 
     def test_runtime_toolchain_contract_rejects_a_different_fork(self):
         actual = "63ae404c8203317fd3c82d972e5dc8f0fcb425cb"

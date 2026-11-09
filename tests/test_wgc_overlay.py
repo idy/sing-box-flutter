@@ -65,17 +65,40 @@ class OverlayTests(unittest.TestCase):
             runner.assert_not_called()
             self.assertEqual(registry.read_bytes(), original)
 
-    def test_source_identity_tracks_code_but_ignores_tests(self):
+    def test_source_identity_tracks_module_files_but_ignores_vcs_metadata(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "go.mod").write_text("module example.com/transport\n")
             code = root / "register.go"
             code.write_text("package register\n")
             before = source_digest(root)
-            (root / "register_test.go").write_text("package register\n// tests only\n")
+            (root / ".git").mkdir()
+            (root / ".git/HEAD").write_text("ref: refs/heads/main\n")
             self.assertEqual(source_digest(root), before)
+            (root / "register_test.go").write_text("package register\n// tests included conservatively\n")
+            self.assertNotEqual(source_digest(root), before)
+            before = source_digest(root)
             code.write_text("package register\nfunc init() {}\n")
             self.assertNotEqual(source_digest(root), before)
+
+    def test_source_identity_includes_assembly_and_embedded_assets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "go.mod").write_text("module example.com/transport\n")
+            (root / "register.go").write_text('package register\nimport "embed"\n//go:embed all:assets\nvar data embed.FS\n')
+            (root / "assets").mkdir()
+            assembly = root / "transport_amd64.s"
+            asset = root / "assets/table.bin"
+            hidden_asset = root / "assets/.dictionary"
+            assembly.write_text("// first assembly implementation\n")
+            asset.write_bytes(b"first payload")
+            hidden_asset.write_bytes(b"first dictionary")
+            for path, replacement in [(assembly, b"// changed implementation\n"),
+                                      (asset, b"changed payload"),
+                                      (hidden_asset, b"changed dictionary")]:
+                before = source_digest(root)
+                path.write_bytes(replacement)
+                self.assertNotEqual(source_digest(root), before, str(path))
 
 
 class ExtensionTests(unittest.TestCase):
