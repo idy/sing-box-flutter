@@ -212,14 +212,32 @@ The Android job also executes `TestAndroidUDPProtectionSmoke` on an API 35 x86_6
 emulator using the same pinned fork. Controlled protection callbacks exercise
 real Android UDP sockets, failure handling and reopening; this is not a VPN
 forwarding or physical-device test.
-The workflow requests read-only repository permissions and publishes no release.
-It uploads build logs, provenance, generated Android sources, and release inputs,
-including on failure. With target `all`, a final successful job combines the two
-archive checksums and reports the `SHA256SUMS` digest in the job summary. Separate
-platform runs require a maintainer to combine the independently verified manifests.
+PR and manually dispatched builds retain read-only repository permissions and
+upload build logs, provenance, generated Android sources, and release inputs,
+including on failure. With target `all`, a successful job combines both archive
+checksums, validates the publication plan without publishing, and reports the
+`SHA256SUMS` digest in the job summary.
 
-Before publishing a GitHub release, verify both native plugin builds, retain the
-logs/provenance, and upload exactly these public assets under the chosen plugin tag:
+Pushing a `vX.Y.Z` tag automatically builds and tests both platforms. The build
+workflow is always read-only. A separate `Publish native artifacts` workflow runs
+from the default branch via `workflow_run` and receives release-write permission.
+Before downloading artifacts, its trusted gate checks the completed build's
+workflow identity, repository, successful tag-push event and default-branch
+ancestry. The publisher and imported Python helpers come from that independently
+trusted checkout; tagged version/pin files are read as data and never executed.
+The tag must match the built snapshot's `pubspec.yaml`; build metadata such as
+`v0.2.1+build-prod` is supported by both publisher and installer.
+
+PRs, forks and manual validation runs cannot publish. No personal token or local
+download/re-upload is needed. The publisher verifies all uploaded sizes and
+SHA-256 digests before making a draft public. Recovery preserves maintainer notes
+and updates only its managed native-artifact section. Differing assets on an
+already published release cannot be overwritten. Existing `v0.2.0` assets remain
+unchanged. Dart publication to pub.dev is separate; these workflows distribute
+the native libraries only.
+
+To release a future version, update and merge the package version, then push its
+matching version tag. A successful tag run publishes exactly these assets:
 
 - `libbox-1.14.4-android.tar.gz`
 - `libbox-1.14.4-apple.tar.gz`

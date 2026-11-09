@@ -18,7 +18,7 @@ sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, RELEASE_REPO, ROOT, archive_name,
                            artifact_hashes, build_directory, download, legal_files, load_pins,
                            parse_manifest, project_lock, safe_extract, sha256,
-                           validate_metadata, write_json)
+                           validate_metadata, valid_release_tag, write_json)
 
 
 def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: Path,
@@ -156,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         pins = load_pins()
         cache = build_directory(args.cache_dir)
-        if args.release and (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", args.release) or args.release == "latest"):
+        if args.release and not valid_release_tag(args.release):
             raise BuildError("Use an explicit release tag without paths")
         if args.manifest_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.manifest_sha256):
             raise BuildError("--manifest-sha256 must be a lowercase SHA-256 digest")

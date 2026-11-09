@@ -35,6 +35,10 @@ class BuildError(RuntimeError):
     pass
 
 
+def valid_release_tag(value: str) -> bool:
+    return value != "latest" and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", value) is not None
+
+
 def load_pins(root: Path = ROOT) -> dict:
     pins = json.loads((root / "native-core.json").read_text())
     for key in ("sing_box_revision", "tailscale_go_revision"):
