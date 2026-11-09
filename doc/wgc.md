@@ -16,9 +16,8 @@ and configure the server to allow the inner address `10.7.0.2`:
 {
   "log": {"disabled": true},
   "inbounds": [{
-    "type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"],
-    "stack": "gvisor", "auto_route": true, "dns_mode": "hijack",
-    "route_exclude_address": ["203.0.113.10/32"]
+    "type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30", "fd00:7::1/126"],
+    "stack": "gvisor", "auto_route": true, "dns_mode": "hijack"
   }],
   "endpoints": [{
     "type": "wgc", "tag": "wgc",
@@ -33,10 +32,17 @@ and configure the server to allow the inner address `10.7.0.2`:
   },
   "route": {
     "auto_detect_interface": true, "default_domain_resolver": "remote",
-    "rules": [{"port": 53, "action": "hijack-dns"}], "final": "wgc"
+    "rules": [{"port": 53, "action": "hijack-dns"}, {"ip_version": 6, "action": "reject"}],
+    "final": "wgc"
   }
 }
 ```
+
+The TUN captures both IPv4 and IPv6. This IPv4-only WGC peer example rejects
+IPv6 after DNS handling; add a server-authorized IPv6 address to the WGC endpoint
+before removing that reject rule. Keep `auto_detect_interface` enabled: the
+outer socket uses Android protection or Apple's physical-interface binding.
+Application traffic to the peer's public IP still follows the normal VPN rules.
 
 `pre_shared_key` is optional. TCP and UDP use the existing sing-box stack and
 resolver. UDP is the default outer transport. Interface updates reopen the outer

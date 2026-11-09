@@ -69,7 +69,7 @@ def load_extensions(config: Path | None) -> list[dict]:
         else:
             entry.update({"sum": item.get("sum"), "go_mod_sum": item.get("go_mod_sum")})
             extension_checksums(entry)
-        identity = (version, entry.get("path"), entry.get("sum"), entry.get("go_mod_sum"))
+        identity = (version, entry.get("path"), entry.get("sum"), entry.get("go_mod_sum"), entry.get("source_sha256"))
         if module in modules and modules[module] != identity:
             raise BuildError("Conflicting versions, paths or checksums for a WGC extension module")
         modules[module] = identity
@@ -170,9 +170,13 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
         snapshot_root = Path(snapshots.name)
         adapter_snapshot = snapshot_module(root / "native/wgc", snapshot_root / "adapter", provenance["source_sha256"])
         prepared = [dict(item) for item in extensions]
+        local_snapshots = {}
         for index, item in enumerate(prepared):
             if "path" in item:
-                item["path"] = str(snapshot_module(Path(item["path"]), snapshot_root / f"extension-{index}", item["source_sha256"]))
+                identity = (item["module"], item["version"], item["path"], item["source_sha256"])
+                if identity not in local_snapshots:
+                    local_snapshots[identity] = str(snapshot_module(Path(item["path"]), snapshot_root / f"extension-{index}", item["source_sha256"]))
+                item["path"] = local_snapshots[identity]
         registry.write_text(registry_text.replace(marker, marker + "\tregisterWGCEndpoint(registry)\n"))
         builder.write_text(builder_text.replace(tag_marker, 'sharedTags = append(sharedTags, "with_wgc")\n\t' + tag_marker))
         generated.write_text(generated_text)

@@ -240,6 +240,42 @@ class OverlayTests(unittest.TestCase):
             self.assertFalse(adapter_snapshot.exists())
             self.assertNotIn("path", provenance["extensions"][0])
 
+    def test_multiple_packages_in_one_module_reuse_the_same_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, registry, _ = self.fixture(root)
+            local = root / "local"
+            local.mkdir()
+            (local / "go.mod").write_text("module example.com/transport\n")
+            for name in ("a", "b"):
+                (local / name).mkdir()
+                (local / name / "register.go").write_text(f"package {name}\n")
+            config = root / "extensions.json"
+            config.write_text(json.dumps({"extensions": [
+                {"package": f"example.com/transport/{name}", "module": "example.com/transport", "path": "local"}
+                for name in ("a", "b")
+            ]}))
+            entries = load_extensions(config)
+            replacements = []
+            def runner(args, **kwargs):
+                if args[1:3] == ["mod", "edit"]:
+                    for flag in args[3:]:
+                        if str(flag).startswith("-replace=example.com/transport="):
+                            replacements.append(Path(str(flag).split("=", 2)[2]))
+                if args[1:3] == ["list", "-m"]:
+                    return json.dumps({"Version": "v0.0.0", "Dir": str(replacements[-1])})
+                return ""
+            with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                with wgc_overlay(source, Path("go"), {}, runner, entries, root) as provenance:
+                    self.assertEqual(len(replacements), 2)
+                    self.assertEqual(replacements[0], replacements[1])
+                    self.assertNotEqual(replacements[0].resolve(), local.resolve())
+                    self.assertEqual(source_digest(replacements[0]), entries[0]["source_sha256"])
+                    self.assertEqual(len(provenance["extensions"]), 2)
+                    for entry in provenance["extensions"]:
+                        self.assertEqual(entry["source_sha256"], entries[0]["source_sha256"])
+            self.assertFalse(replacements[0].exists())
+
     def test_local_changes_before_snapshot_are_rejected(self):
         for change in ("contents", "symlink"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
