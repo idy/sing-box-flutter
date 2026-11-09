@@ -1,0 +1,35 @@
+Thin mobile compatibility core for sing_box_flutter
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Portions adapted from SagerNet/sing-box 1.14.4, pinned revision
+c005f35300ce76427dc285481ec5695f5b179cd2:
+https://github.com/SagerNet/sing-box/tree/c005f35300ce76427dc285481ec5695f5b179cd2/experimental/libbox
+Copyright (C) 2022 nekohasekai <contact-sagernet@sekai.icu>
+
+The adapted portions are platform type declarations, the platform-interface
+adapter and validation stub, TUN options and route-prefix iterators, default
+interface monitoring, platform DNS transport, Android procfs connection-owner
+lookup, Unix interface flags, descriptor duplication and Darwin utun lookup.
+These remain licensed under GNU GPL version 3 or any later version, without
+warranty; see the repository LICENSE and https://www.gnu.org/licenses/gpl-3.0.html.
+The upstream utun descriptor lookup credits WireGuard/wireguard-apple.
+
+This is an independently maintained compatibility surface, not the complete
+upstream mobile SDK. CommandServer is only an in-process lifecycle wrapper.
+No RPC listener, profile editor, SSH helper implementation, schema export,
+management controller, OOM recorder, or configuration snapshot is included.
+
+The build overlays these Go files into the pinned source module and generates
+registry_selected.go. It must define baseContext(PlatformInterface)
+context.Context, using only selected registries and filemanager.WithDefault
+with sWorkingPath, sTempPath, sUserID and sGroupID. A selected local DNS transport
+may call newPlatformTransport. The generated selectedFeaturesJSON constant
+contains the canonical effective selection and gates shared TLS/transport code
+at runtime, in addition to the exact typed protocol registries.
+CoreFingerprint is supplied with linker -X
+for github.com/sagernet/sing-box/experimental/libbox.coreFingerprint.
+
+Default engine logging is suppressed. Explicitly requested log files are private
+and receive fixed lifecycle events, never raw protocol diagnostics or auth URLs.
+Platform and handler binding types for unsupported host features remain for
+source compatibility; their core implementations return an unsupported error.

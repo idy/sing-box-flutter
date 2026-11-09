@@ -1,44 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
-import Libbox
-
-struct TunnelFailure: LocalizedError {
-    let code: String
-    let message: String
-    var errorDescription: String? { message }
-
-    static let notInitialized = TunnelFailure(code: "not_initialized", message: "Call initialize before using this method.")
-    static let invalidArguments = TunnelFailure(code: "invalid_arguments", message: "Required arguments are missing or invalid.")
-    static let invalidConfig = TunnelFailure(code: "invalid_config", message: "libbox rejected the configuration. Check it locally without sharing credentials.")
-    static let busy = TunnelFailure(code: "busy", message: "Stop the current tunnel before starting or changing its configuration.")
-    static let storage = TunnelFailure(code: "storage_error", message: "The App Group configuration or state could not be accessed.")
-    static let unsupported = TunnelFailure(code: "unsupported", message: "This feature is not supported by the iOS backend.")
-}
-
-struct TunnelStatus: Codable {
-    let state: String
-    let message: String?
-    let sessionID: String?
-
-    init(_ state: String, message: String? = nil, sessionID: String? = nil) {
-        self.state = state
-        self.message = message.map { String($0.prefix(240)) }
-        self.sessionID = sessionID
-    }
-
-    var event: [String: Any] {
-        var value: [String: Any] = ["type": "status", "state": state]
-        if let message { value["message"] = message }
-        return value
-    }
-}
-
-struct TunnelConfiguration: Codable {
-    let version: Int
-    let sessionID: String
-    let config: String
-    let name: String
-}
 
 /// Shared files contain credentials. Neither configuration nor upstream errors are sent over events.
 final class TunnelStorage {
@@ -61,23 +22,33 @@ final class TunnelStorage {
         try resourceURL.setResourceValues(values)
     }
 
-    func runtimeDirectory(validation: Bool) throws -> URL {
-        let directory = root.appendingPathComponent(validation ? "Validation" : "Runtime", isDirectory: true)
+    func runtimeDirectory() throws -> URL {
+        let directory = root.appendingPathComponent("Runtime", isDirectory: true)
         try createDirectory(directory)
         try createDirectory(directory.appendingPathComponent("Working", isDirectory: true))
         try createDirectory(directory.appendingPathComponent("Temp", isDirectory: true))
         return directory
     }
 
-    func saveConfiguration(_ config: String, name: String) throws -> TunnelConfiguration {
-        let value = TunnelConfiguration(version: 1, sessionID: UUID().uuidString, config: config, name: name)
+    func saveConfiguration(_ config: String, name: String, coreFingerprint: String) throws -> TunnelConfiguration {
+        let value = TunnelConfiguration(version: 1, sessionID: UUID().uuidString, config: config, name: name, coreFingerprint: coreFingerprint)
         try write(value, to: configurationURL)
+        try write(SessionIdentity(sessionID: value.sessionID), to: root.appendingPathComponent("session.json"))
         return value
+    }
+
+    private struct SessionIdentity: Codable { let sessionID: String }
+
+    func currentSessionID() -> String? {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent("session.json")) else { return nil }
+        return (try? JSONDecoder().decode(SessionIdentity.self, from: data))?.sessionID
     }
 
     func loadConfiguration() throws -> TunnelConfiguration {
         let value = try JSONDecoder().decode(TunnelConfiguration.self, from: Data(contentsOf: configurationURL))
         guard value.version == 1, !value.sessionID.isEmpty, !value.config.isEmpty else { throw TunnelFailure.storage }
+        // Also migrate old saved sessions when the extension next starts them.
+        try write(SessionIdentity(sessionID: value.sessionID), to: root.appendingPathComponent("session.json"))
         return value
     }
 
@@ -100,32 +71,5 @@ final class TunnelStorage {
     private func write<T: Encodable>(_ value: T, to url: URL) throws {
         try JSONEncoder().encode(value).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    }
-}
-
-enum NativeCore {
-    static func setup(storage: TunnelStorage, validation: Bool) throws {
-        let directory = try storage.runtimeDirectory(validation: validation)
-        let options = LibboxSetupOptions()
-        options.basePath = directory.path
-        options.workingPath = directory.appendingPathComponent("Working").path
-        options.tempPath = directory.appendingPathComponent("Temp").path
-        options.logMaxLines = 100
-        options.debug = false
-        options.crashReportSource = validation ? "Validation" : "PacketTunnel"
-        options.commandServerSecret = UUID().uuidString
-        options.oomKillerEnabled = !validation
-        var error: NSError?
-        LibboxSetup(options, &error)
-        if error != nil {
-            throw TunnelFailure(code: "core_setup_failed", message: "libbox could not initialize its private directories.")
-        }
-    }
-
-    static func check(_ config: String) throws {
-        var error: NSError?
-        LibboxCheckConfig(config, &error)
-        // Deliberately discard upstream error text: it can include JSON and credentials.
-        if error != nil { throw TunnelFailure.invalidConfig }
     }
 }

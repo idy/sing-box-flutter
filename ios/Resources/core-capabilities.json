@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "version": "1.14.4",
+  "fingerprint": "legacy",
+  "features": {
+    "inbounds": ["tun", "direct", "socks", "http", "mixed", "shadowsocks", "snell", "vmess", "vless", "trojan", "naive", "shadowtls", "anytls", "hysteria", "hysteria2", "tuic", "redirect", "tproxy"],
+    "outbounds": ["direct", "bridge", "block", "selector", "urltest", "socks", "http", "shadowsocks", "snell", "vmess", "vless", "trojan", "tor", "ssh", "shadowtls", "anytls", "hysteria", "hysteria2", "tuic"],
+    "endpoints": ["wireguard", "tailscale", "wgc"],
+    "dns": ["udp", "tcp", "tls", "https", "quic", "h3", "local", "hosts", "fakeip", "mdns", "dhcp", "resolved", "tailscale"],
+    "transports": ["http", "ws", "quic", "grpc", "httpupgrade"],
+    "tls": ["utls", "reality", "ech"],
+    "api": ["clash_api"],
+    "services": ["api", "resolved", "ssm-api", "hysteria-realm", "derp", "oom-killer"],
+    "certificate_providers": ["tailscale", "cloudflare-origin-ca"]
+  }
+}

@@ -1,0 +1,74 @@
+# Maximum common Android/iOS selection supported by this plugin.
+# Apply with: dart run tool/select_core_profile.dart singbox-full
+#
+# Comparable to the standard libbox mobile SDK, with extra selectable facilities
+# such as OpenVPN/OpenConnect, Cloudflared, ACME and V2Ray API included explicitly.
+# This does not enable Linux transparent interception/systemd-resolved, native
+# helper/bridge/Tor integrations, USB/IP or Apple's incompatible Naive outbound.
+# Registering server/service types does not start them; runtime JSON still decides
+# which components run and supplies their addresses, credentials and routing.
+sing_box_flutter:
+  core:
+    inbounds:
+      - tun
+      - direct
+      - socks
+      - http
+      - mixed
+      - shadowsocks
+      - snell
+      - vmess
+      - vless
+      - trojan
+      - naive
+      - shadowtls
+      - anytls
+      - hysteria
+      - hysteria2
+      - tuic
+      - cloudflared
+    outbounds:
+      - direct
+      - block
+      - selector
+      - urltest
+      - socks
+      - http
+      - shadowsocks
+      - snell
+      - vmess
+      - vless
+      - trojan
+      - ssh
+      - shadowtls
+      - anytls
+      - hysteria
+      - hysteria2
+      - tuic
+    endpoints:
+      - wgc
+      - wireguard
+      - tailscale
+      - openconnect
+      - openvpn-client
+      - openvpn-server
+    dns:
+      - udp
+      - tcp
+      - tls
+      - https
+      - quic
+      - h3
+      - local
+      - hosts
+      - fakeip
+      - mdns
+      - dhcp
+      - tailscale
+      - openconnect
+      - openvpn
+    transports: [http, ws, quic, grpc, httpupgrade]
+    tls: [utls, reality, ech]
+    api: [clash_api, v2ray_api]
+    services: [api, ssm-api, hysteria-realm, derp, ccm, ocm, oom-killer]
+    certificate_providers: [acme, tailscale, cloudflare-origin-ca]

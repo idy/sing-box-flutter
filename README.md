@@ -1,8 +1,9 @@
 # sing_box_flutter
 
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
-as a native VPN on Android and iOS. Includes a reproducible **Tailscale Go** build
-of libbox with Tailscale endpoints enabled.
+as a native VPN on Android and iOS. Select the compiled protocols in your host
+`pubspec.yaml`, or install the standard libbox distribution. Both build paths use
+the pinned **Tailscale Go** compiler.
 
 This project is not affiliated with or endorsed by SagerNet or Tailscale.
 
@@ -53,7 +54,51 @@ placing artifacts in the resolved plugin directory. Reinstall the artifacts afte
 changing the package version or clearing your pub cache. Native artifacts are not
 downloaded silently during a normal Dart dependency resolution.
 
-To build them yourself instead, use the `build` command described below.
+### Compile only the features your app needs
+
+Add this top-level block to your **Flutter app's** `pubspec.yaml`, alongside
+`dependencies` and `flutter`:
+
+```yaml
+sing_box_flutter:
+  core:
+    inbounds: [tun]
+    outbounds: [direct]
+    endpoints: [wgc]
+    dns: [udp, tcp, fakeip]
+```
+
+```bash
+dart run sing_box_flutter build --target apple
+```
+
+```bash
+dart run sing_box_flutter build --target android
+```
+
+The builder generates a constructor registry and compiles a small mobile binding
+layer directly against the pinned sing-box engine. It does not link the official
+libbox RPC/profile-management layer. Required dependencies, such as WGC's userspace
+network stack or Hysteria2's QUIC implementation, are resolved automatically.
+
+Artifacts stay in your app's `.dart_tool/sing_box_flutter/`, keyed by feature and
+source fingerprints. Gradle and CocoaPods resolve that app's artifact; changing
+another app's selection does not overwrite binaries in a shared pub cache.
+Rebuild the core after editing the host pubspec, then rebuild the app (on iOS,
+rerun `pod install` or let Flutter run it). Neither `flutter pub get` nor a normal
+app build silently downloads Go or compiles a new core.
+
+Add `tailscale` or `wireguard` to `endpoints`, or protocols such as `vless`,
+`shadowsocks`, and `hysteria2` to `outbounds`. Missing capabilities and unsupported
+platform selections fail explicitly. `install` is for the standard distribution;
+a custom feature selection requires a source build.
+
+The example includes [WGC minimal, WGC + Tailscale and full mobile
+profiles](example/core-profiles/README.md), with a tool that switches only its
+pubspec feature block. See [feature selection](doc/core-features.md) for defaults,
+dependencies, validation semantics, architecture options and the complete
+capability catalogue. A host
+without this block retains the standard build/install path.
 
 ### Android host setup
 
@@ -104,8 +149,11 @@ await vpn.stop();
 await subscription.cancel();
 ```
 
-Invalid JSON is rejected locally. Native validation and connection failures
-surface as `PlatformException`; the plugin avoids including configurations or
+Invalid JSON is rejected locally. Android checks use the native engine; iOS
+`checkConfig` performs structural/capability preflight in the Go-free app, with
+full engine validation deferred to extension startup. A successful iOS preflight
+does not guarantee startup. Validation and connection failures surface as
+`PlatformException`; the plugin avoids including configurations or
 authentication keys in its own errors. Treat your configuration JSON as sensitive
 and do not write it to application logs.
 
@@ -124,8 +172,10 @@ protocol implementation into this repository.
 
 ## Tailscale support
 
-The pinned native build includes `with_tailscale` and the upstream mobile build's
-memory-saving options. An endpoint can be included in normal sing-box JSON:
+The standard native distribution includes `with_tailscale` and the upstream mobile
+memory-saving options. For a selected core, add `tailscale` to `core.endpoints` (and
+to `core.dns` if using its DNS transport). Then include the endpoint in normal
+sing-box JSON:
 
 ```json
 {

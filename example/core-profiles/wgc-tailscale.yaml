@@ -1,0 +1,8 @@
+# WGC plus Tailscale, standard WireGuard and outbound selection groups.
+# Apply with: dart run tool/select_core_profile.dart wgc-tailscale
+sing_box_flutter:
+  core:
+    inbounds: [tun]
+    outbounds: [direct, selector, urltest]
+    endpoints: [wgc, wireguard, tailscale]
+    dns: [udp, tcp, https, fakeip, tailscale]

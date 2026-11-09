@@ -1,5 +1,6 @@
 .build/
 .buildlog/
+**/.kotlin/
 .dart_tool/
 .git/
 .github/

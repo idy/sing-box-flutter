@@ -19,6 +19,12 @@ on:
         default: all
         type: choice
         options: [all, android, apple]
+      profile:
+        description: Example selectable core profile
+        required: true
+        default: wgc-minimal
+        type: choice
+        options: [wgc-minimal, wgc-tailscale, singbox-full]
 
 permissions:
   contents: read
@@ -51,6 +57,8 @@ jobs:
             runner: macos-26
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    env:
+      PUB_CACHE: ${{ github.workspace }}/.build/pub-cache
     steps:
       - name: Select requested platform
         id: select
@@ -96,23 +104,39 @@ jobs:
           mkdir -p .build/logs
           python3 -B tool/build_libbox.py --target '${{ matrix.target }}' \
             2>&1 | tee '.build/logs/${{ matrix.target }}.log'
+      - name: Check representative selectable core registries
+        if: steps.select.outputs.enabled == 'true'
+        run: python3 -B tool/check_core_profiles.py --target '${{ matrix.target }}' --race
       - uses: subosito/flutter-action@fd55f4c5af5b953cc57a2be44cb082c8f6635e8e # v2.21.0
         if: steps.select.outputs.enabled == 'true'
         with:
           flutter-version: '3.47.2'
           channel: stable
+      - name: Resolve Flutter packages for selectable core CLI
+        if: steps.select.outputs.enabled == 'true'
+        run: flutter pub get
+      - name: Build the example's selected core
+        if: steps.select.outputs.enabled == 'true'
+        working-directory: example
+        shell: bash
+        env:
+          CORE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'wgc-minimal' }}
+        run: |
+          set -euo pipefail
+          flutter pub get
+          dart run tool/select_core_profile.dart "$CORE_PROFILE"
+          flutter test
+          dart run sing_box_flutter build --target '${{ matrix.target }}' \
+            2>&1 | tee '../.build/logs/selected-${{ matrix.target }}.log'
       - name: Compile plugin and example against the built core
         if: steps.select.outputs.enabled == 'true'
         shell: bash
         env:
           LANG: en_US.UTF-8
-          PUB_CACHE: ${{ github.workspace }}/.build/pub-cache
           GRADLE_USER_HOME: ${{ github.workspace }}/.build/gradle
         run: |
           set -euo pipefail
-          flutter pub get 2>&1 | tee .build/logs/flutter-pub-get.log
           cd example
-          flutter pub get 2>&1 | tee ../.build/logs/example-pub-get.log
           if [ '${{ matrix.target }}' = 'android' ]; then
             flutter build apk --debug 2>&1 | tee ../.build/logs/plugin-android.log
           else
@@ -133,6 +157,8 @@ jobs:
           bash tool/run_android_wgc_smoke.sh 2>&1 | tee .build/logs/native-smoke-android.log
       - name: Execute Apple native runtime smoke
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'apple'
+        env:
+          SINGBOX_HOST_PROJECT: ${{ github.workspace }}/example
         shell: bash
         run: |
           set -euo pipefail
@@ -141,7 +167,11 @@ jobs:
           xcrun simctl bootstatus "$simulator" -b
           bash ios/Tests/run-native-smoke.sh "$simulator" \
             example/build/ios/iphonesimulator/Runner.app/PlugIns/PacketTunnel.appex/PacketTunnel \
+            example/build/ios/iphonesimulator/Runner.app/Runner \
             2>&1 | tee .build/logs/native-smoke-apple.log
+      - name: Record selected core artifact checksums
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
+        run: python3 -B tool/restore_core_artifact.py --project-dir example --write-manifest
       - name: Upload release inputs and diagnostics
         if: always() && steps.select.outputs.enabled == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -157,6 +187,11 @@ jobs:
             .build/cache/generated/android/*-sources.jar
             .build/bootstrap/toolchain-provenance.json
             .build/logs/*.log
+            example/.dart_tool/sing_box_flutter/native.json
+            example/.dart_tool/sing_box_flutter/artifact-sha256.json
+            example/.dart_tool/sing_box_flutter/builds/*/android/**
+            example/.dart_tool/sing_box_flutter/builds/**/native-build.json
+            example/.dart_tool/sing_box_flutter/builds/**/core-capabilities.json
 
   release-inputs:
     if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'all')

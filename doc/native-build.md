@@ -8,6 +8,22 @@ required. Run the commands from the plugin directory, including when using a loc
 copy of the pub package. Python must execute these checked-in scripts rather than
 scripts found inside a downloaded archive.
 
+## Select a host-specific core
+
+A Flutter host with a top-level `sing_box_flutter.core` block uses the selectable
+source builder through `dart run sing_box_flutter build`. It generates a small
+`native/mobile` binding package and only the requested constructor registry, then
+invokes verified gomobile directly. It does not use the upstream builder's fixed
+feature list or its RPC/profile-management package.
+
+Selected artifacts, hashes and capabilities stay under the host's
+`.dart_tool/sing_box_flutter/`; the plugin's shared pub-cache artifacts are not
+replaced. A host pubspec or source-profile change requires a core rebuild and a
+native app rebuild. See [feature selection](core-features.md) and the checked-in
+example. The remainder of this document describes standard release artifacts and
+the shared compiler verification/bootstrap. The selected builder does not publish
+or manufacture a standard release archive.
+
 ## Install a published core
 
 After a maintainer publishes a release containing the assets described below:

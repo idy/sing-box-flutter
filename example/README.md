@@ -3,7 +3,45 @@
 Demonstrates configuration validation, system VPN consent, native connection
 status, and explicit start/stop. Opening the app does not start a VPN.
 
-Install or build the native core first; see the [plugin README](../README.md).
+The example selects a minimal WGC core in its `pubspec.yaml`. Build its native
+artifact before building the app; standard full-core release assets do not match
+this selection. See [feature selection](../doc/core-features.md). From this directory:
+
+```bash
+flutter pub get
+```
+
+```bash
+dart run sing_box_flutter build --target apple
+```
+
+For Android, replace the target with `android`.
+
+## Choose the core feature set
+
+Three ready-to-build profiles share this example app:
+
+| Profile | Compiled capabilities |
+| --- | --- |
+| [wgc-minimal](core-profiles/wgc-minimal.yaml) | TUN, WGC, direct, basic DNS and FakeIP |
+| [wgc-tailscale](core-profiles/wgc-tailscale.yaml) | WGC, WireGuard, Tailscale, selectors and encrypted DNS |
+| [singbox-full](core-profiles/singbox-full.yaml) | Full supported mobile protocol/DNS/TLS/API/service set, comparable to a complete libbox mobile SDK |
+
+From this directory, choose one before building the native core:
+
+```bash
+dart run tool/select_core_profile.dart singbox-full
+```
+
+```bash
+dart run sing_box_flutter build --target apple
+```
+
+Use `wgc-minimal` for the smallest WGC build, or `wgc-tailscale` for the intermediate
+profile. Use target `android` for Android. The selector updates only the feature
+block in the real pubspec; changing it requires rebuilding the core and app. The
+full profile deliberately excludes unavailable desktop/helper facilities and
+Apple's incompatible Naive outbound; see [profile details](core-profiles/README.md).
 
 ## Android
 
