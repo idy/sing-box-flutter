@@ -1,4 +1,5 @@
 """Focused tests for native input integrity; no SDK, network or Go is required."""
+import hashlib
 import io
 import json
 import os
@@ -8,12 +9,13 @@ import tarfile
 import tempfile
 import unittest
 from unittest import mock
+import urllib.error
 import zipfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
 from native_common import (ARTIFACTS, BuildError, ROOT, REQUIRED_TAGS, archive_name, artifact_hashes,
-                           build_directory, load_pins, parse_manifest, pin_identity, safe_extract,
+                           build_directory, download, load_pins, parse_manifest, pin_identity, safe_extract,
                            sha256, validate_metadata)
 from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, resolved_tailscale_dependency, verify_dependency_toolchain
 from source_inputs import ADAPTER_INPUTS, adapter_digest, source_digest
@@ -505,6 +507,45 @@ class InstallerTests(unittest.TestCase):
                 copying.assert_not_called()
             self.assertEqual(previous.read_bytes(), b"previous-core")
             self.assertFalse((cache / "installed/android.json").exists())
+
+
+class DownloadTests(unittest.TestCase):
+    def test_gateway_timeout_retries_and_verifies_the_download(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            payload = b"pinned toolchain archive"
+            response = io.BytesIO(payload)
+            response.url = "https://example.com/archive"
+            failure = urllib.error.HTTPError(response.url, 504, "Gateway Time-out", None, None)
+            with mock.patch("native_common.urllib.request.urlopen", side_effect=[failure, response]) as request, mock.patch("time.sleep") as sleep:
+                path, metadata = download(response.url, root, hashlib.sha256(payload).hexdigest())
+            self.assertEqual(request.call_count, 2)
+            sleep.assert_called_once_with(1)
+            self.assertEqual(path.read_bytes(), payload)
+            self.assertEqual(metadata["sha256"], hashlib.sha256(payload).hexdigest())
+            self.assertEqual(len(list(root.iterdir())), 1)
+
+    def test_http_retry_is_bounded_and_does_not_retry_permanent_errors(self):
+        for status, attempts in ((403, 1), (404, 1), (504, 3)):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp:
+                failures = [urllib.error.HTTPError("https://example.com/archive", status, "HTTP failure", None, None) for _ in range(attempts)]
+                with mock.patch("native_common.urllib.request.urlopen", side_effect=failures) as request, mock.patch("time.sleep") as sleep:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        download("https://example.com/archive", Path(temp))
+                self.assertEqual(request.call_count, attempts)
+                self.assertEqual(sleep.call_count, attempts - 1)
+                self.assertFalse(list(Path(temp).iterdir()))
+
+    def test_checksum_failures_do_not_retry_or_leave_partial_downloads(self):
+        with tempfile.TemporaryDirectory() as temp:
+            response = io.BytesIO(b"unexpected bytes")
+            response.url = "https://example.com/archive"
+            with mock.patch("native_common.urllib.request.urlopen", return_value=response) as request, mock.patch("time.sleep") as sleep:
+                with self.assertRaisesRegex(BuildError, "SHA-256"):
+                    download(response.url, Path(temp), "0" * 64)
+            self.assertEqual(request.call_count, 1)
+            sleep.assert_not_called()
+            self.assertFalse(list(Path(temp).iterdir()))
 
 
 class ToolchainTests(unittest.TestCase):

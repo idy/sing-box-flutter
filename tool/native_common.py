@@ -10,6 +10,8 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -96,6 +98,22 @@ def project_lock(root: Path = ROOT):
 
 def download(url: str, directory: Path, expected: str | None = None,
              max_bytes: int = 4 * 1024**3) -> tuple[Path, dict]:
+    """Retry transient HTTP failures without reusing partial downloads."""
+    for attempt in range(3):
+        try:
+            return _download_once(url, directory, expected, max_bytes)
+        except urllib.error.HTTPError as error:
+            if error.code not in (408, 429, 500, 502, 503, 504) or attempt == 2:
+                raise
+            if error.fp is not None:
+                error.close()
+            print(f"Retry native download after HTTP {error.code} ({attempt + 2}/3)", flush=True)
+            time.sleep(attempt + 1)
+    raise AssertionError("unreachable")
+
+
+def _download_once(url: str, directory: Path, expected: str | None,
+                   max_bytes: int) -> tuple[Path, dict]:
     """Every response goes into its own fresh directory, never used as cwd."""
     if urllib.parse.urlparse(url).scheme != "https":
         raise BuildError("Downloads require HTTPS")
