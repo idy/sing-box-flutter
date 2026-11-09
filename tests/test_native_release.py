@@ -21,7 +21,8 @@ class FakeGitHub:
 
     def __init__(self, plan, existing=False, draft=True):
         self.plan = plan
-        self.release = {"id": 1, "draft": draft} if existing else None
+        self.release = {"id": 1, "draft": draft, "body": ""} if existing else None
+        self.native_run = None
         self.assets = []
         self.writes = []
         self.bad_upload = False
@@ -36,7 +37,7 @@ class FakeGitHub:
                 "digest": "sha256:" + self.plan["digests"][name]}
 
     def find(self, tag):
-        return self.release
+        return copy.deepcopy(self.release)
 
     def api(self, path, method="GET", body=None, **kwargs):
         if method == "DELETE":
@@ -47,6 +48,10 @@ class FakeGitHub:
             self.writes.append(("publish", body))
             self.release.update(body)
             return self.release
+        if path == "actions/runs/42":
+            return copy.deepcopy(self.native_run)
+        if path == "actions/workflows/native-core.yml":
+            return {"id": 7}
         if path.startswith("git/ref/"):
             return {"object": {"type": "tag" if self.annotated else "commit", "sha": "b" * 40 if self.annotated or self.move_tag else self.head}}
         if path.startswith("git/tags/"):
@@ -58,7 +63,7 @@ class FakeGitHub:
     def command(self, action, tag, *args):
         self.writes.append((action, tag))
         if action == "create":
-            self.release = {"id": 1, "draft": True}
+            self.release = {"id": 1, "draft": True, "body": Path(args[args.index("--notes-file") + 1]).read_text()}
         elif action == "upload":
             asset = self.asset(Path(args[0]).name)
             if self.bad_upload:
@@ -67,6 +72,7 @@ class FakeGitHub:
         elif action == "edit":
             notes = Path(args[args.index("--notes-file") + 1]).read_text()
             assert self.plan["digests"]["SHA256SUMS"] in notes
+            self.release["body"] = notes
         else:
             raise AssertionError(action)
 
@@ -115,18 +121,83 @@ class NativeReleaseTests(unittest.TestCase):
                         path.unlink()
                     path.write_bytes(original)
 
-    def test_prs_manual_runs_and_forks_cannot_enter_publisher(self):
-        base = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/tags/v0.2.0", "GITHUB_REPOSITORY": release.RELEASE_REPO, "GITHUB_SHA": FakeGitHub.head}
-        for change in ({"GITHUB_EVENT_NAME": "pull_request"}, {"GITHUB_EVENT_NAME": "workflow_dispatch"}, {"GITHUB_REF": "refs/heads/main"}, {"GITHUB_REPOSITORY": "other/fork"}, {"GITHUB_ACTIONS": "false"}):
+    def context_fixture(self):
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(self.root), *args], stderr=subprocess.PIPE).decode().strip()
+        git("init", "-q", "-b", "main")
+        git("config", "commit.gpgSign", "false")
+        git("config", "core.hooksPath", "/dev/null")
+        git("config", "user.name", "Release test")
+        git("config", "user.email", "release-test@example.invalid")
+        git("add", *release.SOURCE_METADATA)
+        git("commit", "-q", "-m", "trusted source metadata")
+        head = git("rev-parse", "HEAD")
+        git("update-ref", "refs/remotes/origin/main", head)
+        git("tag", "v0.2.0", head)
+        client = FakeGitHub(self.plan)
+        client.head = head
+        client.native_run = {"event": "push", "conclusion": "success", "workflow_id": 7, "head_sha": head,
+                             "repository": {"full_name": release.RELEASE_REPO}, "head_repository": {"full_name": release.RELEASE_REPO}}
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_run", "GITHUB_REPOSITORY": release.RELEASE_REPO, "TRUSTED_SHA": head, "DEFAULT_BRANCH": "main"}
+        return git, client, env
+
+    def test_publisher_and_installer_share_the_release_tag_length_limit(self):
+        (self.root / "pubspec.yaml").write_text("version: 0.2.0+" + "x" * 128 + "\n")
+        with self.assertRaises(release.BuildError):
+            release.release_tag(self.root)
+
+    def test_only_trusted_workflow_run_can_enter_publisher(self):
+        _, client, base = self.context_fixture()
+        for change in ({"GITHUB_EVENT_NAME": "push"}, {"GITHUB_EVENT_NAME": "pull_request"}, {"GITHUB_EVENT_NAME": "workflow_dispatch"}, {"GITHUB_REPOSITORY": "other/fork"}, {"GITHUB_ACTIONS": "false"}):
             with self.subTest(change=change), mock.patch.object(release.subprocess, "check_output") as git:
                 with self.assertRaises(release.BuildError):
-                    release.approved_head("v0.2.0", self.root, dict(base, **change))
+                    release.approved_run(42, self.root, dict(base, **change), client)
                 git.assert_not_called()
-        with mock.patch.object(release.subprocess, "check_output", side_effect=[FakeGitHub.head, FakeGitHub.head, FakeGitHub.head, ""]):
-            self.assertEqual(release.approved_head("v0.2.0", self.root, base), FakeGitHub.head)
-        with mock.patch.object(release.subprocess, "check_output", side_effect=[FakeGitHub.head, FakeGitHub.head, FakeGitHub.head, subprocess.CalledProcessError(1, "git")]):
-            with self.assertRaises(subprocess.CalledProcessError):
-                release.approved_head("v0.2.0", self.root, base)
+        context = release.approved_run(42, self.root, base, client)
+        self.assertEqual(context["head"], client.head)
+        self.assertEqual(context["tag"], "v0.2.0")
+        self.assertEqual(set(context["metadata"]), set(release.SOURCE_METADATA))
+        # Even extra tagged helper bytes are never materialized or imported.
+        context["metadata"]["tool/native_common.py"] = b'raise RuntimeError("tag code executed")\n'
+        self.assertEqual(release.prepare_from_run(self.directory, context)["digests"], self.plan["digests"])
+
+    def test_unmerged_tag_is_rejected_before_tagged_helpers_can_run(self):
+        git, client, env = self.context_fixture()
+        git("checkout", "-q", "-b", "unmerged-tag")
+        marker = self.root / "tag-code-executed"
+        payload = f'from pathlib import Path\nPath({str(marker)!r}).touch()\n'
+        for relative in ("tool/native_common.py", ".github/scripts/publish_native_release.py"):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload)
+        git("add", "tool/native_common.py", ".github/scripts/publish_native_release.py")
+        git("commit", "-q", "-m", "unmerged tagged helpers")
+        client.head = client.native_run["head_sha"] = git("rev-parse", "HEAD")
+        git("checkout", "-q", "main")
+        with self.assertRaises(subprocess.CalledProcessError):
+            release.approved_run(42, self.root, env, client)
+        self.assertFalse(marker.exists())
+        self.assertEqual(client.writes, [])
+
+    def test_failed_pr_fork_and_wrong_workflow_runs_are_rejected(self):
+        _, client, env = self.context_fixture()
+        original = copy.deepcopy(client.native_run)
+        for changes in ({"event": "pull_request"}, {"conclusion": "failure"}, {"workflow_id": 8}, {"head_repository": {"full_name": "other/fork"}}):
+            client.native_run = dict(original, **changes)
+            with self.subTest(changes=changes), mock.patch.object(release.subprocess, "check_output") as git:
+                with self.assertRaises(release.BuildError):
+                    release.approved_run(42, self.root, env, client)
+                git.assert_not_called()
+
+    def test_privileged_workflow_checks_out_default_branch_before_gate_and_download(self):
+        workflow = (ROOT / ".github/workflows/publish-native.yml").read_text()
+        build = (ROOT / ".github/workflows/native-core.yml").read_text()
+        self.assertIn("workflow_run:", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertNotIn("ref: ${{ github.event.workflow_run.head_sha }}", workflow)
+        self.assertLess(workflow.index("--check-run"), workflow.index("uses: actions/download-artifact"))
+        self.assertNotIn("contents: write", build)
+        self.assertNotIn("GH_TOKEN:", build)
 
     def test_new_release_is_public_only_after_verified_uploads(self):
         client = FakeGitHub(self.plan)
@@ -145,6 +216,30 @@ class NativeReleaseTests(unittest.TestCase):
         self.assertEqual(sum(action[0] == "delete" for action in client.writes), 1)
         self.assertEqual(sum(action[0] == "upload" for action in client.writes), 2)
         self.assertFalse(client.release["draft"])
+
+    def test_existing_draft_notes_survive_and_managed_section_is_idempotent(self):
+        client = FakeGitHub(self.plan, existing=True)
+        original = "## Upgrade instructions\nKeep the maintainer's changelog.  \n\n"
+        client.release["body"] = original
+        release.publish(self.plan, client.head, client)
+        body = client.release["body"]
+        self.assertTrue(body.startswith(original))
+        self.assertEqual(body.count(release.NOTES_START), 1)
+        self.assertIn(self.plan["digests"]["SHA256SUMS"], body)
+        self.assertEqual(release.merge_notes(original, "new metadata"), release.merge_notes(release.merge_notes(original, "old metadata"), "new metadata"))
+        self.assertTrue(release.merge_notes(body + "\nManual footer\n", "replacement").endswith("\nManual footer\n"))
+
+    def test_notes_edited_during_upload_are_preserved(self):
+        client = FakeGitHub(self.plan, existing=True)
+        client.release["body"] = "Initial notes\n"
+        original_command = client.command
+        def edit_during_upload(action, *args):
+            original_command(action, *args)
+            if action == "upload":
+                client.release["body"] = "Latest maintainer instructions\n"
+        client.command = edit_during_upload
+        release.publish(self.plan, client.head, client)
+        self.assertTrue(client.release["body"].startswith("Latest maintainer instructions\n"))
 
     def test_public_release_is_idempotent_and_cannot_be_overwritten(self):
         client = FakeGitHub(self.plan, existing=True, draft=False)

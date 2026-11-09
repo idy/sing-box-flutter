@@ -1,4 +1,5 @@
 """Focused tests for native input integrity; no SDK, network or Go is required."""
+import contextlib
 import hashlib
 import io
 import json
@@ -20,6 +21,22 @@ from native_common import (ARTIFACTS, BuildError, ROOT, REQUIRED_TAGS, archive_n
 from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, resolved_tailscale_dependency, verify_dependency_toolchain
 from source_inputs import ADAPTER_INPUTS, adapter_digest, source_digest
 import install_libbox
+
+
+class ReleaseTagTests(unittest.TestCase):
+    def test_installer_accepts_and_encodes_build_metadata(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = install_libbox.main(["--target", "all", "--release", "v0.2.1+build-prod", "--dry-run"])
+        self.assertEqual(code, 0)
+        plan = json.loads(output.getvalue())
+        self.assertIn("/v0.2.1%2Bbuild-prod/SHA256SUMS", plan["manifest"])
+        self.assertTrue(all("/v0.2.1%2Bbuild-prod/" in url for url in plan["archives"]))
+
+    def test_release_paths_and_oversized_tags_are_rejected(self):
+        for tag in ("latest", "../v0.2.1", "v0.2.1%2Fother", "v0.2.1+" + "x" * 128):
+            with self.subTest(tag=tag), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(install_libbox.main(["--target", "android", "--release", tag, "--dry-run"]), 1)
 
 
 class SourceInputTests(unittest.TestCase):

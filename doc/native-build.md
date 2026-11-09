@@ -202,15 +202,23 @@ including on failure. With target `all`, a successful job combines both archive
 checksums, validates the publication plan without publishing, and reports the
 `SHA256SUMS` digest in the job summary.
 
-Pushing a `vX.Y.Z` tag automatically builds and tests both platforms, then publishes
-these native assets directly from CI. The tag must match `pubspec.yaml`, and its
-commit must belong to the default branch. Only the final tag-publication job gets
-`contents: write`; PRs, forks and manual validation runs cannot publish. No personal
-token or local download/re-upload is needed. The publisher verifies all uploaded
-sizes and SHA-256 digests before making the draft public, resumes incomplete
-drafts, and refuses to overwrite differing assets on an already published release.
-Existing `v0.2.0` assets remain unchanged. Dart publication to pub.dev is a separate
-operation; this workflow distributes the native libraries only.
+Pushing a `vX.Y.Z` tag automatically builds and tests both platforms. The build
+workflow is always read-only. A separate `Publish native artifacts` workflow runs
+from the default branch via `workflow_run` and receives release-write permission.
+Before downloading artifacts, its trusted gate checks the completed build's
+workflow identity, repository, successful tag-push event and default-branch
+ancestry. The publisher and imported Python helpers come from that independently
+trusted checkout; tagged version/pin files are read as data and never executed.
+The tag must match the built snapshot's `pubspec.yaml`; build metadata such as
+`v0.2.1+build-prod` is supported by both publisher and installer.
+
+PRs, forks and manual validation runs cannot publish. No personal token or local
+download/re-upload is needed. The publisher verifies all uploaded sizes and
+SHA-256 digests before making a draft public. Recovery preserves maintainer notes
+and updates only its managed native-artifact section. Differing assets on an
+already published release cannot be overwritten. Existing `v0.2.0` assets remain
+unchanged. Dart publication to pub.dev is separate; these workflows distribute
+the native libraries only.
 
 To release a future version, update and merge the package version, then push its
 matching version tag. A successful tag run publishes exactly these assets:
