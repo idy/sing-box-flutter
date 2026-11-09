@@ -126,14 +126,18 @@ class SafeExtractionTests(unittest.TestCase):
 
 
 class InstallerTests(unittest.TestCase):
-    def release_fixture(self, root, links=False):
+    def release_fixture(self, root, links=False, legal_file=False):
         payload = root / "payload"
+        payload.mkdir()
         legal = payload / "Legal"
-        legal.mkdir(parents=True)
-        (legal / "LICENSE").write_text("dependency notice\n")
-        if links:
-            for name in ("repeat", "again"):
-                (legal / name).symlink_to(".", target_is_directory=True)
+        if legal_file:
+            legal.write_text("dependency notice\n")
+        else:
+            legal.mkdir()
+            (legal / "LICENSE").write_text("dependency notice\n")
+            if links:
+                for name in ("repeat", "again"):
+                    (legal / name).symlink_to(".", target_is_directory=True)
         (payload / "LICENSE.sing-box").write_text("upstream notice\n")
         artifact = payload / ARTIFACTS["android"]
         artifact.parent.mkdir(parents=True)
@@ -162,6 +166,61 @@ class InstallerTests(unittest.TestCase):
                 install_libbox.install_one("android", pins, source, sums, cache, False, "test-manifest")
             self.assertTrue((plugin / ARTIFACTS["android"]).is_file())
             self.assertEqual((plugin / ".build/legal/android/LICENSE").read_text(), "dependency notice\n")
+
+    def test_legal_destination_cannot_escape_through_symlinked_parents(self):
+        for name, victim_path in [(".build", "legal/android"), (".build/legal", "android"),
+                                  (".build/legal/android", ".")]:
+            with self.subTest(path=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                pins, source, sums, cache = self.release_fixture(root)
+                plugin, outside = root / "plugin", root / "outside"
+                previous = plugin / ARTIFACTS["android"]
+                previous.parent.mkdir(parents=True)
+                previous.write_bytes(b"previous-core")
+                victim = outside / victim_path
+                victim.mkdir(parents=True)
+                (victim / "keep").write_bytes(b"external-data")
+                link = plugin / name
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(outside, target_is_directory=True)
+                with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"):
+                    with self.assertRaisesRegex(BuildError, "inside project .build"):
+                        install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+                self.assertEqual((victim / "keep").read_bytes(), b"external-data")
+                self.assertEqual(previous.read_bytes(), b"previous-core")
+                self.assertFalse((cache / "installed/android.json").exists())
+
+    def test_file_legal_payload_is_rejected_before_replacing_core(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pins, source, sums, cache = self.release_fixture(root, legal_file=True)
+            plugin = root / "plugin"
+            previous = plugin / ARTIFACTS["android"]
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"previous-core")
+            with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"):
+                with self.assertRaisesRegex(BuildError, "legal.*directory"):
+                    install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+            self.assertEqual(previous.read_bytes(), b"previous-core")
+            self.assertFalse((cache / "installed/android.json").exists())
+
+    def test_invalid_legal_destination_preserves_previous_core(self):
+        for name in (".build/legal", ".build/legal/android"):
+            with self.subTest(path=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                pins, source, sums, cache = self.release_fixture(root)
+                plugin = root / "plugin"
+                previous = plugin / ARTIFACTS["android"]
+                previous.parent.mkdir(parents=True)
+                previous.write_bytes(b"previous-core")
+                invalid = plugin / name
+                invalid.parent.mkdir(parents=True)
+                invalid.write_bytes(b"keep")
+                with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"):
+                    with self.assertRaises((BuildError, OSError)):
+                        install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+                self.assertEqual(previous.read_bytes(), b"previous-core")
+                self.assertEqual(invalid.read_bytes(), b"keep")
 
     def test_legal_directory_links_are_rejected_before_replacing_core(self):
         with tempfile.TemporaryDirectory() as temp:

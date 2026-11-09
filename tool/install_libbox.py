@@ -47,6 +47,8 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
     try:
         safe_extract(archive, staging)
         legal = staging / "Legal"
+        if not legal.is_dir():
+            raise BuildError("Release legal notices must be a directory")
         if legal.is_symlink() or any(path.is_symlink() for path in legal.rglob("*")):
             raise BuildError("Release legal notices must not contain symlinks")
         relative = ARTIFACTS[target]
@@ -77,6 +79,10 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
         destination = ROOT / relative
         if destination.is_symlink() or not destination.resolve().is_relative_to(ROOT.resolve()):
             raise BuildError("Artifact destination must stay inside this plugin")
+        legal_destination = build_directory(ROOT / ".build/legal" / target, ROOT)
+        if legal_destination.exists() and not legal_destination.is_dir():
+            raise BuildError("Legal notice destination must be a directory")
+        legal_destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and artifact_hashes(destination) == metadata["artifact_sha256"]:
             print(f"{target}: matching core already installed.")
         else:
@@ -93,8 +99,6 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
                     backup.rename(destination)
                 raise
             print(f"{target}: installed {relative}")
-        legal_destination = ROOT / ".build/legal" / target
-        legal_destination.parent.mkdir(parents=True, exist_ok=True)
         if legal_destination.exists():
             shutil.rmtree(legal_destination)
         shutil.copytree(staging / "Legal", legal_destination)
