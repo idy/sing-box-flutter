@@ -229,7 +229,8 @@ List<String> forwardPathArguments(
       '--wgc-config',
       '--from-dir',
       '--config',
-      '--project-dir'
+      '--project-dir',
+      '--work-dir'
     ]) {
       if (forwarded[index] == option && index + 1 < forwarded.length) {
         forwarded[++index] = resolve(forwarded[index]);

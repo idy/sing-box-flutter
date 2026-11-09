@@ -3,8 +3,12 @@ package libbox
 
 import (
 	"net"
+	"slices"
+	"strconv"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
@@ -187,5 +191,143 @@ func TestNetworkInterfacesRequirePositiveIncomingIndexAndExcludeTun(t *testing.T
 				t.Fatalf("non-default path inherited flags: %+v", iif)
 			}
 		}
+	}
+}
+
+func queueTail(queue *updateQueue) chan struct{} {
+	queue.access.Lock()
+	defer queue.access.Unlock()
+	return queue.tail
+}
+
+// waitForQueueTail returns once another caller has joined behind previous.
+func waitForQueueTail(t *testing.T, queue *updateQueue, previous chan struct{}) chan struct{} {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if tail := queueTail(queue); tail != previous {
+			return tail
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("newer update did not wait behind the in-flight update")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// blockFirstEnumeration holds the first update inside UpdateInterfaces, where
+// defaultInterfaceAccess is released, until the returned release is called.
+func blockFirstEnumeration(t *testing.T, manager *monitorTestNetworkManager) (entered <-chan struct{}, release func()) {
+	t.Helper()
+	enteredChannel, releaseChannel := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(releaseChannel) }) }
+	t.Cleanup(release)
+	calls := 0
+	manager.afterUpdate = func() {
+		calls++
+		if calls == 1 {
+			close(enteredChannel)
+			<-releaseChannel
+		}
+	}
+	return enteredChannel, release
+}
+
+func TestMonitorSerializesConcurrentPathUpdatesInArrivalOrder(t *testing.T) {
+	for _, fixAndroidStack := range []bool{false, true} {
+		t.Run("fix-android-stack="+strconv.FormatBool(fixAndroidStack), func(t *testing.T) {
+			previous := sFixAndroidStack.Load()
+			sFixAndroidStack.Store(fixAndroidStack)
+			t.Cleanup(func() { sFixAndroidStack.Store(previous) })
+			monitor, manager, _ := newMonitorFixture()
+			var published []int
+			monitor.RegisterCallback(func(iif *control.Interface, _ int) {
+				index := -1
+				if iif != nil {
+					index = iif.Index
+				}
+				published = append(published, index)
+			})
+			entered, release := blockFirstEnumeration(t, manager)
+			// The older no-network report blocks during enumeration.
+			olderDone := make(chan struct{})
+			go func() { monitor.UpdateDefaultInterface("", -1, false, false); close(olderDone) }()
+			receive(t, entered)
+			older := queueTail(&monitor.updates)
+			newerDone := make(chan struct{})
+			go func() { monitor.UpdateDefaultInterface("wifi-test", 101, true, false); close(newerDone) }()
+			waitForQueueTail(t, &monitor.updates, older)
+			monitor.defaultInterfaceAccess.Lock()
+			pathIndex := monitor.pathInterfaceIndex
+			monitor.defaultInterfaceAccess.Unlock()
+			if pathIndex != -1 || manager.enumerations != 1 || monitor.DefaultInterface() != nil || len(published) != 0 {
+				t.Fatal("newer update overlapped the blocked older update")
+			}
+			release()
+			receive(t, olderDone)
+			receive(t, newerDone)
+			if current := monitor.DefaultInterface(); current == nil || current.Index != 101 {
+				t.Fatalf("older no-network update replaced the newer default: %+v", current)
+			}
+			if !slices.Equal(published, []int{-1, 101}) || manager.enumerations != 2 {
+				t.Fatalf("published=%v enumerations=%d", published, manager.enumerations)
+			}
+			requirePathMetadata(t, manager, 101, true, false)
+		})
+	}
+}
+
+func TestUpdateQueueAdmitsWaitersInArrivalOrder(t *testing.T) {
+	var queue updateQueue
+	leave := queue.enter()
+	tail := queueTail(&queue)
+	var order []int
+	var workers sync.WaitGroup
+	for index := range 6 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			leaveWaiter := queue.enter()
+			order = append(order, index)
+			leaveWaiter()
+		}()
+		// Each waiter joins before the next one is started.
+		tail = waitForQueueTail(t, &queue, tail)
+	}
+	leave()
+	finished := make(chan struct{})
+	go func() { workers.Wait(); close(finished) }()
+	receive(t, finished)
+	if !slices.Equal(order, []int{0, 1, 2, 3, 4, 5}) {
+		t.Fatalf("queue order=%v", order)
+	}
+}
+
+func TestMonitorCloseDoesNotWaitForQueuedUpdates(t *testing.T) {
+	monitor, manager, platform := newMonitorFixture()
+	published := 0
+	monitor.RegisterCallback(func(*control.Interface, int) { published++ })
+	entered, release := blockFirstEnumeration(t, manager)
+	olderDone, newerDone, dnsDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() { monitor.UpdateDefaultInterface("wifi-test", 101, false, false); close(olderDone) }()
+	receive(t, entered)
+	tail := queueTail(&monitor.updates)
+	go func() { monitor.UpdateDefaultInterface("cell-test", 102, true, true); close(newerDone) }()
+	tail = waitForQueueTail(t, &monitor.updates, tail)
+	go func() { monitor.updateDNSServers(); close(dnsDone) }()
+	waitForQueueTail(t, &monitor.updates, tail)
+	closed := make(chan error, 1)
+	go func() { closed <- monitor.Close() }()
+	// Close must return while an update is blocked and others are queued.
+	if err := receive(t, closed); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	receive(t, olderDone)
+	receive(t, newerDone)
+	receive(t, dnsDone)
+	if published != 0 || manager.enumerations != 1 || platform.closes != 1 || monitor.DefaultInterface() != nil {
+		t.Fatal("closed monitor published or enumerated a queued update")
 	}
 }

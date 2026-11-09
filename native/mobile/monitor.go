@@ -7,6 +7,7 @@ package libbox
 import (
 	"net/netip"
 	"slices"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -27,6 +28,7 @@ var (
 type platformDefaultInterfaceMonitor struct {
 	*platformInterfaceWrapper
 	logger            logger.Logger
+	updates           updateQueue
 	callbacks         list.List[tun.DefaultInterfaceUpdateCallback]
 	myInterfaces      []string
 	defaultDNSServers []string
@@ -113,6 +115,13 @@ func (m *platformDefaultInterfaceMonitor) UpdateDefaultInterface(interfaceName s
 }
 
 func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName string, interfaceIndex32 int32, isExpensive bool, isConstrained bool) {
+	// Hosts report paths from several threads (Android: the listener seed on
+	// the start thread and the connectivity handler). Hold the queue across
+	// enumeration and callbacks so an older update cannot publish after a newer
+	// one; readers still use defaultInterfaceAccess. Callbacks must not report a
+	// path or DNS change synchronously. Close never enters the queue.
+	leave := m.updates.enter()
+	defer leave()
 	m.defaultInterfaceAccess.Lock()
 	if m.closed {
 		m.defaultInterfaceAccess.Unlock()
@@ -162,7 +171,10 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 	}
 }
 
+// DNS watcher reports publish the same callbacks, so they share the queue.
 func (m *platformDefaultInterfaceMonitor) updateDNSServers() {
+	leave := m.updates.enter()
+	defer leave()
 	m.defaultInterfaceAccess.Lock()
 	defaultInterface := m.defaultInterface
 	if m.closed || defaultInterface == nil {
@@ -180,6 +192,26 @@ func (m *platformDefaultInterfaceMonitor) updateDNSServers() {
 	for _, callback := range callbacks {
 		callback(defaultInterface, 0)
 	}
+}
+
+// updateQueue admits path publications one at a time in arrival order. A
+// sync.Mutex would let a releasing host thread report again and overtake an
+// earlier waiter, so a stale path could still be published last.
+type updateQueue struct {
+	access sync.Mutex
+	tail   chan struct{}
+}
+
+func (q *updateQueue) enter() (leave func()) {
+	done := make(chan struct{})
+	q.access.Lock()
+	previous := q.tail
+	q.tail = done
+	q.access.Unlock()
+	if previous != nil {
+		<-previous
+	}
+	return func() { close(done) }
 }
 
 func (m *platformDefaultInterfaceMonitor) readDNSServers(interfaceIndex int) []string {

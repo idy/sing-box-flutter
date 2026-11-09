@@ -12,7 +12,6 @@ import (
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/service"
@@ -136,10 +135,10 @@ func closeHistory(ctx context.Context) {
 }
 
 func (e *boxEngine) Pause() { e.box.CloseIdleConnections(); e.pause.DevicePause(); e.event("paused") }
-func (e *boxEngine) Wake() {
-	if C.IsAndroid {
-		e.pause.DeviceWake()
-		e.event("awake")
-	}
-}
+
+// Upstream ignores Wake on iOS and ends the pause from WakeNow/screen-state
+// reports. This binding has neither path: hosts call only Pause and Wake, and
+// Pause is unconditional, so Wake must end the device pause on every platform.
+// DeviceWake is a no-op when the device is not paused.
+func (e *boxEngine) Wake()               { e.pause.DeviceWake(); e.event("awake") }
 func (e *boxEngine) NeedWIFIState() bool { return e.box.Network().NeedWIFIState() }

@@ -53,26 +53,44 @@ class CurrentRecipe(unittest.TestCase):
     def test_current_source_matches(self):
         self.verify()
 
-    def test_cli_works_with_isolated_python(self):
+    def test_cli_rechecks_recipe_and_artifact_with_isolated_python(self):
         from native_common import write_json
         selection = canonicalize({})
         pins = load_pins()
         identity = build_identity(selection, [], pins)
         fingerprint = canonical_hash(identity)
         resolved = resolve_features(selection, "android")
-        receipt = {"schema": 1, "version": pins["sing_box_version"], "fingerprint": fingerprint,
-                   "requested_features": selection, "features": resolved["features"],
+        cache = self.host / ".dart_tool/sing_box_flutter"
+        artifact = cache / "libbox.aar"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"fixture artifact")
+        capabilities = {"schema": 1, "version": pins["sing_box_version"], "fingerprint": fingerprint,
+                        "features": resolved["features"]}
+        write_json(cache / "core-capabilities.json", capabilities)
+        receipt = {**capabilities, "requested_features": selection,
                    "pubspec_sha256": sha256(self.host / "pubspec.yaml"),
-                   "artifacts": {"android": {"metadata": ".dart_tool/sing_box_flutter/metadata.json"}}}
+                   "artifacts": {"android": {
+                       "metadata": ".dart_tool/sing_box_flutter/metadata.json",
+                       "path": ".dart_tool/sing_box_flutter/libbox.aar",
+                       "sha256": {"libbox.aar": sha256(artifact)},
+                       "capabilities": ".dart_tool/sing_box_flutter/core-capabilities.json",
+                       "capabilities_sha256": sha256(cache / "core-capabilities.json")}}}
         metadata = {"schema": 1, "mode": "selectable-core", "target": "android", "identity": identity,
                     "fingerprint": fingerprint, "features": resolved["features"], "tags": resolved["tags"]}
-        cache = self.host / ".dart_tool/sing_box_flutter"
         write_json(cache / "native.json", receipt)
         write_json(cache / "metadata.json", metadata)
-        result = subprocess.run([sys.executable, "-I", str(ROOT / "tool/core_recipe.py"),
-                                 "--project-dir", str(self.host), "--target", "android"],
-                                capture_output=True, text=True)
+        command = [sys.executable, "-I", str(ROOT / "tool/core_recipe.py"),
+                   "--project-dir", str(self.host), "--target", "android"]
+        result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+        # A build-time guard must reject bytes replaced after Gradle/pod configuration.
+        artifact.write_bytes(b"replaced after pod install")
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("stale or invalid", result.stderr)
+        artifact.write_bytes(b"fixture artifact")
+        write_json(cache / "core-capabilities.json", {**capabilities, "features": {}})
+        self.assertEqual(subprocess.run(command, capture_output=True, text=True).returncode, 1)
 
     def test_runtime_source_edit_is_stale_without_pubspec_change(self):
         (self.plugin / "native/mobile/runtime.go").write_text("package libbox\n// recipe B\n")
@@ -92,6 +110,15 @@ class CurrentRecipe(unittest.TestCase):
             with self.subTest(path=relative), self.assertRaises(BuildError):
                 self.verify()
             path.write_bytes(original)
+        lock_path = self.plugin / "tool/tailscale-go.json"
+        original_lock = lock_path.read_text()
+        lock = json.loads(original_lock)
+        lock["sha256"][next(iter(lock["sha256"]))] = "0" * 64
+        lock_path.write_text(json.dumps(lock))
+        with self.assertRaises(BuildError) as raised:
+            self.verify()
+        self.assertEqual(str(raised.exception.__cause__), "stale recipe")
+        lock_path.write_text(original_lock)
         pins = json.loads((self.plugin / "native-core.json").read_text())
         pins["gomobile_version"] = "v0.1.13"
         (self.plugin / "native-core.json").write_text(json.dumps(pins))

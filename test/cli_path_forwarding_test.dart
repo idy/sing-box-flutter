@@ -154,6 +154,17 @@ void main() {
     );
   });
 
+  test('anchors a relative native work directory to the caller', () {
+    for (final arguments in [
+      ['--work-dir', 'native-work'],
+      ['--work-dir=native-work'],
+    ]) {
+      final forwarded = cli.forwardPathArguments(arguments,
+          callerDirectory: caller, environment: environment);
+      expect(forwarded.last, endsWith(p.join(caller.path, 'native-work')));
+    }
+  });
+
   for (final option in ['--wgc-config', '--from-dir']) {
     for (final equalsForm in [false, true]) {
       test('repeated home separators ($option, equals=$equalsForm)', () {

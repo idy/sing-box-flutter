@@ -50,7 +50,7 @@ def build_identity(selection: dict, extensions: list[dict], pins: dict, root: Pa
             "mobile_sources": mobile_sources(root),
             "tooling": {name: sha256(root / "tool" / name) for name in
                         ("build_core.py", "core_features.py", "build_libbox.py", "native_common.py",
-                         "wgc_overlay.py", "source_inputs.py")},
+                         "wgc_overlay.py", "source_inputs.py", "tailscale-go.json")},
             "extensions": [{key: value for key, value in entry.items() if key != "path"}
                            for entry in extensions]}
 
@@ -179,6 +179,80 @@ def validate_artifact(path: Path, target: str) -> None:
         raise BuildError("The selected core did not produce a valid XCFramework")
 
 
+RECIPE_METADATA = ("schema", "mode", "target", "identity", "fingerprint", "features", "tags", "artifact_sha256")
+WORK_MARKER = ".sing-box-flutter-work"
+
+
+def work_root(project: Path, requested: str | None, *, create: bool = True) -> Path:
+    """Use the package .build, or a host-local directory when the pub cache is read-only."""
+    if requested is not None:
+        path = Path(requested).expanduser()
+        if not path.is_absolute() or path.is_symlink():
+            raise BuildError("--work-dir must be an absolute path that is not a symlink")
+        path, package = path.resolve(), ROOT.resolve()
+        if path.is_relative_to(package) and not path.is_relative_to(package / ".build"):
+            raise BuildError("--work-dir must not be inside the plugin sources")
+        if path.exists() and (not path.is_dir() or
+                              (any(path.iterdir()) and not (path / WORK_MARKER).is_file())):
+            raise BuildError("--work-dir must be empty or an existing sing_box_flutter work directory")
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / WORK_MARKER).touch()
+        return path
+    package = build_directory(ROOT / ".build", ROOT)
+    try:
+        if create:
+            package.mkdir(parents=True, exist_ok=True)
+        if os.access(package if package.exists() else ROOT, os.W_OK | os.X_OK):
+            return package
+    except OSError:
+        pass
+    fallback = host_path(project, ".dart_tool/sing_box_flutter/work")
+    if create:
+        fallback.mkdir(parents=True, exist_ok=True)
+    return fallback.resolve()
+
+
+def work_directory(path: str | Path, work: Path) -> Path:
+    result = Path(path).expanduser().absolute().resolve()
+    if not result.is_relative_to(work):
+        raise BuildError("Bootstrap and cache directories must be inside the native work directory")
+    return result
+
+
+def _tree(path: Path) -> dict[str, str] | None:
+    if not path.exists() and not path.is_symlink():
+        return {}
+    try:
+        return artifact_hashes(path)
+    except BuildError:
+        return None
+
+
+def repair_provenance(final: Path, stage: Path, metadata: dict) -> None:
+    """Reuse identical binary bytes, never provenance that no longer describes them."""
+    current = final / "native-build.json"
+    try:
+        existing = json.loads(current.read_text())
+    except (OSError, ValueError):
+        existing = None
+    if (current.is_symlink() or not isinstance(existing, dict) or
+            any(existing.get(key) != metadata.get(key) for key in RECIPE_METADATA)):
+        (stage / "native-build.json").replace(current)
+    legal, staged = final / "Legal", stage / "Legal"
+    if _tree(legal) != _tree(staged):
+        retired = Path(tempfile.mkdtemp(prefix=".retired-", dir=final.parent))
+        try:
+            if legal.is_symlink() or legal.is_file():
+                legal.unlink()
+            elif legal.exists():
+                legal.rename(retired / "Legal")
+            if staged.exists():
+                staged.rename(legal)
+        finally:
+            shutil.rmtree(retired)
+
+
 def publish_artifact(project: Path, output: Path, target: str, capabilities: dict,
                      metadata: dict, notices: dict[str, Path]) -> dict:
     """Publish an immutable content-addressed artifact before updating the pointer."""
@@ -192,8 +266,9 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
     stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=final.parent))
     name = "libbox.aar" if target == "android" else "Libbox.xcframework"
     try:
-        # Validate small provenance/notice inputs even on a cache hit. Keep the
-        # first immutable provenance, but do not copy a whole duplicate SDK.
+        # Stage small provenance/notice inputs even on a cache hit. Keep the first
+        # provenance while it still describes these bytes; repair corrupt metadata
+        # and stale notices without copying a whole duplicate SDK.
         write_json(stage / "core-capabilities.json", capabilities)
         write_json(stage / "native-build.json", metadata)
         for filename, path in notices.items():
@@ -207,6 +282,7 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
                 asset = host_path(project, (relative / "assets/sing_box_flutter/core-capabilities.json").as_posix())
                 if not asset.is_file() or sha256(asset) != sha256(final / "core-capabilities.json"):
                     raise BuildError("An existing Android capabilities asset is missing or changed; remove that cached artifact and rebuild")
+            repair_provenance(final, stage, metadata)
         else:
             if output.is_dir():
                 shutil.copytree(output, stage / name, symlinks=True)
@@ -269,8 +345,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--android-abis", default=",".join(ANDROID_TARGETS))
     result.add_argument("--apple-platform", choices=("ios", "ios,iossimulator"), default="ios,iossimulator")
     result.add_argument("--wgc-config", type=Path)
-    result.add_argument("--bootstrap-dir", default=str(ROOT / ".build/bootstrap"))
-    result.add_argument("--cache-dir", default=str(ROOT / ".build/cache"))
+    result.add_argument("--work-dir", help="Absolute writable directory for the verified toolchain, "
+                        "source checkout and caches (default: plugin .build, or the host's "
+                        ".dart_tool/sing_box_flutter/work when the package is read-only)")
+    result.add_argument("--bootstrap-dir")
+    result.add_argument("--cache-dir")
     result.add_argument("--dry-run", action="store_true")
     result.add_argument("--bootstrap-only", action="store_true")
     return result
@@ -293,10 +372,11 @@ def main(argv: list[str] | None = None) -> int:
         if (not android_abis or len(android_abis) != len(set(android_abis)) or
                 any(name not in ANDROID_TARGETS for name in android_abis)):
             raise BuildError("--android-abis must list unique supported Android ABI names")
-        bootstrap = build_directory(args.bootstrap_dir)
-        cache = build_directory(args.cache_dir)
+        work = work_root(project, args.work_dir, create=not args.dry_run)
+        bootstrap = work_directory(args.bootstrap_dir or work / "bootstrap", work)
+        cache = work_directory(args.cache_dir or work / "cache", work)
         if bootstrap == cache or bootstrap.is_relative_to(cache) or cache.is_relative_to(bootstrap):
-            raise BuildError("Bootstrap and cache directories must be separate, non-nested .build directories")
+            raise BuildError("Bootstrap and cache directories must be separate, non-nested work directories")
         targets = ["android", "apple"] if args.target == "all" else [args.target]
         resolved = {target: resolve_features(selection, target) for target in targets}
         identity = build_identity(selection, extensions, pins)
@@ -309,10 +389,10 @@ def main(argv: list[str] | None = None) -> int:
                               "receipt": RECEIPT.as_posix(), "android_abis": android_abis,
                               "apple_platform": args.apple_platform, "shared_pub_cache_artifacts": False}, indent=2))
             return 0
-        # The package lock protects its verified toolchain/source; the host lock
+        # The work lock protects its verified toolchain/source; the host lock
         # also protects per-project receipts across different pub-cache versions.
         with contextlib.ExitStack() as locks:
-            locks.enter_context(project_lock())
+            locks.enter_context(project_lock(base=work))
             locks.enter_context(host_lock(project))
             cache.mkdir(parents=True, exist_ok=True)
             bootstrap.mkdir(parents=True, exist_ok=True)

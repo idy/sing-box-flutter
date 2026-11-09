@@ -6,6 +6,13 @@ on:
       - native-core.json
       - native/**
       - ios/**
+      # The selectable-core CLI, plugin API, Gradle integration and example host
+      # are all built and exercised by this workflow's native jobs.
+      - android/**
+      - bin/**
+      - lib/**
+      - pubspec.yaml
+      - example/**
       - THIRD_PARTY_NOTICES.md
       - LICENSE
       - tool/**

@@ -91,9 +91,9 @@ def build_directory(path: str | Path, root: Path = ROOT) -> Path:
 
 
 @contextlib.contextmanager
-def project_lock(root: Path = ROOT):
+def project_lock(root: Path = ROOT, base: Path | None = None):
     import fcntl  # Builds support macOS/Linux, including Android cross builds.
-    base = build_directory(root / ".build", root)
+    base = build_directory(root / ".build", root) if base is None else base
     base.mkdir(parents=True, exist_ok=True)
     with (base / "native-core.lock").open("w") as handle:
         try:

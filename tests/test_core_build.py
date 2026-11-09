@@ -1,5 +1,6 @@
 """Host artifact isolation, receipts and interrupted-build recovery."""
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -167,6 +168,62 @@ class HostArtifacts(unittest.TestCase):
             self.publish()
         asset.write_bytes(original)
         self.assertEqual(self.publish(), entry)
+
+    def test_cache_hit_repairs_corrupt_provenance_and_stale_notices(self):
+        notice = self.root / "NOTICE"
+        notice.write_text("first notice\n")
+        metadata = {"schema": 1, "target": "android", "sdks": {"ndk": "first"}}
+        publish = lambda value: publish_artifact(self.host, self.aar, "android", self.capabilities,
+                                                 value, {"NOTICE": notice})
+        entry = publish(metadata)
+        directory = host_path(self.host, entry["path"]).parent
+        provenance = directory / "native-build.json"
+        recorded = json.loads(provenance.read_text())
+        # Provenance that still describes the identical binary is kept as first recorded.
+        publish({**metadata, "sdks": {"ndk": "second"}})
+        self.assertEqual(json.loads(provenance.read_text()), recorded)
+        provenance.write_text("{corrupt")
+        notice.write_text("updated notice\n")
+        (directory / "Legal/STALE").write_text("stale\n")
+        self.assertEqual(publish(metadata), entry)
+        self.assertEqual(json.loads(provenance.read_text()), recorded)
+        self.assertEqual(sorted(path.name for path in (directory / "Legal").iterdir()), ["NOTICE"])
+        self.assertEqual((directory / "Legal/NOTICE").read_text(), "updated notice\n")
+        self.assertEqual([path.name for path in directory.parent.iterdir() if path.name.startswith(".")], [])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores directory permissions")
+    def test_read_only_package_builds_in_host_work_directory(self):
+        import build_core
+        package = self.root / "package"
+        package.mkdir()
+        with mock.patch.object(build_core, "ROOT", package):
+            self.assertEqual(build_core.work_root(self.host, None), (package / ".build").resolve())
+            (package / ".build").rmdir()
+            package.chmod(0o555)
+            self.addCleanup(package.chmod, 0o755)
+            work = build_core.work_root(self.host, None)
+            self.assertEqual(work, (self.host / ".dart_tool/sing_box_flutter/work").resolve())
+            self.assertTrue(work.is_dir())
+            self.assertFalse((package / ".build").exists())
+
+    def test_explicit_work_directory_is_dedicated(self):
+        import build_core
+        with self.assertRaises(BuildError):
+            build_core.work_root(self.host, "relative/work")
+        busy = self.root / "busy"
+        busy.mkdir()
+        (busy / "user-file").write_text("keep\n")
+        with self.assertRaises(BuildError):
+            build_core.work_root(self.host, str(busy))
+        with self.assertRaises(BuildError):
+            build_core.work_root(self.host, str(build_core.ROOT / "tool"))
+        work = build_core.work_root(self.host, str(self.root / "work"))
+        self.assertTrue((work / build_core.WORK_MARKER).is_file())
+        (work / "cache").mkdir()
+        self.assertEqual(build_core.work_root(self.host, str(work)), work)
+        self.assertEqual(build_core.work_directory(work / "cache", work), work / "cache")
+        with self.assertRaises(BuildError):
+            build_core.work_directory(self.root / "elsewhere", work)
 
     def test_failed_native_artifact_does_not_publish_receipt(self):
         self.aar.write_bytes(b"not a zip")

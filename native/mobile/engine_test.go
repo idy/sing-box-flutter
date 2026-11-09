@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,7 +19,6 @@ import (
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	boxservice "github.com/sagernet/sing-box/adapter/service"
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/dns/transport"
 	"github.com/sagernet/sing-box/experimental/cachefile"
@@ -186,14 +187,36 @@ func TestMobileCacheRestoresExistingPinnedCache(t *testing.T) {
 	}
 }
 
-func TestMobileWakeMatchesPinnedPlatformGuard(t *testing.T) {
+func TestMobileWakeEndsDevicePauseOnEveryPlatform(t *testing.T) {
 	ctx := pause.WithDefaultManager(context.Background())
 	manager := service.FromContext[pause.Manager](ctx)
-	engine := &boxEngine{ctx: ctx, pause: manager}
-	manager.DevicePause()
-	engine.Wake()
-	if manager.IsDevicePaused() == C.IsAndroid {
-		t.Fatalf("device paused=%v on Android=%v", manager.IsDevicePaused(), C.IsAndroid)
+	logFile, err := os.CreateTemp(t.TempDir(), "mobile-*.log")
+	if err != nil {
+		t.Fatal(err)
 	}
-	manager.DeviceWake()
+	t.Cleanup(func() { _ = logFile.Close() })
+	engine := &boxEngine{ctx: ctx, pause: manager, log: logFile}
+	var events []int
+	manager.RegisterCallback(func(event int) { events = append(events, event) })
+	// Waking an active core must not emit a spurious wake transition.
+	engine.Wake()
+	// Pause ends with this same device pause; no host reports screen state.
+	manager.DevicePause()
+	if !manager.IsPaused() {
+		t.Fatal("device pause did not pause the core")
+	}
+	engine.Wake()
+	if manager.IsDevicePaused() || manager.IsPaused() {
+		t.Fatal("wake left the core paused")
+	}
+	if !slices.Equal(events, []int{pause.EventDevicePaused, pause.EventDeviceWake}) {
+		t.Fatalf("pause events=%v", events)
+	}
+	content, err := os.ReadFile(logFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(content), " awake\n") != 2 {
+		t.Fatal("wake did not record its lifecycle event")
+	}
 }

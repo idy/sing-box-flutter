@@ -13,7 +13,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_core import RECEIPT, build_identity, canonical_hash, host_path
 from core_features import canonicalize, resolve_features
-from native_common import BuildError, ROOT, load_pins, sha256
+from native_common import BuildError, ROOT, artifact_hashes, load_pins, sha256
 
 
 def verify_current_recipe(project: Path, receipt: dict, metadata: dict, *,
@@ -56,6 +56,24 @@ def verify_current_recipe(project: Path, receipt: dict, metadata: dict, *,
                          "Run dart run sing_box_flutter build for this host and target.") from error
 
 
+def verify_current_artifact(project: Path, receipt: dict, target: str) -> None:
+    """Recheck the artifact a native build is about to link against its receipt."""
+    try:
+        entry = receipt["artifacts"][target]
+        expected = entry["sha256"]
+        artifact = host_path(project, entry["path"])
+        capabilities = host_path(project, entry["capabilities"])
+        if (not isinstance(expected, dict) or not expected or artifact_hashes(artifact) != expected or
+                sha256(capabilities) != entry["capabilities_sha256"]):
+            raise ValueError("modified artifact")
+        manifest = json.loads(capabilities.read_text())
+        if any(manifest.get(key) != receipt.get(key) for key in ("schema", "version", "fingerprint", "features")):
+            raise ValueError("capabilities disagree with receipt")
+    except (BuildError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise BuildError("Selected native core artifact changed after it was built. "
+                         "Run dart run sing_box_flutter build for this host and target.") from error
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-dir", type=Path, required=True)
@@ -69,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
         metadata_path = host_path(project, entry["metadata"])
         metadata = json.loads(metadata_path.read_text())
         verify_current_recipe(project, receipt, metadata, target=args.target)
+        # Build-time guards run after pod install/Gradle configuration; recheck the
+        # bytes that will be linked, not only the recipe that produced them.
+        verify_current_artifact(project, receipt, args.target)
         return 0
     except (BuildError, OSError, ValueError, KeyError, TypeError):
         print("Selected native core recipe is stale or invalid. "

@@ -43,6 +43,7 @@ struct PreflightSmoke {
         try inlineACMEChecks(full)
         try implicitDirectChecks(full)
         try opaqueMapChecks(full)
+        try caseFoldingChecks(full, minimal)
         // Deliberately beyond preflight: references, key material and unknown
         // protocol fields must still be rejected by the extension's real core.
         try ConfigPreflight.check(#"{"inbounds":[{"type":"tun"}],"endpoints":[{"type":"wgc","private_key":"not-a-key"}],"route":{"final":"missing"}}"#, capabilities: minimal, requireTUN: true)
@@ -55,7 +56,7 @@ struct PreflightSmoke {
         precondition(decodedSession.coreFingerprint == nil)
         let event = TunnelStatus("error", message: String(repeating: "a", count: 1000)).event
         precondition(event["type"] as? String == "status" && (event["message"] as? String)?.count == 240)
-        print("Foundation preflight: scoped shapes, transports, TLS, ACME, implicit direct, opaque maps and existing contract checks passed.")
+        print("Foundation preflight: scoped shapes, field-name folding, transports, TLS, ACME, implicit direct, opaque maps and existing contract checks passed.")
     }
 
     private static func scopedPrimitiveChecks(_ full: CoreCapabilities) throws {
@@ -191,6 +192,98 @@ struct PreflightSmoke {
             try ConfigPreflight.check("{\"outbounds\":[{\"type\":\"http\",\"\(key)\":\(opaque)}]}", capabilities: full)
         }
         try ConfigPreflight.check(#"{"endpoints":[{"type":"wgc","transport":"custom","transport_options":\#(opaque)}]}"#, capabilities: full)
+    }
+
+    /// Mirrors the pinned decoder: option fields fold ASCII case plus U+212A/U+017F,
+    /// union discriminators and map keys stay exact, and every spelling is checked.
+    private static func caseFoldingChecks(_ full: CoreCapabilities, _ minimal: CoreCapabilities) throws {
+        let kelvin = "\u{212A}", longS = "\u{17F}"
+        try ConfigPreflight.check(#"{"HTTP_Clients":[{"tag":"c","version":1,"TLS":{"ech":{"enabled":false}}}],"Route":{"Final":"fixture"},"$SCHEMA":"x"}"#, capabilities: minimal)
+        try ConfigPreflight.check(#"{"INBOUNDS":[{"type":"tun"}],"Outbounds":[{"type":"direct"}]}"#, capabilities: minimal, requireTUN: true)
+        try ConfigPreflight.check(#"{"\#(longS)ervices":[],"networ\#(kelvin)_namespaces":[]}"#, capabilities: full)
+        for key in ["Unknown", "\u{130}nbounds", "\u{131}nbounds"] {
+            try rejects(#"{"\#(key)":[]}"#, capabilities: full)
+        }
+        for config in [#"{"Inbounds":{}}"#, #"{"$Schema":1}"#, #"{"Inbounds":[{"type":"tun"},{"type":"tun"}]}"#, #"{"DNS":{"FakeIP":{}}}"#, #"{"Experimental":{"Unknown":{}}}"#] {
+            try rejects(config, capabilities: full)
+        }
+
+        let limited = withFeatures(full, ["tls": [], "transports": ["grpc"], "dns": ["local"], "api": [], "certificate_providers": []])
+        for config in [
+            #"{"outbounds":[{"type":"vmess","Transport":{"type":"ws"}}]}"#,
+            #"{"outbounds":[{"type":"vmess","transport":{"type":"grpc"},"TRANSPORT":{"type":"ws"}}]}"#,
+            #"{"outbounds":[{"type":"http","TLS":{"UTLS":{"Enabled":true}}}]}"#,
+            #"{"outbounds":[{"type":"http","tls":{"utl\#(longS)":{"enabled":true}}}]}"#,
+            #"{"outbounds":[{"type":"http","tls":{"utls":{"enabled":false},"UTLS":{"enabled":true}}}]}"#,
+            #"{"outbounds":[{"type":"http","tls":{"reality":{"enabled":false}},"TLS":{"reality":{"enabled":true}}}]}"#,
+            #"{"outbounds":[{"type":"http","tls":{"ech":{"enabled":false,"ENABLED":true}}}]}"#,
+            #"{"outbounds":[{"type":"http","tls":{"Certificate_Provider":{"type":"tailscale"}}}]}"#,
+            #"{"DNS":{"Servers":[{"type":"udp"}]}}"#,
+            #"{"Experimental":{"Clash_API":{}}}"#,
+            #"{"inbounds":[{"type":"trojan","tls":{"Acme":{}}}]}"#
+        ] {
+            try rejects(config, capabilities: limited)
+        }
+        for config in [
+            #"{"outbounds":[{"type":"vmess","transport":{"type":"grpc"},"TRANSPORT":{"type":"ws"}}]}"#,
+            #"{"outbounds":[{"type":"http","TLS":{"UTLS":{"Enabled":true},"Reality":{"Enabled":true},"ECH":{"Enabled":true}}}]}"#,
+            #"{"DNS":{"Servers":[{"type":"udp"}]},"Experimental":{"Clash_API":{},"Cache_File":{}}}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: full)
+        }
+        try ConfigPreflight.check(#"{"outbounds":[{"type":"http","TLS":{"UTLS":{"Enabled":false}}}]}"#, capabilities: limited)
+        try ConfigPreflight.check(#"{"inbounds":[{"type":"trojan","TLS":{"ACME":{"Domain":"example.com"}}}]}"#, capabilities: withFeatures(full, ["certificate_providers": ["acme"]]))
+        try rejects(#"{"outbounds":[{"type":"direct"}],"Outbounds":[{"type":"vmess"}]}"#, capabilities: minimal)
+        for config in [
+            #"{"outbounds":[{"type":"http","TLS":{"UTLS":{"Enabled":"yes"}}}]}"#,
+            #"{"outbounds":[{"type":"http","Server_Port":70000}]}"#,
+            #"{"outbounds":[{"type":"ssh","private_\#(kelvin)ey":true,"private_Key":["a"]}]}"#,
+            #"{"outbounds":[{"type":"ssh","private_\#(kelvin)ey":["a"],"private_Key":true}]}"#
+        ] {
+            try rejects(config, capabilities: full)
+        }
+        try ConfigPreflight.check(#"{"outbounds":[{"type":"ssh","Server_Port":22,"private_\#(kelvin)ey":["a"],"private_Key":"b"}]}"#, capabilities: full)
+
+        let scoped = withFeatures(full, ["endpoints": ["wgc", "openvpn-client", "openvpn-server"], "transports": []])
+        for config in [
+            #"{"Endpoints":[{"type":"wgc","Transport":"udp"}]}"#,
+            #"{"Endpoints":[{"type":"openvpn-server","Push":{"DNS_Servers":[{"Transport":"dot"}]}}]}"#,
+            #"{"Endpoints":[{"type":"openvpn-client","Fragment":1300}]}"#,
+            #"{"Route":{"Rule_Set":[{"type":"remote","tag":["a","b"],"URL":"https://example.com/{tag}.srs","Initial_Path":"r/{tag}.srs"}]}}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: scoped)
+        }
+        for config in [
+            #"{"Endpoints":[{"type":"wgc","Transport":{"type":"ws"}}]}"#,
+            #"{"Endpoints":[{"type":"openvpn-client","Fragment":true}]}"#,
+            #"{"Route":{"Rule_Set":[{"type":"remote","tag":["a","b"],"URL":"https://example.com/a.srs"}]}}"#,
+            #"{"route":{"rule_set":[{"type":"remote","tag":["a","b"],"url":"https://example.com/{tag}.srs","URL":"https://example.com/a.srs"}]}}"#
+        ] {
+            try rejects(config, capabilities: scoped)
+        }
+        // The native decoder rejects any other spelling of a union discriminator.
+        for config in [
+            #"{"outbounds":[{"Type":"direct"}]}"#,
+            #"{"outbounds":[{"type":"direct","Type":"direct"}]}"#,
+            #"{"outbounds":[{"type":"vmess","transport":{"type":"ws","Type":"ws"}}]}"#,
+            #"{"dns":{"servers":[{"type":"udp","TYPE":"udp"}]}}"#,
+            #"{"outbounds":[{"type":"http","tls":{"certificate_provider":{"type":"tailscale","Type":"tailscale"}}}]}"#,
+            #"{"route":{"rule_set":[{"Type":"remote","tag":"a","url":"https://example.com/a.srs"}]}}"#,
+            #"{"route":{"rule_set":[{"type":"remote","Tag":"a","url":"https://example.com/a.srs"}]}}"#
+        ] {
+            try rejects(config, capabilities: full)
+        }
+        let noDirect = withFeatures(full, ["outbounds": ["http"], "endpoints": ["wgc"]])
+        try ConfigPreflight.check(#"{"Endpoints":[{"type":"wgc","tag":"vpn"}],"Route":{"Final":"vpn"}}"#, capabilities: noDirect)
+        try rejects(#"{"Endpoints":[{"type":"wgc","tag":"vpn"}],"Route":{"FINAL":""}}"#, capabilities: noDirect)
+        // Either route spelling may be decoded last, so an empty final may take effect.
+        try rejects(#"{"Endpoints":[{"type":"wgc","tag":"vpn"}],"route":{"final":"vpn"},"Route":{"Final":""}}"#, capabilities: noDirect)
+
+        // Opaque and map-typed values keep exact keys; map values are still options.
+        try ConfigPreflight.check(#"{"outbounds":[{"type":"http","Headers":{"TLS":true,"Transport":{"type":"unselected"},"type":"x","Host":"a","host":"b","\#(kelvin)ey":"c","Key":"d"}}]}"#, capabilities: full)
+        try ConfigPreflight.check(#"{"endpoints":[{"type":"wgc","transport":"app","Transport_Options":{"tls":"opaque","Transport":{"type":"private-protocol"},"ech":{"enabled":true}}}]}"#, capabilities: minimal)
+        try ConfigPreflight.check(#"{"inbounds":[{"type":"trojan","Fallback_For_ALPN":{"TLS":{"server":"192.0.2.1","Server_Port":443}}}],"services":[{"type":"ssm-api","Servers":{"Transport":"ss-in","TLS":"ss-in"}}],"outbounds":[{"type":"tor","Torrc":{"Enabled":"1"}}]}"#, capabilities: full)
+        try rejects(#"{"inbounds":[{"type":"trojan","fallback_for_alpn":{"h2":{"Server_Port":70000}}}]}"#, capabilities: full)
     }
 
     private static func withFeatures(_ base: CoreCapabilities, _ overrides: [String: [String]]) -> CoreCapabilities {

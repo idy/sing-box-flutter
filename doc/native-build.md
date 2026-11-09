@@ -141,8 +141,17 @@ never installs or changes a global SDK. The Flutter plugin and example use NDK
 plugin. CI installs both NDK versions; native Go compilation retains its recorded
 `28.0.13004108` input. Flutter host compilation is a separate check.
 
+Selected-core builds keep the verified toolchain, source checkout and Go caches in
+a native work directory, by default the plugin's `.build/`. When the resolved
+package is read-only, such as a prepopulated pub cache, the builder uses the
+host's `.dart_tool/sing_box_flutter/work/` instead; that repeats toolchain and
+module downloads for each host. `--work-dir <absolute path>` selects a shared
+writable directory. It must be empty or an existing sing_box_flutter work
+directory, and outside the plugin sources.
+
 `--bootstrap-dir` and `--cache-dir` accept only separate, non-nested directories
-inside the plugin's `.build/`. Symlinks cannot redirect them outside the project.
+inside the work directory (the plugin's `.build/` for legacy standard builds).
+Symlinks cannot redirect them outside it.
 Downloaded archives are isolated from one another and are never a working directory
 for Python or build tools. A project lock prevents build/install races. Selected
 artifacts stay in the host's `.dart_tool/sing_box_flutter/`, separate from these
