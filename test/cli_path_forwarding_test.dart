@@ -126,6 +126,44 @@ void main() {
     );
   });
 
+  for (final option in ['--wgc-config', '--from-dir']) {
+    for (final equalsForm in [false, true]) {
+      test('repeated home separators ($option, equals=$equalsForm)', () {
+        final base = '${fixture.path}/home';
+        final external = Directory('${fixture.path}/external')..createSync();
+        final child = Directory('${external.path}/child')..createSync();
+        Link('$base/link').createSync(child.path);
+        final name = option == '--wgc-config' ? 'wgc.core.json' : 'artifacts';
+        for (final parent in [base, external.path]) {
+          if (option == '--wgc-config') {
+            File('$parent/$name').writeAsStringSync('{}');
+          } else {
+            Directory('$parent/$name').createSync();
+          }
+        }
+        final cases = {
+          '~//$name': '$base/$name',
+          '~///$name': '$base/$name',
+          '~//link/../$name': '${external.path}/$name',
+        };
+        for (final homePath in [base, '$base/', '$base///']) {
+          for (final entry in cases.entries) {
+            final forwarded = cli.forwardPathArguments(
+              equalsForm ? ['$option=${entry.key}'] : [option, entry.key],
+              callerDirectory: caller,
+              environment: {'HOME': homePath},
+            );
+            final path = equalsForm
+                ? forwarded.last.substring(option.length + 1)
+                : forwarded.last;
+            expect(path, startsWith('$base//'));
+            expect(FileSystemEntity.identicalSync(path, entry.value), isTrue);
+          }
+        }
+      }, skip: Platform.isWindows);
+    }
+  }
+
   test('expands bare home and preserves Python user expansion', () {
     expect(
       cli.forwardPathArguments(
@@ -162,6 +200,11 @@ void main() {
             r'\\other\share\link\..\artifacts':
                 r'\\other\share\link\..\artifacts',
             r'~\link\..\artifacts': r'C:\Users\tester\link\..\artifacts',
+            r'~\\artifacts': r'C:\Users\tester\\artifacts',
+            '~//artifacts': r'C:\Users\tester//artifacts',
+            r'~\/artifacts': r'C:\Users\tester\/artifacts',
+            r'~\\\other\share\artifacts':
+                r'C:\Users\tester\\\other\share\artifacts',
           };
           for (final entry in cases.entries) {
             final forwarded = cli.forwardPathArguments(

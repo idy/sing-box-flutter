@@ -28,6 +28,7 @@ UPSTREAM_REQUIRED_TAGS = ("with_tailscale", "with_gvisor", "with_quic", "with_wi
                           "with_utls", "with_clash_api", *TS_OMIT_TAGS)
 REQUIRED_TAGS = (*UPSTREAM_REQUIRED_TAGS, "with_wgc")
 ARTIFACTS = {"android": "android/libs/libbox.aar", "apple": "ios/Frameworks/Libbox.xcframework"}
+TRANSIENT_HTTP_STATUSES = (408, 429, 500, 502, 503, 504)
 
 
 class BuildError(RuntimeError):
@@ -97,30 +98,30 @@ def project_lock(root: Path = ROOT):
 
 
 def download(url: str, directory: Path, expected: str | None = None,
-             max_bytes: int = 4 * 1024**3) -> tuple[Path, dict]:
+             max_bytes: int = 4 * 1024**3, *, headers: dict[str, str] | None = None) -> tuple[Path, dict]:
     """Retry transient HTTP failures without reusing partial downloads."""
     for attempt in range(3):
         try:
-            return _download_once(url, directory, expected, max_bytes)
+            return _download_once(url, directory, expected, max_bytes, headers)
         except urllib.error.HTTPError as error:
-            if error.code not in (408, 429, 500, 502, 503, 504) or attempt == 2:
-                raise
             if error.fp is not None:
                 error.close()
+            if error.code not in TRANSIENT_HTTP_STATUSES or attempt == 2:
+                raise
             print(f"Retry native download after HTTP {error.code} ({attempt + 2}/3)", flush=True)
             time.sleep(attempt + 1)
     raise AssertionError("unreachable")
 
 
 def _download_once(url: str, directory: Path, expected: str | None,
-                   max_bytes: int) -> tuple[Path, dict]:
+                   max_bytes: int, headers: dict[str, str] | None = None) -> tuple[Path, dict]:
     """Every response goes into its own fresh directory, never used as cwd."""
     if urllib.parse.urlparse(url).scheme != "https":
         raise BuildError("Downloads require HTTPS")
     directory.mkdir(parents=True, exist_ok=True)
     isolated = Path(tempfile.mkdtemp(prefix="download-", dir=directory))
     path = isolated / "payload"
-    request = urllib.request.Request(url, headers={"User-Agent": "sing-box-flutter-native-build"})
+    request = urllib.request.Request(url, headers={"User-Agent": "sing-box-flutter-native-build", **(headers or {})})
     try:
         with urllib.request.urlopen(request, timeout=60) as response, path.open("xb") as out:
             if urllib.parse.urlparse(response.url).scheme != "https":

@@ -556,6 +556,117 @@ class DownloadTests(unittest.TestCase):
             self.assertFalse(list(Path(temp).iterdir()))
 
 
+class ToolchainDownloadTests(unittest.TestCase):
+    HOSTS = {"darwin-amd64": 470759042, "darwin-arm64": 470759043,
+             "linux-amd64": 470759104, "linux-arm64": 470759044}
+
+    def fixture(self, root, key):
+        pins = load_pins()
+        lock = json.loads((ROOT / "tool/tailscale-go.json").read_text())
+        self.assertEqual(lock["asset_ids"], self.HOSTS)
+        self.assertEqual(set(lock["sha256"]), set(self.HOSTS))
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+            for name, content in (("go/bin/go", b"verified executable"),
+                                  ("go/VERSION", (lock["version"] + "\n").encode())):
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = len(content), 0o755
+                archive.addfile(info, io.BytesIO(content))
+        payload = payload.getvalue()
+        lock["sha256"][key] = hashlib.sha256(payload).hexdigest()
+        (root / "tool").mkdir()
+        (root / "tool/tailscale-go.json").write_text(json.dumps(lock))
+        bootstrap, cache = root / "bootstrap", root / "cache"
+        bootstrap.mkdir()
+        url = f"https://github.com/tailscale/go/releases/download/build-{pins['tailscale_go_revision']}/{key}.tar.gz"
+        api = f"https://api.github.com/repos/tailscale/go/releases/assets/{self.HOSTS[key]}"
+        return pins, lock, payload, bootstrap, cache, url, api
+
+    def response(self, payload, url="https://release-assets.githubusercontent.com/archive?secret=not-for-provenance"):
+        response = io.BytesIO(payload)
+        response.url = url
+        return response
+
+    def failures(self, url, status=504, count=3):
+        return [urllib.error.HTTPError(url, status, "HTTP failure", None, io.BytesIO())
+                for _ in range(count)]
+
+    def test_primary_and_exhausted_gateway_fallback_keep_verified_identity_and_source(self):
+        for key in self.HOSTS:
+            for fallback in (False, True):
+                with self.subTest(host=key, fallback=fallback), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    pins, lock, payload, bootstrap, cache, url, api = self.fixture(root, key)
+                    failures = self.failures(url) if fallback else []
+                    responses = [*failures, self.response(payload)]
+                    identity = {"GOROOT": str(bootstrap / f"tailscale-go-{key}"),
+                                "GOTOOLCHAIN": "local", "GOVERSION": lock["version"]}
+                    with mock.patch("build_libbox.ROOT", root), mock.patch("build_libbox.host_key", return_value=key), mock.patch("build_libbox.run", return_value=json.dumps(identity)) as run, mock.patch("native_common.urllib.request.urlopen", side_effect=responses) as request, mock.patch("time.sleep"):
+                        go, env, provenance = bootstrap_go(pins, bootstrap, cache)
+                        self.assertEqual(request.call_count, 4 if fallback else 1)
+                        requests = [call.args[0] for call in request.call_args_list]
+                        self.assertEqual([req.full_url for req in requests], [url] * (3 if fallback else 1) + ([api] if fallback else []))
+                        self.assertEqual(requests[-1].get_header("Accept"), "application/octet-stream" if fallback else None)
+                        self.assertEqual(provenance["url"], api if fallback else url)
+                        self.assertEqual(provenance["sha256"], lock["sha256"][key])
+                        self.assertEqual(provenance["binary_sha256"], sha256(go))
+                        self.assertEqual(env["GOTOOLCHAIN"], "local")
+                        self.assertEqual(run.call_args.args[0][0], go)
+                        self.assertNotIn("secret", json.dumps(provenance))
+                        self.assertTrue(all(error.fp.closed for error in failures))
+                        # Cached archives retain the original route and still verify/run identity.
+                        _, _, cached = bootstrap_go(pins, bootstrap, cache)
+                        self.assertEqual(cached["url"], provenance["url"])
+                        self.assertTrue(cached["cached"])
+                        self.assertEqual(request.call_count, len(responses))
+                        self.assertEqual(run.call_count, 2)
+
+    def test_failed_fallback_is_bounded_and_leaves_no_archive_or_partial_files(self):
+        for failure in ("504", "404", "hash", "size", "http-redirect"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                pins, lock, payload, bootstrap, cache, url, api = self.fixture(root, "linux-amd64")
+                if failure in ("504", "404"):
+                    tail = self.failures(api, int(failure), 3 if failure == "504" else 1)
+                    expected_error = urllib.error.HTTPError
+                else:
+                    tail = [self.response(b"altered" if failure == "hash" else payload,
+                                          "http://unsafe.example/archive" if failure == "http-redirect" else api)]
+                    expected_error = BuildError
+                responses = [*self.failures(url), *tail]
+                from native_common import _download_once
+                # Exercise the same size limit on both routes without a multi-GB fixture.
+                def limited_once(url, directory, expected, max_bytes, headers):
+                    return _download_once(url, directory, expected,
+                                          1 if failure == "size" else max_bytes, headers)
+                with mock.patch("build_libbox.ROOT", root), mock.patch("build_libbox.host_key", return_value="linux-amd64"), mock.patch("build_libbox.run") as run, mock.patch("native_common.urllib.request.urlopen", side_effect=responses) as request, mock.patch("native_common._download_once", side_effect=limited_once), mock.patch("time.sleep"):
+                    with self.assertRaises(expected_error):
+                        bootstrap_go(pins, bootstrap, cache)
+                self.assertEqual(request.call_count, len(responses))
+                self.assertFalse(list((bootstrap / "downloads").iterdir()))
+                self.assertFalse(list((cache / "archives").iterdir()))
+                run.assert_not_called()
+
+    def test_primary_permanent_http_and_integrity_failures_never_fall_back(self):
+        for failure in ("403", "404", "hash", "cache"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                pins, lock, payload, bootstrap, cache, url, api = self.fixture(root, "darwin-arm64")
+                if failure == "cache":
+                    archives = cache / "archives"
+                    archives.mkdir(parents=True)
+                    (archives / f"tailscale-go-{pins['tailscale_go_revision']}-darwin-arm64.tar.gz").write_bytes(b"corrupt cache")
+                responses = self.failures(url, int(failure), 1) if failure.isdigit() else [self.response(b"altered")]
+                with mock.patch("build_libbox.ROOT", root), mock.patch("build_libbox.host_key", return_value="darwin-arm64"), mock.patch("build_libbox.run") as run, mock.patch("native_common.urllib.request.urlopen", side_effect=responses) as request, mock.patch("time.sleep") as sleep:
+                    with self.assertRaises(urllib.error.HTTPError if failure.isdigit() else BuildError):
+                        bootstrap_go(pins, bootstrap, cache)
+                self.assertEqual(request.call_count, 0 if failure == "cache" else 1)
+                self.assertTrue(all(call.args[0].full_url == url for call in request.call_args_list))
+                sleep.assert_not_called()
+                run.assert_not_called()
+                self.assertFalse(list((bootstrap / "downloads").glob("*")))
+
+
 class ToolchainTests(unittest.TestCase):
     def test_environment_always_selects_fork_and_project_caches(self):
         with tempfile.TemporaryDirectory() as temp:

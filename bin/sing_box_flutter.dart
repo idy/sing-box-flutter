@@ -96,7 +96,14 @@ List<String> forwardPathArguments(
         (windows && path.startsWith('~\\'))) {
       // Leave unresolved home paths for Python's expanduser fallback.
       if (home == null || home.isEmpty) return path;
-      path = path == '~' ? home : paths.join(home, path.substring(2));
+      if (path == '~') {
+        path = home;
+      } else {
+        // Expand the prefix literally: extra separators belong beneath home.
+        final prefix =
+            home.replaceFirst(RegExp(windows ? r'[/\\]+$' : r'/+$'), '');
+        path = '$prefix${path.substring(1)}';
+      }
     } else if (path.startsWith('~')) {
       // Python also supports ~user on Unix; do not anchor it to the caller.
       return path;

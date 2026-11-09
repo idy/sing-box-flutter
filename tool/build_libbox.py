@@ -18,11 +18,12 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
 
 # Keep bytecode and all tool state out of source / the pub archive.
 sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, CORE_REPO, GOMOBILE_MODULE,
-                           REQUIRED_TAGS, UPSTREAM_REQUIRED_TAGS, ROOT, archive_name, artifact_hashes, build_directory,
+                           REQUIRED_TAGS, TRANSIENT_HTTP_STATUSES, UPSTREAM_REQUIRED_TAGS, ROOT, archive_name, artifact_hashes, build_directory,
                            download, legal_files, load_pins, pin_identity, project_lock,
                            safe_extract, sha256, validate_metadata, write_json)
 from wgc_overlay import load_extensions, wgc_overlay
@@ -84,15 +85,29 @@ def bootstrap_go(pins: dict, bootstrap: Path, cache: Path) -> tuple[Path, dict, 
     digest = lock["sha256"][key]
     url = (f"https://github.com/tailscale/go/releases/download/"
            f"build-{pins['tailscale_go_revision']}/{key}.tar.gz")
+    asset_url = f"https://api.github.com/repos/tailscale/go/releases/assets/{lock['asset_ids'][key]}"
     cached_archive = cache / "archives" / f"tailscale-go-{pins['tailscale_go_revision']}-{key}.tar.gz"
+    cached_source = cached_archive.with_suffix(".json")
     cached_archive.parent.mkdir(parents=True, exist_ok=True)
     if cached_archive.exists():
         if sha256(cached_archive) != digest:
             raise BuildError("Cached Tailscale Go archive failed SHA-256 verification; remove it and retry")
-        provenance = {"url": url, "sha256": digest, "size": cached_archive.stat().st_size}
+        # Older caches have no source receipt; do not invent a browser-download origin.
+        source_url = json.loads(cached_source.read_text()).get("url") if cached_source.exists() else None
+        provenance = {"url": source_url if source_url in (url, asset_url) else None,
+                      "sha256": digest, "size": cached_archive.stat().st_size, "cached": True}
     else:
-        response, provenance = download(url, bootstrap / "downloads", digest)
+        try:
+            response, provenance = download(url, bootstrap / "downloads", digest)
+        except urllib.error.HTTPError as error:
+            if error.code not in TRANSIENT_HTTP_STATUSES:
+                raise
+            print(f"Browser download exhausted HTTP {error.code}; trying official GitHub asset API", flush=True)
+            response, provenance = download(asset_url, bootstrap / "downloads", digest,
+                                            headers={"Accept": "application/octet-stream"})
         shutil.copyfile(response, cached_archive)
+        # Only the stable official request URL is retained, never a signed redirect.
+        write_json(cached_source, provenance)
     # Re-extract a verified archive on EVERY invocation. An edited cached executable
     # or forged local stamp can never be selected before verification.
     staging = Path(tempfile.mkdtemp(prefix="toolchain-", dir=bootstrap))
