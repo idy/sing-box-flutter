@@ -16,7 +16,7 @@ import zipfile
 
 sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, RELEASE_REPO, ROOT, archive_name,
-                           artifact_hashes, build_directory, download, load_pins,
+                           artifact_hashes, build_directory, download, legal_files, load_pins,
                            parse_manifest, project_lock, safe_extract, sha256,
                            validate_metadata, write_json)
 
@@ -44,22 +44,34 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
         archive, provenance = download(source + "/" + name, cache / "downloads", sums[name])
         release_source = source
     staging = Path(tempfile.mkdtemp(prefix=f"install-{target}-", dir=cache))
+    keep_staging, committed = False, False
     try:
         safe_extract(archive, staging)
+        legal = staging / "Legal"
+        if not legal.is_dir():
+            raise BuildError("Release legal notices must be a directory")
+        if legal.is_symlink() or any(path.is_symlink() for path in legal.rglob("*")):
+            raise BuildError("Release legal notices must not contain symlinks")
         relative = ARTIFACTS[target]
         # Do not allow a release to install anything except its declared artifact.
         for path in staging.rglob("*"):
             name_in_archive = path.relative_to(staging).as_posix()
-            if (name_in_archive in ("native-build.json", "LICENSE.sing-box") or name_in_archive == relative
+            if (name_in_archive in ("native-build.json", "LICENSE.sing-box", "Legal") or name_in_archive.startswith("Legal/") or name_in_archive == relative
                     or name_in_archive.startswith(relative + "/")
                     or (path.is_dir() and relative.startswith(name_in_archive + "/"))):
                 continue
             raise BuildError("Release archive contains an unexpected file")
         metadata = json.loads((staging / "native-build.json").read_text())
-        validate_metadata(metadata, pins, target)
+        validate_metadata(metadata, pins, target, allow_custom=isinstance(source, Path))
         license_path = staging / "LICENSE.sing-box"
         if not license_path.is_file() or sha256(license_path) != metadata.get("license_sha256"):
             raise BuildError("Release upstream license is missing or changed")
+        required_legal = {*legal_files(), "LICENSE.wgc"}
+        missing_legal = sorted(name for name in required_legal if not (legal / name).is_file())
+        if missing_legal:
+            raise BuildError("Release required license notices are missing: " + ", ".join(missing_legal))
+        if artifact_hashes(staging / "Legal") != metadata.get("legal_sha256"):
+            raise BuildError("Release WGC/dependency license notices are missing or changed")
         artifact = staging / relative
         if artifact_hashes(artifact) != metadata.get("artifact_sha256"):
             raise BuildError("Release artifact does not match its build metadata")
@@ -72,35 +84,69 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
         destination = ROOT / relative
         if destination.is_symlink() or not destination.resolve().is_relative_to(ROOT.resolve()):
             raise BuildError("Artifact destination must stay inside this plugin")
-        if destination.exists() and artifact_hashes(destination) == metadata["artifact_sha256"]:
-            print(f"{target}: matching core already installed.")
-        else:
-            if destination.exists() and not force:
-                raise BuildError("Different core is already installed; use --force to replace after validation")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            backup = staging / "previous-artifact"
-            if destination.exists():
-                destination.rename(backup)
-            try:
-                artifact.rename(destination)
-            except OSError:
-                if backup.exists():
-                    backup.rename(destination)
-                raise
-            print(f"{target}: installed {relative}")
-        write_json(cache / "installed" / f"{target}.json", {
+        legal_path = ROOT / ".build/legal" / target
+        if any(path.is_symlink() for path in (ROOT / ".build", legal_path.parent, legal_path)):
+            raise BuildError("Legal notice destination must be inside project .build without symlinks")
+        legal_destination = build_directory(legal_path, ROOT)
+        if cache.resolve().is_relative_to(legal_destination):
+            raise BuildError("Install cache must be separate from the legal notice destination")
+        if legal_destination.exists() and not legal_destination.is_dir():
+            raise BuildError("Legal notice destination must be a directory")
+        receipt_destination = cache / "installed" / f"{target}.json"
+        if any(path.is_symlink() for path in (cache, receipt_destination.parent, receipt_destination)):
+            raise BuildError("Installation metadata destination must not contain symlinks")
+        if receipt_destination.exists() and not receipt_destination.is_file():
+            raise BuildError("Installation metadata destination must be a regular file")
+        matching = destination.exists() and artifact_hashes(destination) == metadata["artifact_sha256"]
+        if destination.exists() and not matching and not force:
+            raise BuildError("Different core is already installed; use --force to replace after validation")
+        for parent in (destination.parent, legal_destination.parent, receipt_destination.parent):
+            parent.mkdir(parents=True, exist_ok=True)
+        # Prepare all copied/written output before changing installed files.
+        next_legal, next_receipt = staging / "next-legal", staging / "next-install.json"
+        shutil.copytree(legal, next_legal)
+        write_json(next_receipt, {
             "schema": 1, "release_source": release_source, "manifest_sha256": manifest_sha256,
             "download": provenance, "build": metadata,
         })
+        replacements = [] if matching else [(artifact, destination)]
+        replacements += [(next_legal, legal_destination), (next_receipt, receipt_destination)]
+        changed = []
+        try:
+            for index, (prepared, installed) in enumerate(replacements):
+                backup = staging / f"previous-{index}" if installed.exists() else None
+                if backup is not None:
+                    installed.rename(backup)
+                changed.append((prepared, installed, backup))
+                prepared.rename(installed)
+        except BaseException:
+            try:
+                for prepared, installed, backup in reversed(changed):
+                    if installed.exists():
+                        installed.rename(prepared)
+                    if backup is not None:
+                        backup.rename(installed)
+            except BaseException as rollback_error:
+                keep_staging = True
+                raise BuildError(f"Install rollback failed; backups retained at {staging}") from rollback_error
+            raise
+        committed = True
+        print(f"{target}: matching core already installed." if matching else f"{target}: installed {relative}")
     finally:
-        shutil.rmtree(staging)
+        if not keep_staging:
+            try:
+                shutil.rmtree(staging)
+            except OSError:
+                if not committed:
+                    raise
+                print(f"warning: Installation completed; staging cleanup failed at {staging}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=("android", "apple", "all"), default="all")
     source_args = parser.add_mutually_exclusive_group(required=True)
-    source_args.add_argument("--release", help="Published tag, e.g. v0.1.0; never latest")
+    source_args.add_argument("--release", help="Published tag, e.g. v0.2.0; never latest")
     source_args.add_argument("--from-dir", type=Path, help="Install verified local/CI release inputs without networking")
     parser.add_argument("--manifest-sha256", help="Optional independently obtained SHA-256 of SHA256SUMS")
     parser.add_argument("--cache-dir", default=str(ROOT / ".build/install"))
@@ -115,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.manifest_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.manifest_sha256):
             raise BuildError("--manifest-sha256 must be a lowercase SHA-256 digest")
         targets = ["android", "apple"] if args.target == "all" else [args.target]
-        source = args.from_dir.resolve() if args.from_dir else f"https://github.com/{RELEASE_REPO}/releases/download/{urllib.parse.quote(args.release, safe='')}"
+        source = args.from_dir.expanduser().resolve() if args.from_dir else f"https://github.com/{RELEASE_REPO}/releases/download/{urllib.parse.quote(args.release, safe='')}"
         if args.dry_run:
             prefix = str(source)
             print(json.dumps({"manifest": prefix + "/SHA256SUMS", "archives": [prefix + "/" + archive_name(pins, t) for t in targets],

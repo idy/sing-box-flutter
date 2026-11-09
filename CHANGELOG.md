@@ -1,3 +1,11 @@
+## 0.2.0
+
+- Register a WGC endpoint in the existing libbox runtime, directly using
+  `github.com/idy/wgc` and the sing-box userspace stack.
+- Add native transport factory hooks and pin their adapter/build inputs.
+- Preserve scoped private Go module access settings during native builds.
+- Keep the existing Flutter API and Android/iOS platform implementation.
+
 ## 0.1.0
 
 - Add Android and iOS native VPN control through typed Dart APIs.

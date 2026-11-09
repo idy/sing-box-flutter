@@ -38,6 +38,30 @@ struct NativeCoreSmoke {
         try NativeCore.check(String(decoding: tailscaleJSON, as: UTF8.self))
         print("Tailscale endpoint: registered and configuration accepted")
 
+        let wgcConfig: [String: Any] = [
+            "log": ["disabled": true],
+            "inbounds": [[
+                "type": "tun", "tag": "tun-in",
+                "address": ["172.19.0.1/30", "fd00:7::1/126"],
+                "stack": "gvisor", "auto_route": true, "dns_mode": "hijack",
+            ]],
+            "endpoints": [[
+                "type": "wgc", "tag": "wgc", "address": ["10.7.0.2/32"],
+                "private_key": Data(repeating: 1, count: 32).base64EncodedString(),
+                "peer_public_key": Data(repeating: 2, count: 32).base64EncodedString(),
+                "peer_endpoint": "203.0.113.10:51820",
+            ]],
+            "dns": ["servers": [["type": "udp", "tag": "remote", "server": "1.1.1.1", "detour": "wgc"]], "final": "remote"],
+            "route": [
+                "auto_detect_interface": true, "default_domain_resolver": "remote",
+                "rules": [["port": 53, "action": "hijack-dns"], ["ip_version": 6, "action": "reject"]],
+                "final": "wgc",
+            ],
+        ]
+        let wgcJSON = try JSONSerialization.data(withJSONObject: wgcConfig)
+        try NativeCore.check(String(decoding: wgcJSON, as: UTF8.self))
+        print("WGC endpoint: registered using idy/wgc")
+
         let secret = "native-smoke-private-auth-sentinel"
         do {
             try NativeCore.check("{\"outbounds\":[{\"type\":\"invalid-smoke-outbound\",\"password\":\"\(secret)\"}]}")

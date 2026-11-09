@@ -10,6 +10,8 @@ import re
 import shutil
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -22,9 +24,11 @@ TS_OMIT_TAGS = (
     "ts_omit_webclient", "ts_omit_doctor", "ts_omit_capture", "ts_omit_kube",
     "ts_omit_aws", "ts_omit_synology", "ts_omit_bird",
 )
-REQUIRED_TAGS = ("with_tailscale", "with_gvisor", "with_quic", "with_wireguard",
-                 "with_utls", "with_clash_api", *TS_OMIT_TAGS)
+UPSTREAM_REQUIRED_TAGS = ("with_tailscale", "with_gvisor", "with_quic", "with_wireguard",
+                          "with_utls", "with_clash_api", *TS_OMIT_TAGS)
+REQUIRED_TAGS = (*UPSTREAM_REQUIRED_TAGS, "with_wgc")
 ARTIFACTS = {"android": "android/libs/libbox.aar", "apple": "ios/Frameworks/Libbox.xcframework"}
+TRANSIENT_HTTP_STATUSES = (408, 429, 500, 502, 503, 504)
 
 
 class BuildError(RuntimeError):
@@ -48,8 +52,12 @@ def load_pins(root: Path = ROOT) -> dict:
 
 
 def pin_identity(pins: dict) -> dict:
-    return {key: pins[key] for key in ("sing_box_version", "sing_box_revision",
-                                     "tailscale_go_revision", "gomobile_version")}
+    from source_inputs import adapter_digest
+    identity = {key: pins[key] for key in ("sing_box_version", "sing_box_revision",
+                                          "tailscale_go_revision", "gomobile_version", "wgc_version")}
+    identity["wgc_source_sha256"] = adapter_digest(ROOT / "native/wgc")
+    identity["wgc_overlay_sha256"] = sha256(ROOT / "tool/wgc_overlay.py")
+    return identity
 
 
 def sha256(path: Path) -> str:
@@ -90,14 +98,30 @@ def project_lock(root: Path = ROOT):
 
 
 def download(url: str, directory: Path, expected: str | None = None,
-             max_bytes: int = 4 * 1024**3) -> tuple[Path, dict]:
+             max_bytes: int = 4 * 1024**3, *, headers: dict[str, str] | None = None) -> tuple[Path, dict]:
+    """Retry transient HTTP failures without reusing partial downloads."""
+    for attempt in range(3):
+        try:
+            return _download_once(url, directory, expected, max_bytes, headers)
+        except urllib.error.HTTPError as error:
+            if error.fp is not None:
+                error.close()
+            if error.code not in TRANSIENT_HTTP_STATUSES or attempt == 2:
+                raise
+            print(f"Retry native download after HTTP {error.code} ({attempt + 2}/3)", flush=True)
+            time.sleep(attempt + 1)
+    raise AssertionError("unreachable")
+
+
+def _download_once(url: str, directory: Path, expected: str | None,
+                   max_bytes: int, headers: dict[str, str] | None = None) -> tuple[Path, dict]:
     """Every response goes into its own fresh directory, never used as cwd."""
     if urllib.parse.urlparse(url).scheme != "https":
         raise BuildError("Downloads require HTTPS")
     directory.mkdir(parents=True, exist_ok=True)
     isolated = Path(tempfile.mkdtemp(prefix="download-", dir=directory))
     path = isolated / "payload"
-    request = urllib.request.Request(url, headers={"User-Agent": "sing-box-flutter-native-build"})
+    request = urllib.request.Request(url, headers={"User-Agent": "sing-box-flutter-native-build", **(headers or {})})
     try:
         with urllib.request.urlopen(request, timeout=60) as response, path.open("xb") as out:
             if urllib.parse.urlparse(response.url).scheme != "https":
@@ -223,17 +247,33 @@ def artifact_hashes(path: Path) -> dict[str, str]:
     return hashes
 
 
+def legal_files(root: Path = ROOT, *, wgc_license: Path | None = None) -> dict[str, Path]:
+    files = {"LICENSE": root / "LICENSE", "THIRD_PARTY_NOTICES.md": root / "THIRD_PARTY_NOTICES.md"}
+    if wgc_license is not None:
+        if wgc_license.is_symlink() or not wgc_license.is_file():
+            raise BuildError("Pinned WGC license is missing; rebuild the native artifact")
+        files["LICENSE.wgc"] = wgc_license
+    return files
+
+
 def archive_name(pins: dict, target: str) -> str:
     return f"libbox-{pins['sing_box_version']}-{target}.tar.gz"
 
 
-def validate_metadata(metadata: dict, pins: dict, target: str) -> None:
+def validate_metadata(metadata: dict, pins: dict, target: str, *, allow_custom: bool = False) -> None:
     if (metadata.get("schema") != 1 or metadata.get("target") != target
             or metadata.get("pins") != pin_identity(pins)):
         raise BuildError("Release metadata does not match project pins/target")
     dependency = metadata.get("tailscale_dependency", {})
     if pins["tailscale_go_revision"] not in (dependency.get("toolchain_revision"), dependency.get("next_toolchain_revision")):
         raise BuildError("Release Tailscale dependency runtime contract differs from the toolchain pin")
+    wgc = metadata.get("wgc", {})
+    expected = pin_identity(pins)
+    if (wgc.get("source_sha256") != expected["wgc_source_sha256"]
+            or wgc.get("overlay_sha256") != expected["wgc_overlay_sha256"]):
+        raise BuildError("Release WGC source/registration overlay differs from this package")
+    if not allow_custom and wgc.get("extensions") != []:
+        raise BuildError("Custom WGC extensions require a local build, not the official release installer")
     tags = metadata.get("tags", [])
     if not set(REQUIRED_TAGS).issubset(tags):
         raise BuildError("Release metadata is missing required mobile features")

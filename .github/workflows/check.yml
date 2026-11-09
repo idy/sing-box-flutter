@@ -30,6 +30,18 @@ jobs:
         run: flutter test
       - name: Check publication archive
         run: flutter pub publish --dry-run
+  wgc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: native/wgc/go.sum
+      - name: WGC endpoint and transport regression tests
+        run: go -C native/wgc test -tags with_gvisor -race -timeout=2m ./...
+      - name: WGC static checks
+        run: go -C native/wgc vet -tags with_gvisor ./...
   build-tools:
     runs-on: ubuntu-latest
     steps:

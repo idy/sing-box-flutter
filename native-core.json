@@ -3,8 +3,9 @@
   "sing_box_revision": "c005f35300ce76427dc285481ec5695f5b179cd2",
   "tailscale_go_revision": "63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
   "gomobile_version": "v0.1.12",
+  "wgc_version": "v0.2.1-0.20261107180014-c3ca5bb852e4",
   "license": "GPL-3.0-or-later",
-  "features": ["tailscale", "wireguard", "quic", "utls", "clash_api"],
+  "features": ["tailscale", "wireguard", "wgc", "quic", "utls", "clash_api"],
   "android_min_sdk": 24,
   "ios_min_version": "15.0"
 }

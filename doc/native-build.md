@@ -13,10 +13,10 @@ scripts found inside a downloaded archive.
 After a maintainer publishes a release containing the assets described below:
 
 ```sh
-dart run sing_box_flutter install --target android --release v0.1.0
-dart run sing_box_flutter install --target apple --release v0.1.0
+dart run sing_box_flutter install --target android --release v0.2.0
+dart run sing_box_flutter install --target apple --release v0.2.0
 # Equivalent direct invocation, using your Python 3.11+ executable:
-python3 tool/install_libbox.py --target all --release v0.1.0
+python3 tool/install_libbox.py --target all --release v0.2.0
 ```
 
 `--dry-run` prints URLs and destinations without writing files or downloading.
@@ -49,7 +49,7 @@ For an independent trust anchor, obtain the manifest digest from the maintainer'
 release announcement or verified CI summary and pass it explicitly:
 
 ```sh
-python3 tool/install_libbox.py --target apple --release v0.1.0 \
+python3 tool/install_libbox.py --target apple --release v0.2.0 \
   --manifest-sha256 <64-character-SHA256-of-SHA256SUMS>
 ```
 
@@ -91,6 +91,29 @@ pin, and required upstream build tags. Go modules use `go.sum`/`sum.golang.org`;
 `go mod verify` checks cached module contents. Pinned `gomobile` and `gobind` are
 rebuilt using the verified fork and inspected with `go version -m` before use.
 Both tools and the core use project-local Go caches.
+
+The `native/wgc` module is only a sing-box endpoint adapter; it directly depends on
+`github.com/idy/wgc` for WireGuard sessions and encryption. `tool/wgc_overlay.py`
+registers that adapter in the pinned libbox build and restores the upstream inputs
+afterward. The adapter source and registration hashes are recorded in native
+metadata so the installer cannot mix an unmodified libbox with a WGC-enabled
+package. The bundled adapter accepts only the canonical files listed in
+`tool/source_inputs.py`; extra inputs such as ignored `debug.log` files fail,
+keeping checkout and pub-package identities identical. Extension fingerprints
+include source files, assembly and embedded data, excluding VCS metadata and
+reserved `.build`/`.wgc-inputs` generated state. The adapter and local extensions
+compile from verified private snapshots under stable relative replacement paths.
+Remote extensions require module and `go.mod` checksum pins in the manifest;
+these are enforced in the main module even when private scopes disable sumdb.
+After resolving extensions, the build checks
+the selected Tailscale dependency's toolchain contract again and records its actual
+version/checksums. Custom transport registrations can be compiled with `--wgc-config`; see
+[WGC configuration](wgc.md). Exported `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, and
+`GOPROXY` settings are retained under the pinned compiler. Before dependency
+resolution, both checked-in WGC module checksums are copied into the main module's
+`go.sum` and conflicting entries are rejected, including when `GONOSUMDB` covers WGC.
+Required WGC license text is collected from the pinned dependency for the native
+release archive.
 
 The official entry point remains `go run ./cmd/internal/build_libbox -target
 android` or `-target apple -platform ios,iossimulator`. The tool applies the small,
@@ -161,7 +184,7 @@ and rerun. Do not replace it with a stock Go installation.
 ```sh
 python3 -B -m unittest discover -s tests -v
 python3 tool/build_libbox.py --target all --dry-run
-python3 tool/install_libbox.py --target all --release v0.1.0 --dry-run
+python3 tool/install_libbox.py --target all --release v0.2.0 --dry-run
 ```
 
 `.github/workflows/native-core.yml` validates the tooling for relevant PRs.
@@ -169,6 +192,10 @@ python3 tool/install_libbox.py --target all --release v0.1.0 --dry-run
 Tailscale Go, then compiles the real Flutter example/plugin against that artifact
 (Android debug APK or iOS simulator including the PacketTunnel target). Android's
 SDK is installed under the job's `.build/android-sdk`; the runner's JDK 17 is used.
+The Android job also executes `TestAndroidUDPProtectionSmoke` on an API 35 x86_64
+emulator using the same pinned fork. Controlled protection callbacks exercise
+real Android UDP sockets, failure handling and reopening; this is not a VPN
+forwarding or physical-device test.
 The workflow requests read-only repository permissions and publishes no release.
 It uploads build logs, provenance, generated Android sources, and release inputs,
 including on failure. With target `all`, a final successful job combines the two

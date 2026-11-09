@@ -30,7 +30,7 @@ Add the dependency to a Flutter application:
 
 ```yaml
 dependencies:
-  sing_box_flutter: ^0.1.0
+  sing_box_flutter: ^0.2.0
 ```
 
 ```bash
@@ -41,11 +41,11 @@ Native binaries are distributed separately from the pub.dev package. Python 3.11
 is required to install them. Run the matching command from your Flutter app:
 
 ```bash
-dart run sing_box_flutter install --target android --release v0.1.0
+dart run sing_box_flutter install --target android --release v0.2.0
 ```
 
 ```bash
-dart run sing_box_flutter install --target apple --release v0.1.0
+dart run sing_box_flutter install --target apple --release v0.2.0
 ```
 
 The installer verifies the release checksums and pinned build metadata before
@@ -112,6 +112,15 @@ and do not write it to application logs.
 Multiple plugin objects refer to the same native VPN service. Only one connection
 is managed by this plugin at a time. A new event-channel subscription receives the
 current native status. Use `getStatus()` to refresh a UI after it resumes.
+
+## WGC support
+
+The matching native build includes a `wgc` endpoint backed directly by
+[`idy/wgc`](https://github.com/idy/wgc). Pass ordinary sing-box JSON through the
+existing `checkConfig` / `start` methods; the Flutter API and Android/iOS VPN
+host remain unchanged. See [WGC endpoint configuration](doc/wgc.md) for keys,
+routing, and compiled application transport hooks. This does not copy the WGC
+protocol implementation into this repository.
 
 ## Tailscale support
 

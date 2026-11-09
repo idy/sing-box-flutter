@@ -1,14 +1,16 @@
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:path/path.dart' as p;
+
 /// Installs or builds the pinned native core in this plugin's package directory.
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty || arguments.first == '--help') {
     stdout.writeln('''Native core setup for sing_box_flutter.
 
 Usage:
-  dart run sing_box_flutter install --target android --release v0.1.0
-  dart run sing_box_flutter install --target apple --release v0.1.0
+  dart run sing_box_flutter install --target android --release v0.2.0
+  dart run sing_box_flutter install --target apple --release v0.2.0
   dart run sing_box_flutter build --target apple
 
 install: download and verify native release artifacts.
@@ -47,10 +49,16 @@ Python 3.11+ is required. Pass --help after a subcommand for its options.''');
     exitCode = 69;
     return;
   }
+  // Resolve caller-owned manifests before the child switches to the package.
+  final forwarded = forwardPathArguments(
+    arguments.skip(1).toList(),
+    callerDirectory: Directory.current,
+    environment: Platform.environment,
+  );
   try {
     final process = await Process.start(
       python,
-      [executable.path, ...arguments.skip(1)],
+      [executable.path, ...forwarded],
       workingDirectory: root.path,
       mode: ProcessStartMode.inheritStdio,
     );
@@ -59,6 +67,66 @@ Python 3.11+ is required. Pass --help after a subcommand for its options.''');
     stderr.writeln('Could not start the native setup tool.');
     exitCode = 69;
   }
+}
+
+/// Keeps path options valid when the subprocess runs in the package directory.
+List<String> forwardPathArguments(
+  List<String> arguments, {
+  required Directory callerDirectory,
+  required Map<String, String> environment,
+  p.Context? pathContext,
+}) {
+  final paths =
+      pathContext ?? p.Context(current: callerDirectory.absolute.path);
+  final windows = paths.style == p.Style.windows;
+  final String? home;
+  if (windows) {
+    home = environment['USERPROFILE'] ??
+        (environment.containsKey('HOMEDRIVE') &&
+                environment.containsKey('HOMEPATH')
+            ? '${environment['HOMEDRIVE']}${environment['HOMEPATH']}'
+            : null);
+  } else {
+    home = environment['HOME'];
+  }
+
+  String resolve(String path) {
+    if (path == '~' ||
+        path.startsWith('~/') ||
+        (windows && path.startsWith('~\\'))) {
+      // Leave unresolved home paths for Python's expanduser fallback.
+      if (home == null || home.isEmpty) return path;
+      if (path == '~') {
+        path = home;
+      } else {
+        // Expand the prefix literally: extra separators belong beneath home.
+        final prefix =
+            home.replaceFirst(RegExp(windows ? r'[/\\]+$' : r'/+$'), '');
+        path = '$prefix${path.substring(1)}';
+      }
+    } else if (path.startsWith('~')) {
+      // Python also supports ~user on Unix; do not anchor it to the caller.
+      return path;
+    }
+    // join anchors Windows rooted paths to the caller's drive or UNC share
+    // without normalizing dot segments before the filesystem follows symlinks.
+    return paths.join(paths.current, path);
+  }
+
+  final forwarded = List<String>.of(arguments);
+  for (var index = 0; index < forwarded.length; index++) {
+    for (final option in ['--wgc-config', '--from-dir']) {
+      if (forwarded[index] == option && index + 1 < forwarded.length) {
+        forwarded[++index] = resolve(forwarded[index]);
+        break;
+      } else if (forwarded[index].startsWith('$option=')) {
+        forwarded[index] =
+            '$option=${resolve(forwarded[index].substring(option.length + 1))}';
+        break;
+      }
+    }
+  }
+  return forwarded;
 }
 
 Future<String?> _findPython() async {

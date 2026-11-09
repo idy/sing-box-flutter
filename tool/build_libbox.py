@@ -18,13 +18,15 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
 
 # Keep bytecode and all tool state out of source / the pub archive.
 sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, CORE_REPO, GOMOBILE_MODULE,
-                           REQUIRED_TAGS, ROOT, archive_name, artifact_hashes, build_directory,
-                           download, load_pins, pin_identity, project_lock,
+                           REQUIRED_TAGS, TRANSIENT_HTTP_STATUSES, UPSTREAM_REQUIRED_TAGS, ROOT, archive_name, artifact_hashes, build_directory,
+                           download, legal_files, load_pins, pin_identity, project_lock,
                            safe_extract, sha256, validate_metadata, write_json)
+from wgc_overlay import load_extensions, wgc_overlay
 
 NDK_VERSION = "28.0.13004108"  # build_shared.FindSDK prefers this exact version.
 
@@ -47,7 +49,7 @@ def host_key() -> str:
 
 
 def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> dict:
-    """Ignore user Go config, auto-downloads and cross-compiler overrides."""
+    """Pin the compiler and caches while retaining explicit module-access rules."""
     original = os.environ if inherited is None else inherited
     env = {k: v for k, v in original.items()
            if not k.startswith("GO") and not k.startswith("CGO_")
@@ -58,11 +60,17 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
         "GOCACHE": str(cache / "go-build"), "GOMODCACHE": str(cache / "go-mod"),
         "GOTMPDIR": str(cache / "tmp"), "TMPDIR": str(cache / "tmp"),
         "TEST_TELEMETRY_DIR": str(cache / "telemetry"),
-        "GOPROXY": "https://proxy.golang.org", "GOSUMDB": "sum.golang.org",
+        "GOPROXY": original.get("GOPROXY", "https://proxy.golang.org,direct"),
+        "GOSUMDB": "sum.golang.org",
         "GOFLAGS": "-mod=readonly -trimpath -buildvcs=false", "CGO_ENABLED": "1",
         "PATH": os.pathsep.join((str(goroot / "bin"), str(cache / "gopath/bin"),
                                  original.get("PATH", os.defpath))),
     })
+    # Scope private-module access without accepting compiler/workspace overrides.
+    # Leave omitted values unset so Go can derive their defaults from GOPRIVATE.
+    for name in ("GOPRIVATE", "GONOPROXY", "GONOSUMDB"):
+        if name in original:
+            env[name] = original[name]
     for name in ("gopath/bin", "go-build", "go-mod", "tmp", "telemetry"):
         (cache / name).mkdir(parents=True, exist_ok=True)
     # The Go command's documented test hook also controls compiler counters.
@@ -77,15 +85,29 @@ def bootstrap_go(pins: dict, bootstrap: Path, cache: Path) -> tuple[Path, dict, 
     digest = lock["sha256"][key]
     url = (f"https://github.com/tailscale/go/releases/download/"
            f"build-{pins['tailscale_go_revision']}/{key}.tar.gz")
+    asset_url = f"https://api.github.com/repos/tailscale/go/releases/assets/{lock['asset_ids'][key]}"
     cached_archive = cache / "archives" / f"tailscale-go-{pins['tailscale_go_revision']}-{key}.tar.gz"
+    cached_source = cached_archive.with_suffix(".json")
     cached_archive.parent.mkdir(parents=True, exist_ok=True)
     if cached_archive.exists():
         if sha256(cached_archive) != digest:
             raise BuildError("Cached Tailscale Go archive failed SHA-256 verification; remove it and retry")
-        provenance = {"url": url, "sha256": digest, "size": cached_archive.stat().st_size}
+        # Older caches have no source receipt; do not invent a browser-download origin.
+        source_url = json.loads(cached_source.read_text()).get("url") if cached_source.exists() else None
+        provenance = {"url": source_url if source_url in (url, asset_url) else None,
+                      "sha256": digest, "size": cached_archive.stat().st_size, "cached": True}
     else:
-        response, provenance = download(url, bootstrap / "downloads", digest)
+        try:
+            response, provenance = download(url, bootstrap / "downloads", digest)
+        except urllib.error.HTTPError as error:
+            if error.code not in TRANSIENT_HTTP_STATUSES:
+                raise
+            print(f"Browser download exhausted HTTP {error.code}; trying official GitHub asset API", flush=True)
+            response, provenance = download(asset_url, bootstrap / "downloads", digest,
+                                            headers={"Accept": "application/octet-stream"})
         shutil.copyfile(response, cached_archive)
+        # Only the stable official request URL is retained, never a signed redirect.
+        write_json(cached_source, provenance)
     # Re-extract a verified archive on EVERY invocation. An edited cached executable
     # or forged local stamp can never be selected before verification.
     staging = Path(tempfile.mkdtemp(prefix="toolchain-", dir=bootstrap))
@@ -173,7 +195,7 @@ def source_checkout(pins: dict, bootstrap: Path) -> Path:
     builder = (source / "cmd/internal/build_libbox/main.go").read_text()
     # Inspect active code, not obsolete commented-out flags.
     active = "\n".join(line.split("//", 1)[0] for line in builder.splitlines())
-    for tag in REQUIRED_TAGS:
+    for tag in UPSTREAM_REQUIRED_TAGS:
         if f'"{tag}"' not in active:
             raise BuildError(f"Upstream build_libbox no longer enables required tag {tag}")
     if '"-tags-not-macos=with_low_memory"' not in active:
@@ -292,6 +314,18 @@ def verify_dependency_toolchain(revision: str, current: str, next_revision: str)
                          + ", ".join(sorted(expected)) + ". Resolve the pin conflict explicitly; mismatch overrides are not used")
 
 
+def resolved_tailscale_dependency(go: Path, env: dict, source: Path, pins: dict) -> dict:
+    tailscale = json.loads(network_run([go, "mod", "download", "-json", "github.com/sagernet/tailscale"],
+                                       cwd=source, env=env, capture=True))
+    dependency_dir = Path(tailscale["Dir"])
+    current = (dependency_dir / "go.toolchain.rev").read_text().strip()
+    next_revision = (dependency_dir / "go.toolchain.next.rev").read_text().strip()
+    verify_dependency_toolchain(pins["tailscale_go_revision"], current, next_revision)
+    return {"module": tailscale["Path"], "version": tailscale["Version"],
+            "sum": tailscale["Sum"], "go_mod_sum": tailscale["GoModSum"],
+            "toolchain_revision": current, "next_toolchain_revision": next_revision}
+
+
 def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict, dict]:
     # Stay in the verified core module. An @version go install outside the module
     # queries unrelated latest versions for deprecation notices; this uses go.mod.
@@ -303,15 +337,7 @@ def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict,
     # before compiling any tool from it, then check the dependency runtime contract.
     network_run([go, "mod", "download"], cwd=source, env=env)
     run([go, "mod", "verify"], cwd=source, env=env)
-    tailscale = json.loads(network_run([go, "mod", "download", "-json", "github.com/sagernet/tailscale"],
-                                       cwd=source, env=env, capture=True))
-    dependency_dir = Path(tailscale["Dir"])
-    current = (dependency_dir / "go.toolchain.rev").read_text().strip()
-    next_revision = (dependency_dir / "go.toolchain.next.rev").read_text().strip()
-    verify_dependency_toolchain(pins["tailscale_go_revision"], current, next_revision)
-    dependency = {"module": tailscale["Path"], "version": tailscale["Version"],
-                  "sum": tailscale["Sum"], "go_mod_sum": tailscale["GoModSum"],
-                  "toolchain_revision": current, "next_toolchain_revision": next_revision}
+    dependency = resolved_tailscale_dependency(go, env, source, pins)
     # Rebuild rather than executing stale or altered cached mobile tools.
     network_run([go, "install", "-trimpath", f"{GOMOBILE_MODULE}/cmd/gomobile",
                  f"{GOMOBILE_MODULE}/cmd/gobind"], cwd=source, env=env)
@@ -327,12 +353,26 @@ def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict,
              "sum": modules["Sum"], "go_mod_sum": modules["GoModSum"], "binaries": binaries}, dependency)
 
 
+def retain_wgc_license(go: Path, env: dict, source: Path, cache: Path, pins: dict) -> Path:
+    module = json.loads(run([go, "list", "-m", "-json", "github.com/idy/wgc"],
+                            cwd=source, env=env, capture=True))
+    if module.get("Version") != pins["wgc_version"]:
+        raise BuildError("Resolved WGC module does not match native-core.json")
+    license_path = Path(module["Dir"]) / "LICENSE"
+    if license_path.is_symlink() or not license_path.is_file():
+        raise BuildError("Pinned WGC module has no regular LICENSE file")
+    destination = cache / "results/LICENSE.wgc"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(license_path, destination)
+    return destination
+
+
 def package_target(target: str, pins: dict, cache: Path) -> Path:
     metadata_path = cache / "results" / f"{target}.json"
     if not metadata_path.is_file():
         raise BuildError(f"No verified {target} build metadata; run a build first")
     metadata = json.loads(metadata_path.read_text())
-    validate_metadata(metadata, pins, target)
+    validate_metadata(metadata, pins, target, allow_custom=True)
     artifact = ROOT / ARTIFACTS[target]
     if metadata["artifact_sha256"] != artifact_hashes(artifact):
         raise BuildError("Artifact differs from the recorded build; rebuild before packaging")
@@ -355,6 +395,11 @@ def package_target(target: str, pins: dict, cache: Path) -> Path:
                 archive.add(path, arcname=path.relative_to(ROOT).as_posix(), recursive=False, filter=normalize)
             archive.add(metadata_path, arcname="native-build.json", filter=normalize)
             archive.add(license_path, arcname="LICENSE.sing-box", filter=normalize)
+            legal = legal_files(wgc_license=cache / "results/LICENSE.wgc")
+            if {name: sha256(path) for name, path in legal.items()} != metadata.get("legal_sha256"):
+                raise BuildError("Legal notices changed since the native build")
+            for name, path in sorted(legal.items()):
+                archive.add(path, arcname="Legal/" + name, recursive=False, filter=normalize)
     return destination
 
 
@@ -366,6 +411,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--cache-dir", default=str(ROOT / ".build/cache"))
     result.add_argument("--bootstrap-only", action="store_true", help="Verify/download fork and core; install pinned mobile tools")
     result.add_argument("--package-only", action="store_true", help="Package existing verified artifacts for a future release")
+    result.add_argument("--wgc-config", type=Path, help="JSON manifest of compiled WGC transport extensions")
     return result
 
 
@@ -373,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         pins = load_pins()
+        extensions = load_extensions(args.wgc_config)
         bootstrap = build_directory(args.bootstrap_dir)
         cache = build_directory(args.cache_dir)
         if bootstrap == cache or bootstrap.is_relative_to(cache) or cache.is_relative_to(bootstrap):
@@ -416,7 +463,9 @@ def main(argv: list[str] | None = None) -> int:
                     output = source / ("libbox.aar" if target == "android" else "Libbox.xcframework")
                     if output.exists():
                         shutil.rmtree(output) if output.is_dir() else output.unlink()
-                    with mobile_profile(source) as profile_provenance:
+                    with mobile_profile(source) as profile_provenance, wgc_overlay(source, go, env, run, extensions) as wgc_provenance:
+                        wgc_license = retain_wgc_license(go, env, source, cache, pins)
+                        tailscale_dependency = resolved_tailscale_dependency(go, env, source, pins)
                         effective_tags = upstream_tags(source, target)
                         run(args_go, cwd=source, env=env)
                     if not output.exists():
@@ -441,6 +490,8 @@ def main(argv: list[str] | None = None) -> int:
                                            "linker_version": pins["sing_box_version"], "linker_version_source": "verified exact git describe tag"},
                                 "toolchain": toolchain, "gomobile": mobile, "tailscale_dependency": tailscale_dependency, "sdks": sdk_versions,
                                 "tags": effective_tags, "mobile_profile": profile_provenance,
+                                "wgc": wgc_provenance,
+                                "legal_sha256": {name: sha256(path) for name, path in legal_files(wgc_license=wgc_license).items()},
                                 "platform": "ios,iossimulator" if target == "apple" else "android",
                                 "artifact_sha256": artifact_hashes(destination), "license_sha256": sha256(notices)}
                     write_json(cache / "results" / f"{target}.json", metadata)

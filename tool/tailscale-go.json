@@ -3,6 +3,12 @@
   "version": "go1.26.5",
   "release": "https://github.com/tailscale/go/releases/tag/build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
   "checksum_source": "https://api.github.com/repos/tailscale/go/releases/tags/build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb",
+  "asset_ids": {
+    "darwin-amd64": 470759042,
+    "darwin-arm64": 470759043,
+    "linux-amd64": 470759104,
+    "linux-arm64": 470759044
+  },
   "sha256": {
     "darwin-amd64": "c0372692986cfe983e1b772848c0d3ef6864054c20f4b90d9fe114f6b5eb68b3",
     "darwin-arm64": "dca8c2dcbc61c355536ef9fd953da0efd67f9066949289e77a3aa2b96da35287",
