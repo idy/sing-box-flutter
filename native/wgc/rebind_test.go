@@ -96,6 +96,92 @@ func TestCloseCancelsPendingInterfaceRebind(t *testing.T) {
 	}
 }
 
+func TestCloseDuringSessionRecovery(t *testing.T) {
+	for _, pendingFactory := range []bool{false, true} {
+		name := "backoff"
+		if pendingFactory {
+			name = "transport-startup"
+		}
+		t.Run(name, func(t *testing.T) {
+			var calls atomic.Int32
+			var original, failed *closingTransport
+			attempts := make(chan time.Time, 4)
+			stopped := make(chan struct{})
+			transportName := "session-recovery-" + name
+			registerTestTransport(t, transportName, func(ctx context.Context, _ netip.AddrPort, _ json.RawMessage) (wireguard.Transport, error) {
+				call := calls.Add(1)
+				attempts <- time.Now()
+				switch call {
+				case 1:
+					original = &closingTransport{done: make(chan struct{})}
+					return original, nil
+				case 2:
+					failed = &closingTransport{done: make(chan struct{})}
+					return failed, errors.New("injected reopen failure")
+				default:
+					<-ctx.Done()
+					close(stopped)
+					return nil, ctx.Err()
+				}
+			})
+			o := testOptions(t)
+			o.Transport = transportName
+			created, err := NewEndpoint(context.Background(), nil, nil, "", o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ep := created.(*Endpoint)
+			scope := adapter.NewScope(context.Background(), nil)
+			startTestEndpoint(t, ep, scope)
+			oldCtx := ep.runCtx
+			// An unexpected device close models a fatal Read on the live stack.
+			_ = ep.device.Close()
+			select {
+			case <-oldCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("failed stack did not schedule recovery")
+			}
+			if pendingFactory {
+				var last time.Time
+				for range 3 {
+					select {
+					case attempt := <-attempts:
+						if !last.IsZero() && attempt.Sub(last) < 900*time.Millisecond {
+							t.Fatal("recovery attempts were not rate limited")
+						}
+						last = attempt
+					case <-time.After(5 * time.Second):
+						t.Fatal("recovery stopped retrying after a transport startup failure")
+					}
+				}
+			}
+			closeTestEndpoint(t, ep)
+			select {
+			case <-original.done:
+			default:
+				t.Fatal("failed session leaked its original transport")
+			}
+			if pendingFactory {
+				select {
+				case <-stopped:
+				default:
+					t.Fatal("Close did not cancel and join pending recovery startup")
+				}
+				select {
+				case <-failed.done:
+				default:
+					t.Fatal("failed recovery startup leaked its partial transport")
+				}
+				if calls.Load() != 3 {
+					t.Fatal("Close started another recovery attempt")
+				}
+			} else if calls.Load() != 1 {
+				t.Fatal("Close did not cancel the recovery backoff")
+			}
+		})
+	}
+}
+
 type protectionManager struct {
 	adapter.NetworkManager
 	protect control.Func

@@ -46,7 +46,9 @@ Application traffic to the peer's public IP still follows the normal VPN rules.
 
 `pre_shared_key` is optional. TCP and UDP use the existing sing-box stack and
 resolver. UDP is the default outer transport. Interface updates reopen the outer
-transport while preserving the WGC connection and userspace stack. The host's existing
+transport while preserving the WGC connection and userspace stack. Fatal packet-loop
+failures instead rebuild that connection and stack with cancellable one-second
+retries, resetting in-flight flows; stopping the endpoint ends recovery. The host's existing
 Android/iOS VPN setup, storage, lifecycle, consent, and status API are unchanged. Install the
 matching WGC-enabled native artifacts; an unmodified upstream libbox does not
 register this endpoint.
@@ -78,7 +80,9 @@ as `sum` and `go_mod_sum` in the manifest. The build enforces these values even
 when `GOPRIVATE` or `GONOSUMDB` disables the public checksum database. Commit the
 module's complete `go.sum` as well: its authenticated dependency checksums are
 promoted into the main build. Any resolved checksum missing from the trusted
-upstream, adapter or extension locks is rejected before compilation.
+upstream, adapter or extension locks is rejected before compilation, including
+builds with no custom extensions. Extension module paths must not collide with
+the existing core dependency graph, so a local replacement cannot override it.
 
 ```bash
 dart run sing_box_flutter build --target apple --wgc-config wgc.core.json

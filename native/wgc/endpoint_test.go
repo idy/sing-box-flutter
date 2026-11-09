@@ -22,6 +22,7 @@ import (
 
 	wireguard "github.com/idy/wgc"
 	"github.com/sagernet/sing-box/adapter"
+	wgstack "github.com/sagernet/sing-box/transport/wireguard"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/wireguard-go/conn"
 	"github.com/sagernet/wireguard-go/device"
@@ -131,6 +132,234 @@ func TestCanceledStartupAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = ep.Close()
+}
+
+// A faulting reader retains the real sing-box device for startup, dialing and
+// cleanup. The oversized packet forces a real WGC WriteTo admission failure.
+type faultDevice struct {
+	wgstack.Device
+	fault      <-chan struct{}
+	writeFault bool
+	reads      int
+	done       chan struct{}
+	draining   chan struct{}
+	blocked    chan struct{}
+	released   chan struct{}
+	once       sync.Once
+}
+
+func (d *faultDevice) Read(buffers [][]byte, sizes []int, offset int) (int, error) {
+	d.reads++
+	if d.reads == 1 {
+		select {
+		case <-d.done:
+			return 0, net.ErrClosed
+		case <-d.fault:
+		}
+		if !d.writeFault {
+			return 0, errors.New("injected stack read failure")
+		}
+		sizes[0] = len(buffers[0]) - offset
+		return 1, nil
+	}
+	close(d.draining)
+	<-d.done
+	return 0, net.ErrClosed
+}
+
+func (d *faultDevice) Write([][]byte, int) (int, error) {
+	close(d.blocked)
+	if d.writeFault {
+		// A full outbound queue needs the sender to drain the response.
+		select {
+		case <-d.draining:
+		case <-d.done:
+		}
+	} else {
+		// A broken reader must close the stack to release this injection.
+		<-d.done
+	}
+	close(d.released)
+	return 0, net.ErrClosed
+}
+
+func (d *faultDevice) Close() error {
+	d.once.Do(func() { close(d.done); _ = d.Device.Close() })
+	return nil
+}
+
+func startTestEndpoint(t *testing.T, ep *Endpoint, scope *adapter.Scope) {
+	t.Helper()
+	t.Cleanup(func() { closeTestEndpoint(t, ep); _ = scope.Close() })
+	for _, stage := range []adapter.StartStage{adapter.StartStateInitialize, adapter.StartStateStart} {
+		if err := ep.Start(stage, scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func closeTestEndpoint(t *testing.T, ep *Endpoint) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { _ = ep.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("endpoint cleanup did not join its workers")
+	}
+}
+
+func TestPacketLoopFailureRecoversEndpoint(t *testing.T) {
+	for _, writeFault := range []bool{false, true} {
+		name := "read"
+		if writeFault {
+			name = "write"
+		}
+		t.Run(name, func(t *testing.T) {
+			server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			o := testOptions(t)
+			o.PeerEndpoint = server.LocalAddr().(*net.UDPAddr).AddrPort()
+			created, err := NewEndpoint(context.Background(), nil, nil, "", o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ep := created.(*Endpoint)
+			if writeFault {
+				// Bypass validation only to inject a fatal upstream queue error.
+				ep.options.MTU = wireguard.MaximumDataSize + 1
+			}
+			fault := make(chan struct{})
+			var initial *faultDevice
+			var deviceCalls atomic.Int32
+			ep.newDevice = func(options wgstack.DeviceOptions) (wgstack.Device, error) {
+				base, err := wgstack.NewDevice(options)
+				if err == nil && deviceCalls.Add(1) == 1 {
+					initial = &faultDevice{Device: base, fault: fault, writeFault: writeFault, done: make(chan struct{}), draining: make(chan struct{}), blocked: make(chan struct{}), released: make(chan struct{})}
+					return initial, nil
+				}
+				return base, err
+			}
+			scope := adapter.NewScope(context.Background(), nil)
+			startTestEndpoint(t, ep, scope)
+			oldCtx, oldConn, oldBinding := ep.runCtx, ep.conn, ep.binding
+			// Model the receiver already injecting a packet whose stack response
+			// cannot progress until the sender drains or closes the broken stack.
+			ep.receivers.Add(1)
+			go func() {
+				defer ep.receivers.Done()
+				_, _ = initial.Write([][]byte{{1}}, 0)
+			}()
+			<-initial.blocked
+			close(fault)
+			select {
+			case <-oldCtx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("fatal packet error did not stop its session")
+			}
+			if _, err := ep.current(); !errors.Is(err, net.ErrClosed) {
+				t.Fatal("failed session continued accepting traffic")
+			}
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			tick := time.NewTicker(10 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				ep.mu.Lock()
+				recovered := !ep.closed && ep.runCtx != oldCtx && ep.runCtx.Err() == nil && ep.dialer != nil
+				ep.mu.Unlock()
+				if recovered {
+					break
+				}
+				select {
+				case <-tick.C:
+				case <-deadline.C:
+					t.Fatal("fatal packet error permanently disabled the endpoint")
+				}
+			}
+			select {
+			case <-initial.done:
+			default:
+				t.Fatal("recovery leaked the failed userspace stack")
+			}
+			select {
+			case <-initial.released:
+			default:
+				t.Fatal("recovery did not release the blocked receiver")
+			}
+			if active, _ := oldBinding.snapshot(); active != nil {
+				t.Fatal("recovery leaked the failed transport")
+			}
+			if writeFault {
+				select {
+				case <-initial.draining:
+				default:
+					t.Fatal("fatal write stopped draining before stack cleanup")
+				}
+			}
+			if _, _, err := oldConn.WriteTo(nil, ep.peerKey); err == nil {
+				t.Fatal("recovery left the old WGC connection open")
+			}
+			udp, err := ep.DialContext(context.Background(), "udp", M.ParseSocksaddr("10.7.0.1:53"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer udp.Close()
+			if _, err := udp.Write([]byte("after-recovery")); err != nil {
+				t.Fatal(err)
+			}
+			_ = server.SetReadDeadline(time.Now().Add(3 * time.Second))
+			if _, _, err := server.ReadFromUDP(make([]byte, 2048)); err != nil {
+				t.Fatalf("recovered packet sender did not reach its transport: %v", err)
+			}
+			closeTestEndpoint(t, ep)
+			if active, _ := ep.binding.snapshot(); active != nil {
+				t.Fatal("Close left the recovered transport open")
+			}
+			if deviceCalls.Load() != 2 {
+				t.Fatal("recovery did not create exactly one replacement stack")
+			}
+		})
+	}
+}
+
+func TestShutdownDoesNotRecoverEndpoint(t *testing.T) {
+	for _, stop := range []string{"close", "context", "scope"} {
+		t.Run(stop, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			created, err := NewEndpoint(ctx, nil, nil, "", testOptions(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ep := created.(*Endpoint)
+			var calls atomic.Int32
+			ep.newDevice = func(options wgstack.DeviceOptions) (wgstack.Device, error) {
+				calls.Add(1)
+				return wgstack.NewDevice(options)
+			}
+			scope := adapter.NewScope(context.Background(), nil)
+			startTestEndpoint(t, ep, scope)
+			switch stop {
+			case "context":
+				cancel()
+			case "scope":
+				if err := scope.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			closeTestEndpoint(t, ep)
+			if calls.Load() != 1 {
+				t.Fatal("intentional shutdown restarted the endpoint")
+			}
+			if active, _ := ep.binding.snapshot(); active != nil {
+				t.Fatal("shutdown leaked its transport")
+			}
+		})
+	}
 }
 
 type countTransport struct {

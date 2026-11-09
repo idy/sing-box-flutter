@@ -50,6 +50,7 @@ type Endpoint struct {
 	privateKey, peerKey wireguard.Key
 	psk                 *wireguard.Key
 	factory             TransportFactory
+	newDevice           func(wgstack.DeviceOptions) (wgstack.Device, error)
 	binding             *rebindTransport
 	updates             chan struct{}
 	rebinders           sync.WaitGroup
@@ -63,6 +64,7 @@ type Endpoint struct {
 	device              wgstack.Device
 	dialer              N.Dialer
 	receivers, senders  sync.WaitGroup
+	sessions            sync.WaitGroup
 	closeOnce           sync.Once
 }
 
@@ -111,7 +113,7 @@ func NewEndpoint(ctx context.Context, _ adapter.Router, _ log.ContextLogger, tag
 	}
 	options.Address = slices.Clone(options.Address)
 	options.TransportOptions = bytes.Clone(options.TransportOptions)
-	return &Endpoint{Adapter: endpoint.NewAdapter("wgc", tag, []string{N.NetworkTCP, N.NetworkUDP}, nil), ctx: ctx, options: options, privateKey: private, peerKey: peer, psk: psk, factory: factory}, nil
+	return &Endpoint{Adapter: endpoint.NewAdapter("wgc", tag, []string{N.NetworkTCP, N.NetworkUDP}, nil), ctx: ctx, options: options, privateKey: private, peerKey: peer, psk: psk, factory: factory, newDevice: wgstack.NewDevice}, nil
 }
 
 func parseKey(value string) (wireguard.Key, error) {
@@ -146,17 +148,35 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) (err er
 	}
 	e.startDone = make(chan struct{})
 	e.updates = make(chan struct{}, 1)
-	runCtx, cancel := context.WithCancel(e.ctx)
-	e.cancel, e.runCtx = cancel, runCtx
+	ctx, cancel := context.WithCancel(e.ctx)
+	e.cancel = cancel
 	e.stopScope = context.AfterFunc(scope.Context(), cancel)
 	e.mu.Unlock()
 	defer func() { e.mu.Lock(); e.startErr = err; close(e.startDone); e.mu.Unlock() }()
+	runCtx, err := e.startSession(ctx)
+	if err != nil {
+		cancel()
+		return err
+	}
+	e.sessions.Add(1)
+	go e.serve(ctx, runCtx)
+	go func() { <-ctx.Done(); _ = e.Close() }()
+	return nil
+}
+
+// Each packet-loop failure ends only this session. The endpoint lifetime is
+// owned by the service context, its Scope, and Close.
+func (e *Endpoint) startSession(ctx context.Context) (context.Context, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
 	timer := time.AfterFunc(C.StartTimeout, cancel)
 	defer timer.Stop()
 	slot, err := e.openTransport(runCtx)
 	if err != nil {
 		cancel()
-		return err
+		return nil, err
 	}
 	transport := &rebindTransport{active: slot, changed: make(chan struct{}), request: func() { e.InterfaceUpdated(runCtx) }}
 	conn, err := wireguard.NewConn(transport, wireguard.Config{
@@ -172,9 +192,9 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) (err er
 	if err != nil {
 		cancel()
 		_ = transport.Close()
-		return errors.New("WGC connection startup failed")
+		return nil, errors.New("WGC connection startup failed")
 	}
-	device, err := wgstack.NewDevice(wgstack.DeviceOptions{Context: runCtx, Address: e.options.Address, MTU: e.options.MTU})
+	device, err := e.newDevice(wgstack.DeviceOptions{Context: runCtx, Address: e.options.Address, MTU: e.options.MTU})
 	if err == nil {
 		err = device.Start()
 	}
@@ -184,7 +204,7 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) (err er
 		if device != nil {
 			_ = device.Close()
 		}
-		return errors.New("WGC userspace stack startup failed")
+		return nil, errors.New("WGC userspace stack startup failed")
 	}
 	e.mu.Lock()
 	if e.closed || runCtx.Err() != nil {
@@ -192,25 +212,61 @@ func (e *Endpoint) Start(stage adapter.StartStage, scope *adapter.Scope) (err er
 		cancel()
 		_ = conn.Close()
 		_ = device.Close()
-		return net.ErrClosed
+		return nil, net.ErrClosed
 	}
+	e.runCtx = runCtx
 	e.conn, e.device, e.binding = conn, device, transport
 	// Use sing-box's resolver, including its normal DNS routing and candidate handling.
 	e.dialer = dialer.NewResolveDialer(runCtx, device, false, "", adapter.DNSQueryOptions{}, 0)
 	e.receivers.Add(1)
 	e.senders.Add(1)
 	e.rebinders.Add(1)
-	go e.receive(runCtx, conn, device)
-	go e.send(runCtx, conn, device)
+	go e.receive(runCtx, conn, device, cancel)
+	go e.send(runCtx, conn, device, cancel)
 	go e.watchInterfaces(runCtx, transport, conn)
 	e.mu.Unlock()
-	go func() { <-runCtx.Done(); _ = e.Close() }()
-	return nil
+	return runCtx, nil
 }
 
-func (e *Endpoint) receive(ctx context.Context, conn *wireguard.Conn, device wgstack.Device) {
+func (e *Endpoint) serve(ctx, runCtx context.Context) {
+	defer e.sessions.Done()
+	for {
+		<-runCtx.Done()
+		e.closeSession()
+		for {
+			// Bound recovery attempts, including repeated failures to create a stack
+			// or reopen its protected transport while the network is unavailable.
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			var err error
+			runCtx, err = e.startSession(ctx)
+			if err == nil {
+				break
+			}
+		}
+	}
+}
+
+func (e *Endpoint) closeSession() {
+	e.mu.Lock()
+	conn, device := e.conn, e.device
+	e.dialer = nil
+	e.mu.Unlock()
+	_ = conn.Close()
+	e.receivers.Wait()
+	_ = device.Close()
+	e.senders.Wait()
+	e.rebinders.Wait()
+}
+
+func (e *Endpoint) receive(ctx context.Context, conn *wireguard.Conn, device wgstack.Device, cancel context.CancelFunc) {
 	defer e.receivers.Done()
-	defer e.cancel()
+	defer cancel()
 	for packet := range conn.ReadQueue() {
 		if ctx.Err() == nil && len(packet.Data) != 0 {
 			// The existing sing-box device copies the IP payload before Release.
@@ -220,20 +276,26 @@ func (e *Endpoint) receive(ctx context.Context, conn *wireguard.Conn, device wgs
 	}
 }
 
-func (e *Endpoint) send(ctx context.Context, conn *wireguard.Conn, device wgstack.Device) {
+func (e *Endpoint) send(ctx context.Context, conn *wireguard.Conn, device wgstack.Device, cancel context.CancelFunc) {
 	defer e.senders.Done()
-	defer e.cancel()
+	defer cancel()
 	buffers, sizes := [][]byte{make([]byte, e.options.MTU)}, []int{0}
 	for {
 		count, err := device.Read(buffers, sizes, 0)
 		if err != nil {
+			if ctx.Err() == nil {
+				cancel()
+				// A broken reader cannot drain the stack. Closing it releases any
+				// receiver blocked injecting a packet before recovery joins it.
+				_ = device.Close()
+			}
 			return
 		}
 		// Continue draining during shutdown until the receiver releases its stack writes.
 		if count > 0 && ctx.Err() == nil {
 			_, _, err = conn.WriteTo(buffers[0][:sizes[0]], e.peerKey)
 			if err != nil && !errors.Is(err, wireguard.ErrPeerNotFound) && !errors.Is(err, wireguard.ErrPeerBlocked) {
-				return
+				cancel()
 			}
 		}
 	}
@@ -279,16 +341,7 @@ func (e *Endpoint) Close() error {
 		if done != nil {
 			<-done
 		}
-		e.mu.Lock()
-		conn, device := e.conn, e.device
-		e.mu.Unlock()
-		if conn != nil {
-			_ = conn.Close()
-			e.receivers.Wait()
-			_ = device.Close()
-			e.senders.Wait()
-		}
-		e.rebinders.Wait()
+		e.sessions.Wait()
 	})
 	return nil
 }

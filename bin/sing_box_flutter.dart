@@ -48,17 +48,11 @@ Python 3.11+ is required. Pass --help after a subcommand for its options.''');
     return;
   }
   // Resolve caller-owned manifests before the child switches to the package.
-  final forwarded = arguments.skip(1).toList();
-  for (var index = 0; index < forwarded.length; index++) {
-    for (final option in ['--wgc-config', '--from-dir']) {
-      if (forwarded[index] == option && index + 1 < forwarded.length) {
-        forwarded[index + 1] = File(forwarded[index + 1]).absolute.path;
-      } else if (forwarded[index].startsWith('$option=')) {
-        final path = forwarded[index].substring(option.length + 1);
-        forwarded[index] = '$option=${File(path).absolute.path}';
-      }
-    }
-  }
+  final forwarded = forwardPathArguments(
+    arguments.skip(1).toList(),
+    callerDirectory: Directory.current,
+    environment: Platform.environment,
+  );
   try {
     final process = await Process.start(
       python,
@@ -71,6 +65,59 @@ Python 3.11+ is required. Pass --help after a subcommand for its options.''');
     stderr.writeln('Could not start the native setup tool.');
     exitCode = 69;
   }
+}
+
+/// Keeps path options valid when the subprocess runs in the package directory.
+List<String> forwardPathArguments(
+  List<String> arguments, {
+  required Directory callerDirectory,
+  required Map<String, String> environment,
+}) {
+  final String? home;
+  if (Platform.isWindows) {
+    home = environment['USERPROFILE'] ??
+        (environment.containsKey('HOMEDRIVE') &&
+                environment.containsKey('HOMEPATH')
+            ? '${environment['HOMEDRIVE']}${environment['HOMEPATH']}'
+            : null);
+  } else {
+    home = environment['HOME'];
+  }
+
+  String resolve(String path) {
+    if (path == '~' ||
+        path.startsWith('~/') ||
+        (Platform.isWindows && path.startsWith('~\\'))) {
+      // Leave unresolved home paths for Python's expanduser fallback.
+      if (home == null || home.isEmpty) return path;
+      path = path == '~'
+          ? home
+          : File.fromUri(
+              Directory(home).uri.resolveUri(Uri.file(path.substring(2))),
+            ).path;
+    } else if (path.startsWith('~')) {
+      // Python also supports ~user on Unix; do not anchor it to the caller.
+      return path;
+    }
+    return File.fromUri(
+      callerDirectory.uri.resolveUri(Uri.file(path)),
+    ).path;
+  }
+
+  final forwarded = List<String>.of(arguments);
+  for (var index = 0; index < forwarded.length; index++) {
+    for (final option in ['--wgc-config', '--from-dir']) {
+      if (forwarded[index] == option && index + 1 < forwarded.length) {
+        forwarded[++index] = resolve(forwarded[index]);
+        break;
+      } else if (forwarded[index].startsWith('$option=')) {
+        forwarded[index] =
+            '$option=${resolve(forwarded[index].substring(option.length + 1))}';
+        break;
+      }
+    }
+  }
+  return forwarded;
 }
 
 Future<String?> _findPython() async {

@@ -17,6 +17,11 @@ EXTENSION_LOCK = {"sum": "h1:" + "A" * 43 + "=", "go_mod_sum": "h1:" + "B" * 42 
 
 
 class OverlayTests(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch("wgc_overlay.core_dependency_modules", return_value=set())
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def fixture(self, root):
         source = root / "upstream"
         registry = source / "include/registry.go"
@@ -397,7 +402,7 @@ class OverlayTests(unittest.TestCase):
                         with wgc_overlay(source, Path("go"), {"GONOSUMDB": "example.com/*"}, runner, [entry], root):
                             pass
                     else:
-                        with self.assertRaisesRegex(BuildError, "Unpinned extension dependency"):
+                        with self.assertRaisesRegex(BuildError, "Unpinned build dependency"):
                             with wgc_overlay(source, Path("go"), {"GONOSUMDB": "example.com/*"}, runner, [entry], root):
                                 self.fail("Unpinned private dependency reached compilation")
                 self.assertEqual((source / "go.sum").read_bytes(), original)
@@ -436,6 +441,45 @@ class OverlayTests(unittest.TestCase):
                 with self.assertRaisesRegex(BuildError, "source differs"):
                     with wgc_overlay(source, Path("go"), {}, runner, [entry], root):
                         self.fail("Replacement source reached compilation with another module's pins")
+
+    def test_default_build_rejects_an_unpinned_transitive_checksum(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, registry, builder = self.fixture(root)
+            originals = {path: path.read_bytes() for path in (registry, builder, source / "go.mod", source / "go.sum")}
+            def runner(args, **kwargs):
+                if args[1:3] == ["mod", "tidy"]:
+                    with (source / "go.sum").open("a") as sums:
+                        sums.write(f"example.com/private/dep v1.0.0 {EXTENSION_LOCK['sum']}\n")
+                return ""
+            with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                with self.assertRaisesRegex(BuildError, "Unpinned build dependency"):
+                    with wgc_overlay(source, Path("go"), {"GONOSUMDB": "example.com/private/*"}, runner, [], root):
+                        self.fail("Default build accepted an unpinned private dependency")
+            for path, original in originals.items():
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_extension_modules_cannot_collide_with_core_dependencies(self):
+        for local in (False, True):
+            with self.subTest(local=local), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source, registry, _ = self.fixture(root)
+                module = "github.com/sagernet/sing"
+                entry = {"package": module + "/register", "module": module, "version": "v0.9.7"}
+                if local:
+                    directory = root / "override"
+                    directory.mkdir()
+                    (directory / "go.mod").write_text(f"module {module}\n")
+                    entry.update(path=str(directory), source_sha256=source_digest(directory))
+                else:
+                    entry.update(EXTENSION_LOCK)
+                runner = mock.Mock(return_value="")
+                with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)), mock.patch("wgc_overlay.core_dependency_modules", return_value={module}):
+                    with self.assertRaisesRegex(BuildError, "core dependency"):
+                        with wgc_overlay(source, Path("go"), {}, runner, [entry], root):
+                            self.fail("Extension replaced an existing core dependency")
+                runner.assert_not_called()
+                self.assertNotIn("registerWGCEndpoint", registry.read_text())
 
     def test_unreviewed_upstream_registry_is_never_modified(self):
         with tempfile.TemporaryDirectory() as temp:

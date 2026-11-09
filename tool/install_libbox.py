@@ -161,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.manifest_sha256 and not re.fullmatch(r"[0-9a-f]{64}", args.manifest_sha256):
             raise BuildError("--manifest-sha256 must be a lowercase SHA-256 digest")
         targets = ["android", "apple"] if args.target == "all" else [args.target]
-        source = args.from_dir.resolve() if args.from_dir else f"https://github.com/{RELEASE_REPO}/releases/download/{urllib.parse.quote(args.release, safe='')}"
+        source = args.from_dir.expanduser().resolve() if args.from_dir else f"https://github.com/{RELEASE_REPO}/releases/download/{urllib.parse.quote(args.release, safe='')}"
         if args.dry_run:
             prefix = str(source)
             print(json.dumps({"manifest": prefix + "/SHA256SUMS", "archives": [prefix + "/" + archive_name(pins, t) for t in targets],

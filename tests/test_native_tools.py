@@ -257,6 +257,14 @@ class SafeExtractionTests(unittest.TestCase):
 
 
 class InstallerTests(unittest.TestCase):
+    def test_local_archive_home_path_expands_before_resolution(self):
+        output = io.StringIO()
+        with mock.patch("install_libbox.sys.stdout", output):
+            result = install_libbox.main(["--target", "apple", "--from-dir", "~/native-release", "--dry-run"])
+        self.assertEqual(result, 0)
+        plan = json.loads(output.getvalue())
+        self.assertEqual(plan["manifest"], str(Path.home() / "native-release/SHA256SUMS"))
+
     def release_fixture(self, root, links=False, legal_file=False, omit_legal=None):
         payload = root / "payload"
         payload.mkdir()

@@ -130,6 +130,13 @@ def seed_wgc_checksums(source: Path, root: Path, module_root: Path | None = None
     seed_module_checksums(source, "github.com/idy/wgc", locked)
 
 
+def core_dependency_modules(source: Path, go: Path, env: dict, run) -> set[str]:
+    declared = json.loads(run([go, "mod", "edit", "-json"], cwd=source, env=env, capture=True))
+    protected = {entry["Path"] for entry in declared.get("Require", [])}
+    protected.update(module for module, _ in checksum_entries((source / "go.sum").read_text()))
+    return protected
+
+
 @contextlib.contextmanager
 def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], root: Path = ROOT):
     """Register WGC in the same libbox instance; restore upstream inputs on all exits."""
@@ -175,6 +182,11 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
                 if identity not in local_snapshots:
                     local_snapshots[identity] = str(snapshot_module(Path(item["path"]), snapshot_root / f"extension-{index}", item["source_sha256"]))
                 item["path"] = local_snapshots[identity]
+        if prepared:
+            protected = core_dependency_modules(source, go, env, run)
+            protected.update(module for module, _ in checksum_entries((adapter_snapshot / "go.sum").read_text()))
+            if any(item["module"] in protected for item in prepared):
+                raise BuildError("WGC extensions must not replace or override core dependency modules")
         registry.write_text(registry_text.replace(marker, marker + "\tregisterWGCEndpoint(registry)\n"))
         builder.write_text(builder_text.replace(tag_marker, 'sharedTags = append(sharedTags, "with_wgc")\n\t' + tag_marker))
         generated.write_text(generated_text)
@@ -218,10 +230,9 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
             elif (selected.get("Replace") or selected.get("Sum") != item["sum"] or
                     selected.get("GoModSum") != item["go_mod_sum"]):
                 raise BuildError("Resolved WGC extension source differs from its pinned module")
-        if extensions:
-            for key, value in checksum_entries((source / "go.sum").read_text()).items():
-                if trusted.get(key) != value:
-                    raise BuildError(f"Unpinned extension dependency {key[0]}@{key[1]}; update the module go.sum from a trusted source")
+        for key, value in checksum_entries((source / "go.sum").read_text()).items():
+            if trusted.get(key) != value:
+                raise BuildError(f"Unpinned build dependency {key[0]}@{key[1]}; update the module go.sum from a trusted source")
         run([go, "mod", "verify"], cwd=source, env=env)
         provenance["go_sum_sha256"] = sha256(source / "go.sum")
         yield provenance
