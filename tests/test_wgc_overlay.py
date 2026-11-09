@@ -58,6 +58,76 @@ class OverlayTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), original)
             self.assertFalse((source / "include/wgc_flutter.go").exists())
 
+    def test_exact_extension_versions_reach_compilation_and_restore_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, registry, builder = self.fixture(root)
+            originals = {p: p.read_bytes() for p in [registry, builder, source / "go.mod", source / "go.sum"]}
+            extensions = [
+                {"package": "example.com/a/register", "module": "example.com/a", "version": "v1.2.3"},
+                {"package": "example.com/b/register", "module": "example.com/b", "version": "v1.4.0"},
+            ]
+            selected = {"example.com/a": "v1.2.3", "example.com/b": "v1.4.0"}
+            env = {"GOFLAGS": "-mod=readonly", "GOWORK": "off"}
+            def fake_run(args, **kwargs):
+                if args[1:3] == ["mod", "tidy"]:
+                    (source / "go.mod").write_text("module github.com/sagernet/sing-box\n// resolved dependencies\n")
+                    (source / "go.sum").write_text("resolved checksums\n")
+                if args[1:3] == ["list", "-m"]:
+                    return selected[args[-1]]
+                return ""
+            runner = mock.Mock(side_effect=fake_run)
+            with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                with wgc_overlay(source, Path("go"), env, runner, extensions, root) as provenance:
+                    self.assertEqual(provenance["extensions"], extensions)
+                    self.assertEqual(provenance["go_sum_sha256"], sha256(source / "go.sum"))
+            self.assertEqual(runner.call_args_list[-4:], [
+                mock.call([Path("go"), "mod", "tidy"], cwd=source,
+                          env=dict(env, GOFLAGS="-trimpath -buildvcs=false")),
+                mock.call([Path("go"), "list", "-m", "-f", "{{.Version}}", "example.com/a"],
+                          cwd=source, env=env, capture=True),
+                mock.call([Path("go"), "list", "-m", "-f", "{{.Version}}", "example.com/b"],
+                          cwd=source, env=env, capture=True),
+                mock.call([Path("go"), "mod", "verify"], cwd=source, env=env),
+            ])
+            for path, original in originals.items():
+                self.assertEqual(path.read_bytes(), original)
+            self.assertFalse((source / "include/wgc_flutter.go").exists())
+
+    def test_mvs_extension_upgrade_fails_before_compilation_and_restores_inputs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, registry, builder = self.fixture(root)
+            originals = {p: p.read_bytes() for p in [registry, builder, source / "go.mod", source / "go.sum"]}
+            extensions = [
+                {"package": "example.com/a", "module": "example.com/a", "version": "v1.0.0"},
+                {"package": "example.com/b", "module": "example.com/b", "version": "v1.0.0"},
+            ]
+            selected = {"example.com/a": "v1.0.0", "example.com/b": "v1.1.0"}
+            env = {"GOFLAGS": "-mod=readonly", "GOWORK": "off"}
+            def fake_run(args, **kwargs):
+                if args[1:3] == ["mod", "tidy"]:
+                    # A requires B v1.1.0, so MVS upgrades the configured B v1.0.0.
+                    (source / "go.mod").write_text("module github.com/sagernet/sing-box\nrequire example.com/b v1.1.0\n")
+                    (source / "go.sum").write_text("upgraded dependency checksums\n")
+                if args[1:3] == ["list", "-m"]:
+                    return selected[args[-1]]
+                return ""
+            runner = mock.Mock(side_effect=fake_run)
+            with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                with self.assertRaisesRegex(BuildError, r"example\.com/b resolved to v1\.1\.0, expected v1\.0\.0"):
+                    with wgc_overlay(source, Path("go"), env, runner, extensions, root):
+                        self.fail("MVS-upgraded extension reached compilation with stale provenance")
+            self.assertEqual(runner.call_args_list[-2:], [
+                mock.call([Path("go"), "list", "-m", "-f", "{{.Version}}", "example.com/a"],
+                          cwd=source, env=env, capture=True),
+                mock.call([Path("go"), "list", "-m", "-f", "{{.Version}}", "example.com/b"],
+                          cwd=source, env=env, capture=True),
+            ])
+            for path, original in originals.items():
+                self.assertEqual(path.read_bytes(), original)
+            self.assertFalse((source / "include/wgc_flutter.go").exists())
+
     def test_conflicting_wgc_checksums_fail_before_resolution_and_restore_inputs(self):
         for version in ("v1.2.3", "v1.2.3/go.mod"):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as temp:

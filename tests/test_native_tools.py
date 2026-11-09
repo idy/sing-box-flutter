@@ -190,6 +190,124 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(previous.read_bytes(), b"previous-core")
                 self.assertFalse((cache / "installed/android.json").exists())
 
+    def test_internal_legal_destination_symlinks_are_rejected(self):
+        for name, victim_path in [(".build/legal", "android"), (".build/legal/android", ".")]:
+            with self.subTest(path=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                pins, source, sums, cache = self.release_fixture(root)
+                plugin = root / "plugin"
+                previous = plugin / ARTIFACTS["android"]
+                previous.parent.mkdir(parents=True)
+                previous.write_bytes(b"previous-core")
+                target = plugin / ".build/install-cache"
+                victim = target / victim_path
+                victim.mkdir(parents=True)
+                (victim / "keep").write_bytes(b"cache-data")
+                link = plugin / name
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target, target_is_directory=True)
+                with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"):
+                    with self.assertRaisesRegex(BuildError, "symlink"):
+                        install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+                self.assertEqual((victim / "keep").read_bytes(), b"cache-data")
+                self.assertEqual(previous.read_bytes(), b"previous-core")
+
+    def test_install_failures_restore_core_notices_and_receipt(self):
+        for failure in ("copy", "legal-backup", "legal-commit", "receipt-commit", "receipt-write"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                pins, source, sums, cache = self.release_fixture(root)
+                plugin = root / "plugin"
+                previous = plugin / ARTIFACTS["android"]
+                previous.parent.mkdir(parents=True)
+                previous.write_bytes(b"previous-core")
+                notices = plugin / ".build/legal/android"
+                notices.mkdir(parents=True)
+                (notices / "old-license").write_bytes(b"previous-notice")
+                receipt = cache / "installed/android.json"
+                receipt.parent.mkdir()
+                receipt.write_bytes(b"previous-receipt")
+                original_copy, original_rename, original_write = install_libbox.shutil.copytree, Path.rename, install_libbox.write_json
+
+                def copy(source, destination, *args, **kwargs):
+                    if failure == "copy":
+                        Path(destination).mkdir()
+                        (Path(destination) / "partial").write_bytes(b"partial")
+                        raise OSError("injected copy failure")
+                    return original_copy(source, destination, *args, **kwargs)
+
+                def rename(path, destination):
+                    if ((failure == "legal-backup" and path == notices.resolve()) or
+                            (failure == "legal-commit" and path.name == "next-legal") or
+                            (failure == "receipt-commit" and path.name == "next-install.json")):
+                        raise OSError("injected rename failure")
+                    return original_rename(path, destination)
+
+                def write(path, value):
+                    if failure == "receipt-write" and path.name == "next-install.json":
+                        raise OSError("injected receipt failure")
+                    return original_write(path, value)
+
+                with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"), mock.patch("install_libbox.shutil.copytree", side_effect=copy), mock.patch.object(Path, "rename", autospec=True, side_effect=rename), mock.patch("install_libbox.write_json", side_effect=write):
+                    with self.assertRaises(OSError):
+                        install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+                self.assertEqual(previous.read_bytes(), b"previous-core")
+                self.assertEqual(sorted(path.name for path in notices.iterdir()), ["old-license"])
+                self.assertEqual((notices / "old-license").read_bytes(), b"previous-notice")
+                self.assertEqual(receipt.read_bytes(), b"previous-receipt")
+
+    def test_failed_rollback_keeps_recovery_backups(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pins, source, sums, cache = self.release_fixture(root)
+            plugin = root / "plugin"
+            previous = plugin / ARTIFACTS["android"]
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"previous-core")
+            original = Path.rename
+
+            def rename(path, destination):
+                if path.name in ("next-legal", "previous-0"):
+                    raise OSError("injected commit and rollback failure")
+                return original(path, destination)
+
+            with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"), mock.patch.object(Path, "rename", autospec=True, side_effect=rename):
+                with self.assertRaisesRegex(BuildError, "backups retained"):
+                    install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+            backups = list(cache.glob("install-android-*/previous-0"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), b"previous-core")
+
+    def test_completed_install_survives_staging_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pins, source, sums, cache = self.release_fixture(root)
+            plugin = root / "plugin"
+            errors = io.StringIO()
+            with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"), mock.patch("install_libbox.shutil.rmtree", side_effect=OSError("injected cleanup failure")), mock.patch("install_libbox.sys.stderr", errors):
+                install_libbox.install_one("android", pins, source, sums, cache, False, "test-manifest")
+            self.assertEqual(sha256(plugin / ARTIFACTS["android"]), sha256(root / "payload" / ARTIFACTS["android"]))
+            self.assertEqual((plugin / ".build/legal/android/LICENSE").read_text(), "dependency notice\n")
+            self.assertTrue((cache / "installed/android.json").is_file())
+            self.assertIn("Installation completed", errors.getvalue())
+
+    def test_cache_inside_notice_destination_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pins, source, sums, _ = self.release_fixture(root)
+            plugin = root / "plugin"
+            previous = plugin / ARTIFACTS["android"]
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"previous-core")
+            cache = plugin / ".build/legal/android"
+            cache.mkdir(parents=True)
+            (cache / "keep").write_bytes(b"cache-data")
+            with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"):
+                with self.assertRaisesRegex(BuildError, "cache must be separate"):
+                    install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+            self.assertEqual(previous.read_bytes(), b"previous-core")
+            self.assertEqual((cache / "keep").read_bytes(), b"cache-data")
+
     def test_file_legal_payload_is_rejected_before_replacing_core(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

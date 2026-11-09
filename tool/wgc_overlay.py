@@ -151,6 +151,11 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
         seed_wgc_checksums(source, root)
         tidy_env = dict(env, GOFLAGS="-trimpath -buildvcs=false")
         run([go, "mod", "tidy"], cwd=source, env=tidy_env)
+        for item in extensions:
+            selected = run([go, "list", "-m", "-f", "{{.Version}}", item["module"]],
+                           cwd=source, env=env, capture=True)
+            if selected != item["version"]:
+                raise BuildError(f"WGC extension {item['module']} resolved to {selected}, expected {item['version']}")
         run([go, "mod", "verify"], cwd=source, env=env)
         provenance["go_sum_sha256"] = sha256(source / "go.sum")
         yield provenance
