@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import Darwin
 import Foundation
 import Libbox
 
@@ -8,10 +7,8 @@ import Libbox
 @main
 struct NativeCoreSmoke {
     static func main() throws {
-        // simctl captures a pipe; preserve the last completed check even on a crash.
-        setbuf(stdout, nil)
-        guard CommandLine.arguments.count >= 2 else {
-            fatalError("Pass the expected libbox version from native-core.json and optional complete configuration fixture files.")
+        guard CommandLine.arguments.count == 2 else {
+            fatalError("Pass the expected libbox version from native-core.json.")
         }
         guard ProcessInfo.processInfo.environment["TS_PERMIT_TOOLCHAIN_MISMATCH"] != "1" else {
             fatalError("The Tailscale toolchain assertion must not be bypassed for this smoke test.")
@@ -41,35 +38,15 @@ struct NativeCoreSmoke {
         try NativeCore.check(String(decoding: tailscaleJSON, as: UTF8.self))
         print("Tailscale endpoint: registered and configuration accepted")
 
-        // Synthetic keys and documentation-only numeric endpoints. This validates
-        // WGC registration in the SAME libbox without connecting or a second core.
-        let wgcConfig: [String: Any] = [
-            "endpoints": [[
-                "type": "wgc", "tag": "wgc",
-                "configuration": [
-                    "version": 1,
-                    "private_key": Data(repeating: 1, count: 32).base64EncodedString(),
-                    "addresses": ["10.7.0.2/32"],
-                    "peers": [[
-                        "id": "exit",
-                        "public_key": Data(repeating: 2, count: 32).base64EncodedString(),
-                        "endpoint": "192.0.2.1:51820",
-                    ]],
-                ],
-            ]],
-            "outbounds": [["type": "direct", "tag": "direct"]],
-        ]
+        let wgcConfig: [String: Any] = ["endpoints": [[
+            "type": "wgc", "tag": "wgc", "address": ["10.7.0.2/32"],
+            "private_key": Data(repeating: 1, count: 32).base64EncodedString(),
+            "peer_public_key": Data(repeating: 2, count: 32).base64EncodedString(),
+            "peer_endpoint": "203.0.113.10:51820",
+        ]]]
         let wgcJSON = try JSONSerialization.data(withJSONObject: wgcConfig)
         try NativeCore.check(String(decoding: wgcJSON, as: UTF8.self))
-        print("WGC endpoint: registered and configuration accepted in libbox")
-
-        for path in CommandLine.arguments.dropFirst(2) {
-            let url = URL(fileURLWithPath: path)
-            let data = try Data(contentsOf: url)
-            guard let config = String(data: data, encoding: .utf8) else { throw TunnelFailure.invalidConfig }
-            try NativeCore.check(config)
-            print("complete converter fixture: \(url.lastPathComponent) accepted")
-        }
+        print("WGC endpoint: registered using idy/wgc")
 
         let secret = "native-smoke-private-auth-sentinel"
         do {

@@ -1,15 +1,10 @@
 ## 0.2.0
 
-- Integrate WGC as a native sing-box endpoint in the same libbox VPN runtime,
-  including compiled custom transport factories and wrappers.
-- Migrate WGC configuration validation and add `checkWgcConfig` / `startWgc`.
-- Add macOS 12+ through shared Apple Flutter/PacketTunnel sources and a combined
-  iOS, simulator, and macOS Libbox XCFramework.
-- Store Apple configuration payloads in device-only shared Keychain items;
-  preferences carry persistent references and the App Group holds runtime/status.
-- Pin WGC and verify WGC source/registration identity in native build metadata;
-  distribute dependency notices with the native artifacts.
-- Add migration instructions from `wireguard_conn_flutter`.
+- Register a WGC endpoint in the existing libbox runtime, directly using
+  `github.com/idy/wgc` and the sing-box userspace stack.
+- Add native transport factory hooks and pin their adapter/build inputs.
+- Preserve scoped private Go module access settings during native builds.
+- Keep the existing Flutter API and Android/iOS platform implementation.
 
 ## 0.1.0
 

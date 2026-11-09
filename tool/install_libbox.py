@@ -18,7 +18,7 @@ sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, RELEASE_REPO, ROOT, archive_name,
                            artifact_hashes, build_directory, download, load_pins,
                            parse_manifest, project_lock, safe_extract, sha256,
-                           sync_apple_framework, validate_metadata, write_json)
+                           validate_metadata, write_json)
 
 
 def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: Path,
@@ -90,8 +90,6 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
                     backup.rename(destination)
                 raise
             print(f"{target}: installed {relative}")
-        if target == "apple":
-            sync_apple_framework()
         legal_destination = ROOT / ".build/legal" / target
         legal_destination.parent.mkdir(parents=True, exist_ok=True)
         if legal_destination.exists():
@@ -109,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=("android", "apple", "all"), default="all")
     source_args = parser.add_mutually_exclusive_group(required=True)
-    source_args.add_argument("--release", help="Published tag, e.g. v0.1.0; never latest")
+    source_args.add_argument("--release", help="Published tag, e.g. v0.2.0; never latest")
     source_args.add_argument("--from-dir", type=Path, help="Install verified local/CI release inputs without networking")
     parser.add_argument("--manifest-sha256", help="Optional independently obtained SHA-256 of SHA256SUMS")
     parser.add_argument("--cache-dir", default=str(ROOT / ".build/install"))

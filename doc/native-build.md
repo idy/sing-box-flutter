@@ -92,34 +92,23 @@ pin, and required upstream build tags. Go modules use `go.sum`/`sum.golang.org`;
 rebuilt using the verified fork and inspected with `go version -m` before use.
 Both tools and the core use project-local Go caches.
 
-WGC lives in this repository's `core/` Go module. A second reversible overlay
-(`tool/wgc_overlay.py`) registers its endpoint in libbox and pins the WGC module.
-It checks the upstream registry hash, adds only the local WGC module and explicit
-transport imports, and restores registry, builder, go.mod and go.sum on exit.
-The overlay also sets the Apple builder's macOS deployment target to 12.0 to match
-the plugin. Native metadata identifies both the WGC compile inputs and overlay by
-SHA-256; the installer rejects a core built without this exact WGC implementation.
-
-Custom transports use `--wgc-config wgc.core.json`; see [WGC](wgc.md). Custom
-release archives can be installed explicitly with `--from-dir`; the public release
-installer accepts only the standard extension set. Module-access variables
-`GOPRIVATE`, `GONOPROXY`, `GONOSUMDB` and an explicit `GOPROXY` are preserved;
-the default proxy includes a direct fallback. Compiler/workspace overrides remain
-isolated and the verified Tailscale Go toolchain is always selected. Export the
-module-access variables explicitly, since `go env -w` settings are not loaded.
-
-The WGC license is copied from its pinned, verified Go module into the native
-release cache. It ships with the existing project/libbox notices in `Legal/` and
-is retained under `.build/legal/<target>` on install; bulk dependency license
-texts are not checked into this repository.
+The `native/wgc` module is only a sing-box endpoint adapter; it directly depends on
+`github.com/idy/wgc` for WireGuard sessions and encryption. `tool/wgc_overlay.py`
+registers that adapter in the pinned libbox build and restores the upstream inputs
+afterward. The adapter source and registration hashes are recorded in native
+metadata so the installer cannot mix an unmodified libbox with a WGC-enabled
+package. Custom transport registrations can be compiled with `--wgc-config`; see
+[WGC configuration](wgc.md). Exported `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, and
+`GOPROXY` settings are retained under the pinned compiler. Required WGC license
+text is collected from the pinned dependency for the native release archive.
 
 The official entry point remains `go run ./cmd/internal/build_libbox -target
-android` or `-target apple -platform ios,iossimulator,macos`. The tool applies the small,
+android` or `-target apple -platform ios,iossimulator`. The tool applies the small,
 deterministic feature profile in `tool/mobile-profile.json` while running it and
 restores the pristine source in `finally`. The exact upstream builder SHA-256 is
 checked before the edit. The profile removes only `with_naive_outbound`,
 `with_usbip`, `with_openvpn`, and `with_openconnect`; these are outside this plugin's
-feature contract. The WGC overlay adds `with_wgc` and the pinned local endpoint module. Upstream naive outbound pulls Cronet native libraries whose
+feature contract. Upstream naive outbound pulls Cronet native libraries whose
 pinned iOS archive referenced an undefined `base::MessagePumpKqueue::InitializeFeatures()`
 and `UIApplication` symbols during real PacketTunnel linking. No upstream version,
 API or dependency pin is changed. An interrupted process can leave the local
@@ -135,8 +124,7 @@ legacy variant; the plugin installs only the SDK-24 main `libbox.aar`.
 Outputs are:
 
 - `android/libs/libbox.aar` (Android architectures selected by official gomobile).
-- `ios/Frameworks/Libbox.xcframework` (iOS arm64, simulator arm64/x86_64, macOS arm64/x86_64).
-- `macos/Frameworks/Libbox.xcframework`, a local link to the same combined framework.
+- `ios/Frameworks/Libbox.xcframework` (iOS arm64 and simulator arm64/x86_64).
 - `.build/cache/generated/android/libbox-sources.jar`, when produced upstream.
 - `.build/cache/results/<target>.json`, with input pins, tag/profile hashes, SDK
   versions, download URL/checksum, module sums, binary identities and artifact hashes.
@@ -152,8 +140,8 @@ archive ordering, timestamps, owners and gzip headers.
 Apple builds require macOS, Xcode command-line selection, and iPhoneOS plus
 simulator SDKs. Check with `xcode-select -p`, `xcrun --sdk iphoneos
 --show-sdk-version`, and `xcrun --sdk iphonesimulator --show-sdk-version`. The pinned
-upstream builder requires iOS 15.0 or later. The combined framework also includes
-macOS arm64/x86_64 for the macOS 12+ plugin. tvOS slices are not built.
+upstream builder requires iOS 15.0 or later. It is restricted to iOS/simulator;
+macOS and tvOS frameworks are not built for this Flutter plugin.
 
 Android builds require a licensed SDK in `ANDROID_HOME` (or `ANDROID_SDK_ROOT`),
 installed platforms/build-tools, NDK `28.0.13004108`, and **OpenJDK 17** selected with

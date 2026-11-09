@@ -4,9 +4,8 @@ on:
   pull_request:
     paths:
       - native-core.json
-      - core/**
+      - native/**
       - ios/**
-      - macos/**
       - THIRD_PARTY_NOTICES.md
       - LICENSE
       - tool/**
@@ -122,13 +121,6 @@ jobs:
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
         working-directory: example/android
         run: bash gradlew :sing_box_flutter:testDebugUnitTest
-      - name: Check Apple Keychain and shared provider integration
-        if: steps.select.outputs.enabled == 'true' && matrix.target == 'apple'
-        shell: bash
-        run: |
-          set -euo pipefail
-          flutter precache --ios --macos
-          bash ios/Tests/run-apple-tests.sh 2>&1 | tee .build/logs/apple-security-and-link.log
       - name: Execute Apple native runtime smoke
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'apple'
         shell: bash

@@ -24,7 +24,6 @@ abstract class SingBoxFlutterPlatform extends PlatformInterface {
   Future<void> initialize({
     String? appGroup,
     String? providerBundleIdentifier,
-    String? keychainAccessGroup,
     required String notificationTitle,
   }) =>
       throw UnimplementedError('initialize');

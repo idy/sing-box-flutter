@@ -1,11 +1,8 @@
 # sing_box_flutter
 
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
-as a native VPN on Android, iOS, and macOS. Includes a reproducible **Tailscale Go**
-build of libbox with Tailscale, standard WireGuard, and WGC endpoints enabled.
-WGC sessions and compiled custom transports run inside the same libbox service.
-This package incorporates the functionality previously maintained in
-[`wireguard_conn_flutter` / WGC NE](https://github.com/idy/wgc-ne).
+as a native VPN on Android and iOS. Includes a reproducible **Tailscale Go** build
+of libbox with Tailscale endpoints enabled.
 
 This project is not affiliated with or endorsed by SagerNet or Tailscale.
 
@@ -18,7 +15,6 @@ Kotlin and JDK 17; the checked-in example and CI use the same Flutter toolchain.
 | --- | --- | --- |
 | Android | Foreground `VpnService`, socket protection, network monitoring | Android 7 / API 24 |
 | iOS | `NEPacketTunnelProvider` in a separately signed host extension | iOS 15 |
-| macOS | Shared Apple plugin and a host-owned Packet Tunnel extension | macOS 12 |
 
 Flutter controls the service through method channels and receives typed connection
 events. Packet processing stays in the native service. Closing the UI or cancelling
@@ -65,7 +61,7 @@ The plugin declares its VPN service and required permissions. Set the host's
 `minSdk` to at least 24. VPN consent requires an attached Flutter Activity.
 Android runs the service in the foreground with a persistent notification.
 
-### Apple host setup
+### iOS host setup
 
 A Flutter plugin cannot create or sign the host application's Network Extension.
 Add a Packet Tunnel extension target, embed it in the app, and configure matching
@@ -87,7 +83,6 @@ await vpn.initialize(
   // Required on iOS; omit on Android.
   appGroup: 'group.com.example.app',
   providerBundleIdentifier: 'com.example.app.PacketTunnel',
-  keychainAccessGroup: 'TEAMID.com.example.app.vpn',
   notificationTitle: 'Example VPN',
 );
 
@@ -118,28 +113,14 @@ Multiple plugin objects refer to the same native VPN service. Only one connectio
 is managed by this plugin at a time. A new event-channel subscription receives the
 current native status. Use `getStatus()` to refresh a UI after it resumes.
 
-## WGC and custom WireGuard transports
+## WGC support
 
-WGC is a built-in endpoint in the same libbox core, so it can share a single VPN
-with Tailscale or other sing-box routes. The migrated typed API is exported by
-`sing_box_flutter.dart`:
-
-```dart
-final configuration = WgcConfiguration.fromJsonString(profileJsonFromSecureSource);
-await vpn.checkWgcConfig(configuration);
-if (await vpn.requestPermission()) {
-  await vpn.startWgc(configuration: configuration, name: 'WGC');
-}
-```
-
-For mixed routing, edit `configuration.toSingBoxConfig()` and pass the complete
-JSON to `vpn.start`. See [WGC configuration and migration](doc/wgc.md) for the
-endpoint schema, custom compiled transports, and migration from
-`wireguard_conn_flutter`. No separate WGC VPN service or core is started.
-
-On Apple, provide a shared `keychainAccessGroup` during initialization, present in
-both app and extension entitlements. Configuration payloads are stored in a
-device-only Keychain item; the App Group holds runtime directories and status.
+The matching native build includes a `wgc` endpoint backed directly by
+[`idy/wgc`](https://github.com/idy/wgc). Pass ordinary sing-box JSON through the
+existing `checkConfig` / `start` methods; the Flutter API and Android/iOS VPN
+host remain unchanged. See [WGC endpoint configuration](doc/wgc.md) for keys,
+routing, and compiled application transport hooks. This does not copy the WGC
+protocol implementation into this repository.
 
 ## Tailscale support
 

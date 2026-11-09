@@ -25,14 +25,13 @@ a direct-routing VPN for testing, with no external proxy or Tailscale login.
 
 The checked-in Xcode project contains an embedded PacketTunnel target and uses
 CocoaPods. Select your own Apple team and replace the example bundle IDs and App
-Group with values available to that team. Configure the same Keychain access group
-in Runner/ and PacketTunnel/ entitlements; replace `TEAMID` in the run command with
-the expanded signing prefix. Update both targets together. Follow [the iOS host guide](../doc/ios-setup.md).
+Group with values available to that team. Update entitlements in Runner/ and
+PacketTunnel/ together. Follow [the iOS host guide](../doc/ios-setup.md).
 
 From this directory:
 
 ```bash
-flutter run --dart-define=APP_GROUP=group.dev.idy.singboxflutter.example --dart-define=TUNNEL_BUNDLE_ID=dev.idy.singBoxFlutterExample.PacketTunnel --dart-define=KEYCHAIN_ACCESS_GROUP=TEAMID.dev.idy.singboxflutter.example.vpn
+flutter run --dart-define=APP_GROUP=group.dev.idy.singboxflutter.example --dart-define=TUNNEL_BUNDLE_ID=dev.idy.singBoxFlutterExample.PacketTunnel
 ```
 
 A physical device is required for VPN traffic. Compile-only simulator verification:

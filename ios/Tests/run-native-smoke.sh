@@ -2,31 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-  printf 'Usage: %s <booted-simulator-uuid> [packet-tunnel-executable] [--config <json-file>]...\n' "$0" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  printf 'Usage: %s <booted-simulator-uuid> [packet-tunnel-executable]\n' "$0" >&2
   exit 64
 fi
-simulator_identifier="$1"
-shift
-packet_tunnel_executable=""
-configuration_files=()
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == --config && $# -ge 2 ]]; then
-    configuration_files+=("$(realpath "$2")")
-    shift 2
-  elif [[ "$1" != --* && -z "$packet_tunnel_executable" ]]; then
-    packet_tunnel_executable="$1"
-    shift
-  else
-    printf 'Expected an optional Packet Tunnel executable or --config <json-file>.\n' >&2
-    exit 64
-  fi
-done
 
 script_directory="$(dirname "$(realpath "$0")")"
 ios_directory="$(dirname "$script_directory")"
 package_directory="$(dirname "$ios_directory")"
-framework_directory="${LIBBOX_XCFRAMEWORK:-$ios_directory/Frameworks/Libbox.xcframework}"
+framework_directory="$ios_directory/Frameworks/Libbox.xcframework"
 expected_version="$(/usr/bin/plutil -extract sing_box_version raw -o - "$package_directory/native-core.json")"
 device_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
 simulator_sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
@@ -43,7 +27,7 @@ done
 # Keep this list aligned with the Core subspec. Do not use a mocked libbox module.
 native_link_flags=(
   -framework Libbox -framework NetworkExtension -framework Network
-  -framework Security -framework LocalAuthentication -framework SystemConfiguration -framework CoreFoundation
+  -framework Security -framework SystemConfiguration -framework CoreFoundation
   -framework UIKit -lresolv
 )
 
@@ -52,7 +36,7 @@ xcrun --sdk iphoneos swiftc -emit-library -module-name sing_box_flutter \
   -swift-version 5 -application-extension -target arm64-apple-ios15.0 \
   -sdk "$device_sdk" -F "$framework_directory/ios-arm64" \
   "${native_link_flags[@]}" \
-  "$ios_directory"/Classes/Shared/*.swift \
+  "$ios_directory/Classes/Shared/SharedState.swift" \
   "$ios_directory/Classes/PacketTunnel/ApplePlatformInterface.swift" \
   "$ios_directory/Classes/PacketTunnel/SingBoxPacketTunnelProvider.swift" \
   -o "$smoke_directory/PacketTunnel.dylib"
@@ -68,27 +52,18 @@ xcrun --sdk iphonesimulator swiftc -swift-version 5 \
   -target "$simulator_architecture-apple-ios15.0-simulator" \
   -sdk "$simulator_sdk" -F "$framework_directory/ios-arm64_x86_64-simulator" \
   "${native_link_flags[@]}" \
-  "$ios_directory"/Classes/Shared/*.swift \
+  "$ios_directory/Classes/Shared/SharedState.swift" \
   "$script_directory/NativeCoreSmoke.swift" \
   -o "$smoke_directory/NativeCoreSmoke"
 
 # Do not set TS_PERMIT_TOOLCHAIN_MISMATCH: the runtime assertion must catch
 # mismatches that a successful native link and framework version string cannot.
 unset TS_PERMIT_TOOLCHAIN_MISMATCH SIMCTL_CHILD_TS_PERMIT_TOOLCHAIN_MISMATCH
-printf 'Run the security and migration contracts on the actual iOS Foundation/Security APIs.\n'
-xcrun --sdk iphonesimulator swiftc -swift-version 5 \
-  -target "$simulator_architecture-apple-ios15.0-simulator" \
-  -sdk "$simulator_sdk" -F "$framework_directory/ios-arm64_x86_64-simulator" \
-  "${native_link_flags[@]}" \
-  "$ios_directory"/Classes/Shared/*.swift \
-  "$script_directory/KeychainStoreTests.swift" \
-  -o "$smoke_directory/KeychainStoreTests"
-xcrun simctl spawn "$simulator_identifier" "$smoke_directory/KeychainStoreTests"
-xcrun simctl spawn "$simulator_identifier" "$smoke_directory/NativeCoreSmoke" "$expected_version" "${configuration_files[@]+"${configuration_files[@]}"}"
+xcrun simctl spawn "$1" "$smoke_directory/NativeCoreSmoke" "$expected_version"
 
-if [[ -n "$packet_tunnel_executable" ]]; then
+if [[ $# -eq 2 ]]; then
   printf 'Check that the embedded extension does not link Flutter.\n'
-  linked_dependencies="$(xcrun otool -L "$packet_tunnel_executable")"
+  linked_dependencies="$(xcrun otool -L "$2")"
   if [[ "$linked_dependencies" == *Flutter.framework* || "$linked_dependencies" == *Flutter/Flutter* ]]; then
     printf 'The Packet Tunnel extension unexpectedly links Flutter.\n' >&2
     exit 1

@@ -20,20 +20,15 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
         coreQueue.async {
             guard self.commandServer == nil, !self.transitioning else { completionHandler(TunnelFailure.busy); return }
             self.transitioning = true
-            self.storage = nil
-            self.sessionID = nil
             do {
                 guard let configuration = self.protocolConfiguration as? NETunnelProviderProtocol,
-                      let bundle = Bundle.main.bundleIdentifier else { throw TunnelFailure.configurationRequired }
-                let identity = try TunnelPreferences.identity(from: configuration, providerBundleIdentifier: bundle)
-                let storage = try TunnelStorage(identity: identity)
+                      let group = configuration.providerConfiguration?["appGroup"] as? String else {
+                    throw TunnelFailure(code: "missing_app_group", message: "The VPN configuration does not contain an App Group identifier.")
+                }
+                let storage = try TunnelStorage(appGroup: group)
                 self.storage = storage
-                guard let reference = configuration.passwordReference,
-                      let expectedSession = TunnelPreferences.sessionID(in: configuration) else { throw TunnelFailure.configurationRequired }
-                self.sessionID = expectedSession
-                // The OS delivers only an opaque reference. Validate the returned
-                // Keychain service, derived account, access group and protection.
-                let saved = try storage.loadConfiguration(reference: reference, expectedSessionID: expectedSession)
+                let saved = try storage.loadConfiguration()
+                self.sessionID = saved.sessionID
                 if let requestedSession = options?["sessionID"] as? String, requestedSession != saved.sessionID {
                     throw TunnelFailure(code: "stale_configuration", message: "The requested VPN configuration was replaced before startup.")
                 }
@@ -53,7 +48,7 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
                 try server.startOrReloadService(saved.config, options: LibboxOverrideOptions())
                 // A routing-only / proxy-only config must not masquerade as a packet tunnel.
                 guard platform.hasTunnel else {
-                    throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound on Apple platforms.")
+                    throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound on iOS.")
                 }
                 self.setStatus("connected")
                 self.transitioning = false

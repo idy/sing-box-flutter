@@ -4,8 +4,6 @@
 <dict>
     <key>com.apple.security.application-groups</key>
     <array><string>group.dev.idy.singboxflutter.example</string></array>
-    <key>keychain-access-groups</key>
-    <array><string>$(AppIdentifierPrefix)dev.idy.singboxflutter.example.vpn</string></array>
     <key>com.apple.developer.networking.networkextension</key>
     <array><string>packet-tunnel-provider</string></array>
 </dict>

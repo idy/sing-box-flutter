@@ -52,7 +52,7 @@ def pin_identity(pins: dict) -> dict:
     from wgc_overlay import source_digest
     identity = {key: pins[key] for key in ("sing_box_version", "sing_box_revision",
                                           "tailscale_go_revision", "gomobile_version", "wgc_version")}
-    identity["wgc_source_sha256"] = source_digest(ROOT / "core")
+    identity["wgc_source_sha256"] = source_digest(ROOT / "native/wgc")
     identity["wgc_overlay_sha256"] = sha256(ROOT / "tool/wgc_overlay.py")
     return identity
 
@@ -228,29 +228,8 @@ def artifact_hashes(path: Path) -> dict[str, str]:
     return hashes
 
 
-def sync_apple_framework(root: Path = ROOT) -> None:
-    """Expose one combined Apple framework to both CocoaPods platform folders."""
-    framework = root / ARTIFACTS["apple"]
-    if not framework.is_dir():
-        raise BuildError("Combined Apple framework is missing")
-    mirror = root / "macos/Frameworks/Libbox.xcframework"
-    mirror.parent.mkdir(parents=True, exist_ok=True)
-    if mirror.is_symlink():
-        if mirror.resolve() != framework.resolve():
-            raise BuildError("Unexpected macOS framework link")
-    elif mirror.exists():
-        if artifact_hashes(mirror) != artifact_hashes(framework):
-            raise BuildError("Different macOS framework already exists")
-    else:
-        mirror.symlink_to("../../ios/Frameworks/Libbox.xcframework", target_is_directory=True)
-
-
 def legal_files(root: Path = ROOT, *, wgc_license: Path | None = None) -> dict[str, Path]:
     files = {"LICENSE": root / "LICENSE", "THIRD_PARTY_NOTICES.md": root / "THIRD_PARTY_NOTICES.md"}
-    for name in ("LICENSE", "NOTICE"):
-        path = root / "core" / name
-        if path.is_file():
-            files["core/" + name] = path
     if wgc_license is not None:
         if wgc_license.is_symlink() or not wgc_license.is_file():
             raise BuildError("Pinned WGC license is missing; rebuild the native artifact")
