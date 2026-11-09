@@ -189,13 +189,10 @@ class NativeReleaseTests(unittest.TestCase):
                     release.approved_run(42, self.root, env, client)
                 git.assert_not_called()
 
-    def test_privileged_workflow_checks_out_default_branch_before_gate_and_download(self):
-        workflow = (ROOT / ".github/workflows/publish-native.yml").read_text()
+    def test_source_releases_have_no_automatic_binary_publisher(self):
+        self.assertFalse((ROOT / ".github/workflows/publish-native.yml").exists())
         build = (ROOT / ".github/workflows/native-core.yml").read_text()
-        self.assertIn("workflow_run:", workflow)
-        self.assertIn("ref: ${{ github.sha }}", workflow)
-        self.assertNotIn("ref: ${{ github.event.workflow_run.head_sha }}", workflow)
-        self.assertLess(workflow.index("--check-run"), workflow.index("uses: actions/download-artifact"))
+        self.assertNotIn("  push:", build)
         self.assertNotIn("contents: write", build)
         self.assertNotIn("GH_TOKEN:", build)
 

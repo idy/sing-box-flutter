@@ -144,8 +144,7 @@ if (configuredHost && nativeReceipt == null) {
 val libboxArtifact = selectedAndroid ?: file("libs/libbox.aar")
 if (!libboxArtifact.isFile) {
     throw GradleException(
-        "Missing native sing-box 1.14.4 AAR. $buildCoreHint, or install the standard core with " +
-            "dart run sing_box_flutter install --target android --release v0.2.0. " +
+        "Missing native sing-box 1.14.4 AAR. $buildCoreHint. " +
             "Source builds require JDK 17, Android SDK and NDK 28.0.13004108. See doc/native-build.md."
     )
 }

@@ -4,22 +4,30 @@ import 'dart:isolate';
 import 'package:path/path.dart' as p;
 import 'package:sing_box_flutter/src/core_build_config.dart';
 
-/// Installs or builds the pinned native core in this plugin's package directory.
+/// Builds a host-selected native core or manages legacy standard-core artifacts.
 Future<void> main(List<String> arguments) async {
   if (arguments.isEmpty || arguments.first == '--help') {
     stdout.writeln('''Native core setup for sing_box_flutter.
 
-Usage:
-  dart run sing_box_flutter install --target android --release v0.2.0
-  dart run sing_box_flutter install --target apple --release v0.2.0
+Build from source (0.3.0):
+  dart run sing_box_flutter build --target android
   dart run sing_box_flutter build --target apple
 
-install: download and verify native release artifacts.
-build: compile the pinned source using the pinned Tailscale Go toolchain.
-The nearest host pubspec.yaml selects features via sing_box_flutter.core.
+Add sing_box_flutter.core to your host pubspec.yaml to select features.
+Run build from that app; the pinned Tailscale Go toolchain bootstraps automatically.
 Use --config <pubspec path> or --project-dir <host root> to select another host.
-Configured install requires a source build; release artifacts contain a full core.
-Python 3.11+ is required. Pass --help after a subcommand for its options.''');
+Requires Python 3.11+ and Git, plus JDK 17/Android SDK/NDK for Android or
+macOS/Xcode for Apple. No global Go or separate runtime Go installation is needed.
+0.3.0 releases contain source/build scripts, with no precompiled native SDK assets.
+
+Legacy standard core (hosts without sing_box_flutter.core):
+  dart run sing_box_flutter install --target android --release v0.2.0
+  dart run sing_box_flutter install --target apple --release v0.2.0
+
+install: download and verify historical native release artifacts (Python 3.11+).
+Without a feature selection, build retains the legacy standard source-build path.
+Selected cores require build; install cannot satisfy a host feature selection.
+Pass --help after a subcommand for its options.''');
     return;
   }
   var script = switch (arguments.first) {

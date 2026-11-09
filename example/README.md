@@ -4,18 +4,34 @@ Demonstrates configuration validation, system VPN consent, native connection
 status, and explicit start/stop. Opening the app does not start a VPN.
 
 The example selects a minimal WGC core in its `pubspec.yaml`. Build its native
-artifact before building the app; standard full-core release assets do not match
-this selection. See [feature selection](../doc/core-features.md). From this directory:
+artifact from source before building the app. Version 0.3.0 releases contain source
+and build scripts, with no universal precompiled libbox `.a`, AAR or XCFramework
+SDK assets. See [feature selection](../doc/core-features.md).
+
+Install Python 3.11+ and Git, plus OpenJDK 17 and the Android SDK/NDK for Android, or
+macOS with Xcode and CocoaPods for iOS. The native builder requires Android NDK
+`28.0.13004108`; see [SDK setup](../doc/native-build.md#host-sdks-and-isolation) for
+the separate Flutter packaging NDK requirement. The builder downloads and verifies
+the pinned Tailscale Go toolchain automatically. No global Go installation is
+needed on the build machine, and the installed app needs no separate Go
+installation.
+
+From this directory, resolve packages and build the platform you need:
 
 ```bash
 flutter pub get
+dart run sing_box_flutter build --target android
 ```
 
 ```bash
 dart run sing_box_flutter build --target apple
 ```
 
-For Android, replace the target with `android`.
+Selected artifacts stay under this example's `.dart_tool/sing_box_flutter/`.
+Rebuild the core after changing its pubspec selection, then rebuild the app.
+`flutter pub get` and `flutter run` do not compile a missing core automatically.
+Historical `install --release v0.2.0` artifacts are supported only for hosts without
+a feature selection; they cannot satisfy this example's selected core.
 
 ## Choose the core feature set
 
@@ -46,7 +62,7 @@ Apple's incompatible Naive outbound; see [profile details](core-profiles/README.
 ## Android
 
 The project includes the merged plugin service declaration and targets API 24+.
-With a JDK and Android SDK/NDK installed:
+After building the Android core with OpenJDK 17 and the Android SDK/NDK installed:
 
 ```bash
 flutter pub get

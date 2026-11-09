@@ -1,3 +1,18 @@
+## 0.3.0
+
+- Select compiled protocols, endpoints, DNS transports, TLS features, APIs and
+  services through the host application's `sing_box_flutter.core` pubspec block.
+- Build a thin mobile binding with only selected constructors using the pinned
+  Tailscale Go toolchain; retain the existing Flutter VPN control API.
+- Keep selected AAR/XCFramework outputs in the host project with source fingerprints,
+  capability manifests and integrity checks in Gradle and CocoaPods.
+- Link the Go engine only into the iOS Packet Tunnel extension. The main app uses
+  structural/capability preflight; full native validation occurs before connecting.
+- Add WGC minimal, WGC + WireGuard + Tailscale, and full mobile example profiles.
+- Publish source and build tooling without universal precompiled libbox release
+  assets. Build the native core from the host app before compiling Flutter.
+- Preserve explicit legacy standard-core builds and historical artifact installs.
+
 ## 0.2.0
 
 - Register a WGC endpoint in the existing libbox runtime, directly using

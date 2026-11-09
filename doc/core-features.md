@@ -1,10 +1,15 @@
 # Selectable mobile core
 
-Configure the **host Flutter application's** `pubspec.yaml`, not the plugin's
-package manifest. Build-time selections control the available component types;
-normal sing-box JSON still controls nodes, credentials, routing rules and DNS
-policy at runtime. New protocols require rebuilding the native core and app;
-changing servers, keys or rules does not.
+Version 0.3.0 uses source builds selected by the **host Flutter application's**
+`pubspec.yaml`. Add `sing_box_flutter: ^0.3.0` under `dependencies` and place the
+`sing_box_flutter.core` block at the top level of that same host manifest. The
+GitHub Release provides source and build scripts, with no universal precompiled
+libbox `.a`, AAR or XCFramework SDK assets.
+
+Build-time selections control the available component types; normal sing-box JSON
+still controls nodes, credentials, routing rules and DNS policy at runtime. New
+protocols require rebuilding the native core and app; changing servers, keys or
+rules does not.
 
 ## Minimal WGC build
 
@@ -53,10 +58,14 @@ versions are recorded separately from the logical feature selection. An AAR or
 XCFramework containing several architectures is not the final installed size of
 an app on one device.
 
-Existing compiler/SDK prerequisites in [native-build.md](native-build.md) still
-apply. All Go compilation uses the pinned, verified Tailscale Go fork, including
-builds that do not enable Tailscale networking. Normal `flutter pub get`, Gradle
-and CocoaPods do not silently download or compile a Go core.
+Build prerequisites are Python 3.11+ and Git, plus OpenJDK 17 and Android SDK/NDK
+for Android, or macOS/Xcode and CocoaPods for iOS. See
+[native-build.md](native-build.md#host-sdks-and-isolation) for exact SDK requirements.
+The builder automatically downloads and verifies the pinned Tailscale Go fork,
+including for builds that do not enable Tailscale networking. No global Go
+installation is needed on the build machine, and the installed app needs no
+separate Go installation. Normal `flutter pub get`, Gradle and CocoaPods do not
+silently download or compile a Go core.
 
 ## Selection rules
 
@@ -175,10 +184,16 @@ in effect. Local transport extensions use the existing `--wgc-config` manifest.
 
 Different host apps never overwrite each other's native artifacts in the shared
 pub cache. Build caches/toolchains remain in the plugin checkout's ignored `.build`.
-If a host has no `sing_box_flutter.core` block, standard libbox build/install still
-works as before. Standard release assets cannot satisfy a custom selection; the
-CLI rejects `install` for configured hosts instead of installing a larger or
-incompatible artifact silently. Custom profiles are not published by this command.
+The pub package retains the `native/mobile/`, `native/wgc/` and `tool/` sources and
+pins needed for source builds, while excluding these caches and generated binaries.
+
+Hosts without a `sing_box_flutter.core` block retain the legacy standard source
+builder and installer for historical releases such as `install --release v0.2.0`.
+Version 0.3.0 does not publish standard native SDK assets. Historical standard
+assets cannot satisfy a custom selection; the CLI rejects `install` for configured
+hosts instead of installing a larger or incompatible artifact silently. Custom
+profiles are not published by this command. See
+[legacy build and install details](native-build.md#legacy-standard-core-build-and-install).
 
 ## Add-to-app Flutter modules
 
