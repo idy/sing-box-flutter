@@ -196,14 +196,24 @@ The Android job also executes `TestAndroidUDPProtectionSmoke` on an API 35 x86_6
 emulator using the same pinned fork. Controlled protection callbacks exercise
 real Android UDP sockets, failure handling and reopening; this is not a VPN
 forwarding or physical-device test.
-The workflow requests read-only repository permissions and publishes no release.
-It uploads build logs, provenance, generated Android sources, and release inputs,
-including on failure. With target `all`, a final successful job combines the two
-archive checksums and reports the `SHA256SUMS` digest in the job summary. Separate
-platform runs require a maintainer to combine the independently verified manifests.
+PR and manually dispatched builds retain read-only repository permissions and
+upload build logs, provenance, generated Android sources, and release inputs,
+including on failure. With target `all`, a successful job combines both archive
+checksums, validates the publication plan without publishing, and reports the
+`SHA256SUMS` digest in the job summary.
 
-Before publishing a GitHub release, verify both native plugin builds, retain the
-logs/provenance, and upload exactly these public assets under the chosen plugin tag:
+Pushing a `vX.Y.Z` tag automatically builds and tests both platforms, then publishes
+these native assets directly from CI. The tag must match `pubspec.yaml`, and its
+commit must belong to the default branch. Only the final tag-publication job gets
+`contents: write`; PRs, forks and manual validation runs cannot publish. No personal
+token or local download/re-upload is needed. The publisher verifies all uploaded
+sizes and SHA-256 digests before making the draft public, resumes incomplete
+drafts, and refuses to overwrite differing assets on an already published release.
+Existing `v0.2.0` assets remain unchanged. Dart publication to pub.dev is a separate
+operation; this workflow distributes the native libraries only.
+
+To release a future version, update and merge the package version, then push its
+matching version tag. A successful tag run publishes exactly these assets:
 
 - `libbox-1.14.4-android.tar.gz`
 - `libbox-1.14.4-apple.tar.gz`
