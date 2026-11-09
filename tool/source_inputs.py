@@ -7,6 +7,8 @@ from pathlib import Path
 
 from native_common import BuildError
 
+SOURCE_IGNORES = frozenset({".git", ".hg", ".svn", ".build", ".wgc-inputs"})
+
 ADAPTER_INPUTS = frozenset({
     "endpoint.go", "endpoint_test.go", "rebind.go", "rebind_test.go",
     "transport.go", "go.mod", "go.sum",
@@ -18,15 +20,15 @@ def source_digest(root: Path) -> str:
     if not (root / "go.mod").is_file():
         raise BuildError("WGC source module is missing")
     files = []
-    vcs = {".git", ".hg", ".svn"}
+    ignored = SOURCE_IGNORES
     for directory, folders, names in os.walk(root):
-        folders[:] = sorted(name for name in folders if name not in vcs)
+        folders[:] = sorted(name for name in folders if name not in ignored)
         for name in [*folders, *names]:
             path = Path(directory) / name
-            if name not in vcs and path.is_symlink():
+            if name not in ignored and path.is_symlink():
                 raise BuildError("WGC source inputs must not be symlinks")
         files.extend(Path(directory) / name for name in names
-                     if name not in vcs and (Path(directory) / name).is_file())
+                     if name not in ignored and (Path(directory) / name).is_file())
     files.sort()
     digest = hashlib.sha256()
     for path in files:

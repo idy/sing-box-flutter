@@ -6,10 +6,9 @@ import json
 from pathlib import Path
 import re
 import shutil
-import tempfile
 
-from native_common import BuildError, ROOT, build_directory, sha256
-from source_inputs import adapter_digest, source_digest
+from native_common import BuildError, ROOT, sha256
+from source_inputs import SOURCE_IGNORES, adapter_digest, source_digest
 
 MODULE = "github.com/idy/sing-box-flutter/native/wgc"
 REGISTRY_SHA256 = "cbc7bc06391fe555828782df7bc1ce0844e446a82647448739dbb3e8e3eef19e"
@@ -26,7 +25,7 @@ def extension_checksums(entry: dict) -> dict[str, str]:
 
 
 def snapshot_module(source: Path, destination: Path, expected: str) -> Path:
-    shutil.copytree(source, destination, symlinks=True, ignore=shutil.ignore_patterns(".git", ".hg", ".svn"))
+    shutil.copytree(source, destination, symlinks=True, ignore=shutil.ignore_patterns(*SOURCE_IGNORES))
     if source_digest(destination) != expected:
         raise BuildError("Local WGC source changed before its snapshot was captured")
     return destination
@@ -162,12 +161,11 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
                   "overlay_sha256": sha256(root / "tool/wgc_overlay.py"),
                   "upstream_registry_sha256": REGISTRY_SHA256,
                   "extensions": [{k: v for k, v in item.items() if k != "path"} for item in extensions]}
-    snapshots = None
+    snapshot_root = source / ".wgc-inputs"
+    snapshots_created = False
     try:
-        build_root = build_directory(root / ".build", root)
-        build_root.mkdir(parents=True, exist_ok=True)
-        snapshots = tempfile.TemporaryDirectory(prefix="wgc-inputs-", dir=build_root)
-        snapshot_root = Path(snapshots.name)
+        snapshot_root.mkdir(mode=0o700)
+        snapshots_created = True
         adapter_snapshot = snapshot_module(root / "native/wgc", snapshot_root / "adapter", provenance["source_sha256"])
         prepared = [dict(item) for item in extensions]
         local_snapshots = {}
@@ -180,11 +178,11 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
         registry.write_text(registry_text.replace(marker, marker + "\tregisterWGCEndpoint(registry)\n"))
         builder.write_text(builder_text.replace(tag_marker, 'sharedTags = append(sharedTags, "with_wgc")\n\t' + tag_marker))
         generated.write_text(generated_text)
-        run([go, "mod", "edit", f"-require={MODULE}@v0.0.0", f"-replace={MODULE}={adapter_snapshot}"], cwd=source, env=env)
+        run([go, "mod", "edit", f"-require={MODULE}@v0.0.0", f"-replace={MODULE}=./{adapter_snapshot.relative_to(source).as_posix()}"], cwd=source, env=env)
         for item in prepared:
             options = [f"-require={item['module']}@{item['version']}"]
             if "path" in item:
-                options.append(f"-replace={item['module']}={item['path']}")
+                options.append(f"-replace={item['module']}=./{Path(item['path']).relative_to(source).as_posix()}")
             run([go, "mod", "edit", *options], cwd=source, env=env)
         # Go reads only the main module's sums, so promote authenticated module locks.
         trusted = checksum_entries(originals[source / "go.sum"].decode())
@@ -233,5 +231,5 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
                 path.write_bytes(original)
             generated.unlink(missing_ok=True)
         finally:
-            if snapshots is not None:
-                snapshots.cleanup()
+            if snapshots_created:
+                shutil.rmtree(snapshot_root)

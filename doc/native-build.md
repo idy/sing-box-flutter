@@ -100,9 +100,9 @@ metadata so the installer cannot mix an unmodified libbox with a WGC-enabled
 package. The bundled adapter accepts only the canonical files listed in
 `tool/source_inputs.py`; extra inputs such as ignored `debug.log` files fail,
 keeping checkout and pub-package identities identical. Extension fingerprints
-include all files except VCS metadata, including assembly and embedded data.
-The adapter and local extensions compile
-from private snapshots whose fingerprints must match the recorded source inputs.
+include source files, assembly and embedded data, excluding VCS metadata and
+reserved `.build`/`.wgc-inputs` generated state. The adapter and local extensions
+compile from verified private snapshots under stable relative replacement paths.
 Remote extensions require module and `go.mod` checksum pins in the manifest;
 these are enforced in the main module even when private scopes disable sumdb.
 After resolving extensions, the build checks

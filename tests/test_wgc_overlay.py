@@ -219,7 +219,7 @@ class OverlayTests(unittest.TestCase):
                     for flag in args[3:]:
                         if str(flag).startswith("-replace="):
                             module, path = str(flag)[len("-replace="):].split("=", 1)
-                            replacements[module] = Path(path)
+                            replacements[module] = (source / path).resolve()
                 if args[1:3] == ["mod", "tidy"]:
                     (local / "register.go").write_text("package transport\n// edited during build\n")
                     (root / "native/wgc/endpoint.go").write_text("package core\n// edited during build\n")
@@ -261,7 +261,7 @@ class OverlayTests(unittest.TestCase):
                 if args[1:3] == ["mod", "edit"]:
                     for flag in args[3:]:
                         if str(flag).startswith("-replace=example.com/transport="):
-                            replacements.append(Path(str(flag).split("=", 2)[2]))
+                            replacements.append((source / str(flag).split("=", 2)[2]).resolve())
                 if args[1:3] == ["list", "-m"]:
                     return json.dumps({"Version": "v0.0.0", "Dir": str(replacements[-1])})
                 return ""
@@ -275,6 +275,73 @@ class OverlayTests(unittest.TestCase):
                     for entry in provenance["extensions"]:
                         self.assertEqual(entry["source_sha256"], entries[0]["source_sha256"])
             self.assertFalse(replacements[0].exists())
+
+    def test_snapshot_replacement_identities_are_relative_and_stable(self):
+        identities = []
+        with tempfile.TemporaryDirectory() as temp:
+            for builder in ("builder-one", "builder-two"):
+                root = Path(temp) / builder
+                source, registry, _ = self.fixture(root)
+                local = root / "local"
+                local.mkdir()
+                (local / "go.mod").write_text("module example.com/transport\n")
+                (local / "register.go").write_text("package transport\n")
+                config = root / "extensions.json"
+                config.write_text(json.dumps({"extensions": [{"package": "example.com/transport", "module": "example.com/transport", "path": "local"}]}))
+                paths = {}
+                def runner(args, **kwargs):
+                    if args[1:3] == ["mod", "edit"]:
+                        for flag in args[3:]:
+                            if str(flag).startswith("-replace="):
+                                module, path = str(flag)[len("-replace="):].split("=", 1)
+                                paths[module] = path
+                    if args[1:3] == ["list", "-m"]:
+                        return json.dumps({"Version": "v0.0.0", "Dir": str((source / paths["example.com/transport"]).resolve())})
+                    return ""
+                with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                    with wgc_overlay(source, Path("go"), {}, runner, load_extensions(config), root):
+                        self.assertTrue(paths)
+                        for path in paths.values():
+                            self.assertTrue(path.startswith("./.wgc-inputs/"))
+                            self.assertFalse(Path(path).is_absolute())
+                            self.assertNotIn(str(root), path)
+                        identities.append(dict(paths))
+                self.assertFalse((source / ".wgc-inputs").exists())
+        self.assertEqual(identities[0], identities[1])
+
+    def test_ancestor_module_excludes_generated_state_without_recursive_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, registry, _ = self.fixture(root)
+            (root / "go.mod").write_text("module example.com/ancestor\n")
+            (root / "register.go").write_text("package ancestor\n")
+            build = root / ".build"
+            build.mkdir()
+            (build / "cache.bin").write_bytes(b"generated one")
+            config = root / "extensions.json"
+            config.write_text(json.dumps({"extensions": [{"package": "example.com/ancestor", "module": "example.com/ancestor", "path": "."}]}))
+            entries = load_extensions(config)
+            expected = entries[0]["source_sha256"]
+            (build / "cache.bin").write_bytes(b"generated two")
+            self.assertEqual(source_digest(root), expected)
+            paths = {}
+            def runner(args, **kwargs):
+                if args[1:3] == ["mod", "edit"]:
+                    for flag in args[3:]:
+                        if str(flag).startswith("-replace="):
+                            module, path = str(flag)[len("-replace="):].split("=", 1)
+                            paths[module] = (source / path).resolve()
+                if args[1:3] == ["list", "-m"]:
+                    return json.dumps({"Version": "v0.0.0", "Dir": str(paths["example.com/ancestor"])})
+                return ""
+            with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                with wgc_overlay(source, Path("go"), {}, runner, entries, root) as provenance:
+                    snapshot = paths["example.com/ancestor"]
+                    self.assertEqual(source_digest(snapshot), expected)
+                    self.assertEqual(provenance["extensions"][0]["source_sha256"], expected)
+                    self.assertFalse((snapshot / ".build").exists())
+                    self.assertFalse((snapshot / "upstream/.wgc-inputs").exists())
+            self.assertFalse(snapshot.exists())
 
     def test_local_changes_before_snapshot_are_rejected(self):
         for change in ("contents", "symlink"):
@@ -300,7 +367,7 @@ class OverlayTests(unittest.TestCase):
                         with wgc_overlay(source, Path("go"), {}, runner, entries, root):
                             self.fail("Changed local source reached compilation")
                 runner.assert_not_called()
-                self.assertFalse(list((root / ".build").glob("wgc-inputs-*")))
+                self.assertFalse((source / ".wgc-inputs").exists())
 
     def test_authenticated_extension_sums_lock_transitive_dependencies(self):
         dependency = (f"example.com/private/dep v1.0.0 {EXTENSION_LOCK['sum']}\n"

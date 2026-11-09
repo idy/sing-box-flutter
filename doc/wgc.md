@@ -88,7 +88,10 @@ A local extension may specify `path`, relative to the manifest, and omit `versio
 The default matches the module's major version, such as `v2.0.0` for a `/v2` module.
 The loader computes `source_sha256` for local entries; omit `sum` and `go_mod_sum`.
 The build copies local modules into private snapshots and verifies each copy;
-edits to the original directory after capture apply to the next build.
+edits to the original directory after capture apply to the next build. Reserved
+`.build` and `.wgc-inputs` generated state is excluded from both fingerprinting
+and copying, including when a module contains this plugin checkout. Replacements
+use stable relative paths so build information does not expose checkout paths.
 Export private module settings such as `GOPRIVATE`; Git/SSH credentials remain in the normal
 user environment, not the manifest. `GONOPROXY`, `GONOSUMDB`, and explicit
 `GOPROXY` settings are retained under the pinned Go toolchain. Build support and
