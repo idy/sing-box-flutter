@@ -255,7 +255,7 @@ class SafeExtractionTests(unittest.TestCase):
 
 
 class InstallerTests(unittest.TestCase):
-    def release_fixture(self, root, links=False, legal_file=False):
+    def release_fixture(self, root, links=False, legal_file=False, omit_legal=None):
         payload = root / "payload"
         payload.mkdir()
         legal = payload / "Legal"
@@ -263,7 +263,9 @@ class InstallerTests(unittest.TestCase):
             legal.write_text("dependency notice\n")
         else:
             legal.mkdir()
-            (legal / "LICENSE").write_text("dependency notice\n")
+            for name in ("LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSE.wgc"):
+                if name != omit_legal:
+                    (legal / name).write_text("dependency notice\n")
             if links:
                 for name in ("repeat", "again"):
                     (legal / name).symlink_to(".", target_is_directory=True)
@@ -295,6 +297,25 @@ class InstallerTests(unittest.TestCase):
                 install_libbox.install_one("android", pins, source, sums, cache, False, "test-manifest")
             self.assertTrue((plugin / ARTIFACTS["android"]).is_file())
             self.assertEqual((plugin / ".build/legal/android/LICENSE").read_text(), "dependency notice\n")
+
+    def test_required_notice_omissions_fail_before_replacing_core(self):
+        for omitted in ("LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSE.wgc"):
+            with self.subTest(omitted=omitted), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                pins, source, sums, cache = self.release_fixture(root, omit_legal=omitted)
+                plugin = root / "plugin"
+                previous = plugin / ARTIFACTS["android"]
+                previous.parent.mkdir(parents=True)
+                previous.write_bytes(b"previous-core")
+                notices = plugin / ".build/legal/android"
+                notices.mkdir(parents=True)
+                (notices / "keep").write_bytes(b"previous-notice")
+                with mock.patch.object(install_libbox, "ROOT", plugin), mock.patch.object(install_libbox, "validate_metadata"):
+                    with self.assertRaisesRegex(BuildError, "required license"):
+                        install_libbox.install_one("android", pins, source, sums, cache, True, "test-manifest")
+                self.assertEqual(previous.read_bytes(), b"previous-core")
+                self.assertEqual((notices / "keep").read_bytes(), b"previous-notice")
+                self.assertFalse((cache / "installed/android.json").exists())
 
     def test_legal_destination_cannot_escape_through_symlinked_parents(self):
         for name, victim_path in [(".build", "legal/android"), (".build/legal", "android"),

@@ -16,7 +16,7 @@ import zipfile
 
 sys.dont_write_bytecode = True
 from native_common import (ARTIFACTS, BuildError, RELEASE_REPO, ROOT, archive_name,
-                           artifact_hashes, build_directory, download, load_pins,
+                           artifact_hashes, build_directory, download, legal_files, load_pins,
                            parse_manifest, project_lock, safe_extract, sha256,
                            validate_metadata, write_json)
 
@@ -66,6 +66,10 @@ def install_one(target: str, pins: dict, source: str | Path, sums: dict, cache: 
         license_path = staging / "LICENSE.sing-box"
         if not license_path.is_file() or sha256(license_path) != metadata.get("license_sha256"):
             raise BuildError("Release upstream license is missing or changed")
+        required_legal = {*legal_files(), "LICENSE.wgc"}
+        missing_legal = sorted(name for name in required_legal if not (legal / name).is_file())
+        if missing_legal:
+            raise BuildError("Release required license notices are missing: " + ", ".join(missing_legal))
         if artifact_hashes(staging / "Legal") != metadata.get("legal_sha256"):
             raise BuildError("Release WGC/dependency license notices are missing or changed")
         artifact = staging / relative
