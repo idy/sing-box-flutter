@@ -55,12 +55,16 @@ func validUDPOptions(raw json.RawMessage) bool {
 }
 
 func NewUDPTransport(ctx context.Context, peer netip.AddrPort, options json.RawMessage) (wireguard.Transport, error) {
+	return newUDPTransport(ctx, peer, options, runtime.GOOS == "android")
+}
+
+func newUDPTransport(ctx context.Context, peer netip.AddrPort, options json.RawMessage, android bool) (wireguard.Transport, error) {
 	if !validUDPOptions(options) {
 		return nil, errors.New("the default WGC UDP transport has no options")
 	}
 	var conn net.PacketConn
 	var err error
-	if runtime.GOOS == "android" {
+	if android {
 		manager := service.FromContext[adapter.NetworkManager](ctx)
 		if manager == nil || manager.ProtectFunc() == nil {
 			return nil, errors.New("WGC requires native Android socket protection")

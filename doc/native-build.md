@@ -192,6 +192,10 @@ python3 tool/install_libbox.py --target all --release v0.2.0 --dry-run
 Tailscale Go, then compiles the real Flutter example/plugin against that artifact
 (Android debug APK or iOS simulator including the PacketTunnel target). Android's
 SDK is installed under the job's `.build/android-sdk`; the runner's JDK 17 is used.
+The Android job also executes `TestAndroidUDPProtectionSmoke` on an API 35 x86_64
+emulator using the same pinned fork. Controlled protection callbacks exercise
+real Android UDP sockets, failure handling and reopening; this is not a VPN
+forwarding or physical-device test.
 The workflow requests read-only repository permissions and publishes no release.
 It uploads build logs, provenance, generated Android sources, and release inputs,
 including on failure. With target `all`, a final successful job combines the two
