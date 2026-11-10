@@ -86,7 +86,8 @@ val configuredHost = if (hostPubspec.isFile) {
                     throw GradleException("sing_box_flutter.macos.mode must be ne or user_tun")
                 }
             }
-            config.containsKey("core") || config.containsKey("macos")
+            // A macOS backend alone leaves Android on the legacy standard core.
+            config.containsKey("core")
         }
     } catch (error: Exception) {
         throw GradleException("Invalid host core configuration. $buildCoreHint", error)

@@ -34,7 +34,7 @@ class SingBoxFlutterArtifacts
         if pubspec.key?('sing_box_flutter')
           config = pubspec['sing_box_flutter']
           raise 'Invalid sing_box_flutter configuration.' unless config.is_a?(Hash) && (config.keys - %w[core macos]).empty?
-          configured = config.key?('core') || config.key?('macos')
+          configured = config.key?('core') || (platform == :macos && config.key?('macos'))
           if config.key?('macos')
             requested_macos = config['macos']
             raise 'sing_box_flutter.macos accepts only mode: ne or user_tun.' unless requested_macos.is_a?(Hash) && (requested_macos.keys - ['mode']).empty? && %w[ne user_tun].include?(requested_macos.fetch('mode', 'ne'))

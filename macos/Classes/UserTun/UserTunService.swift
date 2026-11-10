@@ -6,7 +6,8 @@ protocol UserTunService: AnyObject {
     func prepare(_ config: String) throws -> UserTunDNSPlan
     func activate(onDNSFailure: @escaping () -> Void) throws
     /// Permanent close is safe concurrently with preparation/activation, including
-    /// before either phase has entered Go. It must wait for native teardown.
+    /// before either phase has entered Go. It must wait for native teardown and
+    /// preserve any failure on repeated calls; uncertain cleanup is not retried.
     func close() throws
 }
 
@@ -14,18 +15,22 @@ final class NativeUserTunService: UserTunService {
     private let server: LibboxCommandServer
     private let monitor: UserTunPathMonitor
     private let dns: UserTunDNSController
-    private let lock = NSLock()
+    private let closeNative: () throws -> Void
+    private let lock = NSCondition()
     private var closed = false
+    private var closeFinished = false
+    private var closeFailure: TunnelFailure?
     private var plan: UserTunDNSPlan?
 
-    init() throws {
+    init(dns: UserTunDNSController = UserTunDNSController(), closeNative: @escaping (LibboxCommandServer) throws -> Void = { try $0.closeWithError() }) throws {
         monitor = UserTunPathMonitor()
-        dns = UserTunDNSController()
+        self.dns = dns
         var error: NSError?
         guard let server = LibboxNewStandaloneCommandServerWithMonitor(monitor, &error), error == nil else {
             throw TunnelFailure(code: "core_create_failed", message: "sing-box could not create the macOS user_tun service.")
         }
         self.server = server
+        self.closeNative = { try closeNative(server) }
     }
 
     func prepare(_ config: String) throws -> UserTunDNSPlan {
@@ -62,19 +67,36 @@ final class NativeUserTunService: UserTunService {
 
     func close() throws {
         lock.lock()
-        guard !closed else { lock.unlock(); return }
+        if closed {
+            while !closeFinished { lock.wait() }
+            let failure = closeFailure
+            lock.unlock()
+            if let failure { throw failure }
+            return
+        }
         closed = true
         plan = nil
         lock.unlock()
-        // Always cancel/drain the native server after DNS cleanup, even when
-        // removing the temporary resolver fails.
-        defer { server.close() }
-        try dns.close()
+        // Mark closed before entering either subsystem and never hold our state
+        // lock across Go. Both cleanups must run even if the other one fails.
+        var failure: TunnelFailure?
+        do { try dns.close() } catch { failure = UserTunRuntime.stopFailed }
+        do { try closeNative() } catch { failure = UserTunRuntime.stopFailed }
+        lock.lock()
+        closeFailure = failure
+        closeFinished = true
+        lock.broadcast()
+        lock.unlock()
+        if let failure { throw failure }
     }
 
     static func check(_ config: String) throws {
         let service = try NativeUserTunService()
-        defer { try? service.close() }
-        _ = try service.prepare(config)
+        var preparationFailure: Error?
+        do { _ = try service.prepare(config) } catch { preparationFailure = error }
+        // A cleanup failure takes precedence: another engine cannot safely use
+        // these native resources even when preparation itself was invalid.
+        try service.close()
+        if let preparationFailure { throw preparationFailure }
     }
 }

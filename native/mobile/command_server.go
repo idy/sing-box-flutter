@@ -17,6 +17,7 @@ type CommandServer struct {
 	operations     sync.Mutex
 	state          sync.Mutex
 	closed         bool
+	closeErr       error // Sanitized, sticky result; failed cleanup requires a new process.
 	stopGeneration uint64
 	cancel         context.CancelFunc
 	engine         mobileEngine
@@ -147,7 +148,7 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	if err != nil || ctx.Err() != nil || s.isClosed() {
 		cancel()
 		if engine != nil {
-			_ = engine.Close()
+			_ = s.closeMobileEngine(engine)
 		}
 		s.state.Lock()
 		s.cancel = nil
@@ -160,7 +161,7 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	if s.closed {
 		s.state.Unlock()
 		cancel()
-		_ = engine.Close()
+		_ = s.closeMobileEngine(engine)
 		return errors.New("mobile core is closed")
 	}
 	s.engine = engine
@@ -196,7 +197,11 @@ func (s *CommandServer) CloseService() error {
 	// Interrupt an in-flight Start before acquiring the serialization lock.
 	s.state.Lock()
 	if s.closed {
+		err := s.closeErr
 		s.state.Unlock()
+		if err != nil {
+			return err
+		}
 		return errors.New("mobile core is closed")
 	}
 	s.stopGeneration++
@@ -207,17 +212,29 @@ func (s *CommandServer) CloseService() error {
 	s.operations.Lock()
 	defer s.operations.Unlock()
 	if s.isClosed() {
+		s.state.Lock()
+		err := s.closeErr
+		s.state.Unlock()
+		if err != nil {
+			return err
+		}
 		return errors.New("mobile core is closed")
 	}
-	if err := s.closeEngine(); err != nil {
-		return errors.New("could not stop mobile service")
-	}
-	return nil
+	return s.closeEngine()
 }
 
-// Close preserves the no-result signature expected by Swift. It waits for all
-// resources, is idempotent, and permanently prevents another startup.
+// Close preserves the void ABI used by existing Android/iOS callers. Call
+// CloseWithError when the host must know whether permanent teardown succeeded.
 func (s *CommandServer) Close() {
+	_ = s.CloseWithError()
+}
+
+// CloseWithError cancels before waiting for an in-flight operation, permanently
+// prevents startup and drains all owned engines exactly once. Every call waits
+// for cleanup and returns the same sanitized failure, including failures from
+// partial startup or a prior CloseService. Failed cleanup is never retried: the
+// engine may already have partially released resources and requires process exit.
+func (s *CommandServer) CloseWithError() error {
 	s.state.Lock()
 	s.closed = true
 	if s.cancel != nil {
@@ -226,7 +243,7 @@ func (s *CommandServer) Close() {
 	s.state.Unlock()
 	s.operations.Lock()
 	defer s.operations.Unlock()
-	_ = s.closeEngine()
+	return s.closeEngine()
 }
 
 func (s *CommandServer) closeEngine() error {
@@ -237,14 +254,32 @@ func (s *CommandServer) closeEngine() error {
 	if cancel != nil {
 		cancel()
 	}
-	var closeErr error
 	if engine != nil {
-		closeErr = engine.Close()
+		_ = s.closeMobileEngine(engine)
 	}
 	if prepared != nil && prepared.engine != nil {
-		closeErr = errors.Join(closeErr, prepared.engine.Close())
+		_ = s.closeMobileEngine(prepared.engine)
 	}
-	return closeErr
+	s.state.Lock()
+	defer s.state.Unlock()
+	return s.closeErr
+}
+
+// closeMobileEngine is called by the serialized owner, including partial
+// startup cleanup. Retain only a fixed message: native errors may contain
+// credentials or configuration. Failure poisons the server even if the engine
+// pointer has already been removed, so a later no-op close cannot hide it.
+func (s *CommandServer) closeMobileEngine(engine mobileEngine) error {
+	if err := engine.Close(); err != nil {
+		s.state.Lock()
+		defer s.state.Unlock()
+		if s.closeErr == nil {
+			s.closeErr = errors.New("could not stop mobile service cleanly; restart the process")
+		}
+		s.closed = true
+		return s.closeErr
+	}
+	return nil
 }
 
 func (s *CommandServer) isClosed() bool {

@@ -53,8 +53,12 @@ substituted for the host manifest.
 macOS uses `--target macos` and builds a universal arm64/x86_64 XCFramework for
 macOS 12+. Select the backend in the same pubspec with
 `sing_box_flutter.macos.mode: ne` (default) or `user_tun`. A macOS-only block can
-omit `core` and use the normal feature defaults. The mode is part of the build
-fingerprint; switch it by rebuilding the core and app. See [macOS setup](macos-setup.md).
+omit `core` and use the normal feature defaults for `build --target macos`, while
+Android/iOS keep their legacy artifacts. With only a `macos` block, use explicit
+targets: `all` or an omitted target is rejected rather than silently changing the
+mobile core. An explicit `core` block remains a global source selection. The mode
+is part of the selected build fingerprint; switch it by rebuilding the core and
+app. See [macOS setup](macos-setup.md).
 
 The `apple` target defaults to device arm64 plus arm64/x86_64 simulators. Use
 `--apple-platform ios` for a device-only SDK; that artifact cannot build simulator

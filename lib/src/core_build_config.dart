@@ -89,7 +89,7 @@ File? findHostPubspec(Directory directory) {
 /// Features and source identity captured from one immutable pubspec read.
 final class CoreBuildSnapshot {
   CoreBuildSnapshot._(this.pubspec, this.pubspecSha256,
-      Map<String, List<String>> features, this.macosMode)
+      Map<String, List<String>> features, this.macosMode, this.hasCoreSelection)
       : features = Map.unmodifiable(features.map(
             (key, values) => MapEntry(key, List<String>.unmodifiable(values))));
 
@@ -99,6 +99,10 @@ final class CoreBuildSnapshot {
 
   /// Build-time macOS backend; null preserves an omitted macOS configuration.
   final String? macosMode;
+
+  /// Only an explicit core block selects a source core for iOS and Android.
+  /// A macOS-only snapshot supplies source defaults for macOS alone.
+  final bool hasCoreSelection;
 }
 
 /// Parse and hash the exact same bytes, before any subprocess can run.
@@ -109,11 +113,14 @@ CoreBuildSnapshot? readCoreBuildSnapshot(File pubspec) {
   final selection = _parseCorePubspec(utf8.decode(bytes));
   if (selection == null) return null;
   return CoreBuildSnapshot._(canonical, sha256.convert(bytes).toString(),
-      selection.features, selection.macosMode);
+      selection.features, selection.macosMode, selection.hasCoreSelection);
 }
 
-({Map<String, List<String>> features, String? macosMode})? _parseCorePubspec(
-    String source) {
+({
+  Map<String, List<String>> features,
+  String? macosMode,
+  bool hasCoreSelection
+})? _parseCorePubspec(String source) {
   final Object? document;
   try {
     document = loadYaml(source);
@@ -140,6 +147,7 @@ CoreBuildSnapshot? readCoreBuildSnapshot(File pubspec) {
     features:
         parseCoreSelection(plugin.containsKey('core') ? plugin['core'] : {}),
     macosMode: macosMode,
+    hasCoreSelection: plugin.containsKey('core'),
   );
 }
 

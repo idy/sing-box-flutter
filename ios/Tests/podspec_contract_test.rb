@@ -34,15 +34,27 @@ Dir.mktmpdir('sing box pod contract ') do |directory|
     end
     raise 'Invalid receipt unexpectedly accepted'
   end
-  legacy = load_spec.call
-  raise 'Plugin links core' unless legacy.subspec_by_name('sing_box_flutter/Plugin').dependencies.map(&:name).sort == ['Flutter', 'sing_box_flutter/Shared']
-  raise 'Legacy framework absent' unless legacy.subspec_by_name('sing_box_flutter/Core').consumer(:ios).vendored_frameworks == ['Frameworks/Libbox.xcframework']
-  legacy_shared = legacy.subspec_by_name('sing_box_flutter/Shared').consumer(:ios)
-  raise 'Legacy resources changed' unless legacy_shared.resource_bundles == {
-    'sing_box_flutter_capabilities' => ['Resources/core-capabilities.json'],
-    'sing_box_flutter_privacy' => ['sing_box_flutter/Sources/sing_box_flutter/PrivacyInfo.xcprivacy']
-  } && legacy_shared.script_phases.empty?
-  raise 'Legacy extension staging removed' unless legacy.subspec_by_name('sing_box_flutter/PacketTunnel').consumer(:ios).pod_target_xcconfig.key?('PODS_XCFRAMEWORKS_BUILD_DIR')
+  assert_legacy = lambda do
+    legacy = load_spec.call
+    raise 'Plugin links core' unless legacy.subspec_by_name('sing_box_flutter/Plugin').dependencies.map(&:name).sort == ['Flutter', 'sing_box_flutter/Shared']
+    raise 'Legacy framework absent' unless legacy.subspec_by_name('sing_box_flutter/Core').consumer(:ios).vendored_frameworks == ['Frameworks/Libbox.xcframework']
+    legacy_shared = legacy.subspec_by_name('sing_box_flutter/Shared').consumer(:ios)
+    raise 'Legacy resources changed' unless legacy_shared.resource_bundles == {
+      'sing_box_flutter_capabilities' => ['Resources/core-capabilities.json'],
+      'sing_box_flutter_privacy' => ['sing_box_flutter/Sources/sing_box_flutter/PrivacyInfo.xcprivacy']
+    } && legacy_shared.script_phases.empty?
+    raise 'Legacy extension staging removed' unless legacy.subspec_by_name('sing_box_flutter/PacketTunnel').consumer(:ios).pod_target_xcconfig.key?('PODS_XCFRAMEWORKS_BUILD_DIR')
+  end
+  assert_legacy.call
+  # A backend-only host must keep the legacy iOS distribution without a receipt.
+  ['{}', '{mode: ne}', '{mode: user_tun}'].each do |macos|
+    pubspec.write("name: fixture\nsing_box_flutter:\n  macos: #{macos}\n")
+    assert_legacy.call
+  end
+  ["macos: null", "macos: {mode: invalid}", "macos: {mode: ne, extra: true}", "macoss: {}"].each do |block|
+    pubspec.write("name: fixture\nsing_box_flutter:\n  #{block}\n")
+    rejected.call
+  end
   pubspec.write("name: fixture\nrelease_date: 2026-11-09\ngenerated_at: 2026-11-09T12:00:00Z\n")
   load_spec.call # Date-like custom metadata is valid in Dart/Flutter.
   pubspec.write("name: fixture\ncustom: !ruby/object:Object {}\n")
@@ -113,16 +125,15 @@ Dir.mktmpdir('sing box pod contract ') do |directory|
   save_receipt = -> { receipt_path.write(JSON.generate(receipt)) }
   save_receipt.call
   selected = load_spec.call
-  # A host's macOS selection must not change the iOS source/link split. Empty
-  # macOS mappings and macOS-only blocks use the same canonical core defaults.
+  # An explicit core remains global when a macOS backend is also configured.
   original_pubspec = pubspec.read
   original_metadata = metadata.read
   original_manifest = manifest.read
   original_receipt = JSON.generate(receipt)
   [
     ["  core: {}\n  macos: {mode: ne}\n", 'ne'],
-    ["  macos: {}\n", 'ne'],
-    ["  macos: {mode: user_tun}\n", 'user_tun']
+    ["  core: {}\n  macos: {}\n", 'ne'],
+    ["  core: {}\n  macos: {mode: user_tun}\n", 'user_tun']
   ].each do |block, mode|
     pubspec.write("name: fixture\nsing_box_flutter:\n#{block}")
     output, error, status = Open3.capture3('python3', '-I', '-c', fixture_code, source_root, JSON.generate({ 'mode' => mode }))
@@ -137,10 +148,24 @@ Dir.mktmpdir('sing box pod contract ') do |directory|
     save_receipt.call
     cross_platform = load_spec.call
     raise 'macOS mode changed iOS plugin linkage' unless cross_platform.subspec_by_name('sing_box_flutter/Plugin').dependencies.map(&:name).sort == ['Flutter', 'sing_box_flutter/Shared']
+    raise 'Explicit core no longer selects iOS' unless cross_platform.subspec_by_name('sing_box_flutter/Core').consumer(:ios).vendored_frameworks.empty?
   end
   pubspec.write(original_pubspec)
   metadata.write(original_metadata)
   manifest.write(original_manifest)
+  receipt = JSON.parse(original_receipt)
+  save_receipt.call
+  # An unrelated macOS-only receipt, and even an obsolete selected iOS receipt,
+  # must not convert a host without a core block into selected iOS mode.
+  ['{}', '{mode: ne}', '{mode: user_tun}'].each do |macos|
+    pubspec.write("name: fixture\nsing_box_flutter:\n  macos: #{macos}\n")
+    assert_legacy.call
+    receipt['artifacts'] = { 'macos' => JSON.parse(original_receipt)['artifacts']['apple'] }
+    receipt['pubspec_sha256'] = Digest::SHA256.file(pubspec).hexdigest
+    save_receipt.call
+    assert_legacy.call
+  end
+  pubspec.write(original_pubspec)
   receipt = JSON.parse(original_receipt)
   save_receipt.call
   core = selected.subspec_by_name('sing_box_flutter/Core').consumer(:ios)
@@ -270,10 +295,11 @@ Dir.mktmpdir('sing box pod contract ') do |directory|
   receipt_path.write('{broken')
   rejected.call
   # An obsolete selected receipt must not block an intentional return to legacy.
-  ["name: fixture\n", "name: fixture\nsing_box_flutter: {}\n"].each do |text|
+  ["name: fixture\n", "name: fixture\nsing_box_flutter: {}\n",
+   "name: fixture\nsing_box_flutter:\n  macos: {}\n",
+   "name: fixture\nsing_box_flutter:\n  macos: {mode: user_tun}\n"].each do |text|
     pubspec.write(text)
-    standard = load_spec.call.subspec_by_name('sing_box_flutter/Core').consumer(:ios)
-    raise 'Legacy transition still uses selected receipt' unless standard.vendored_frameworks == ['Frameworks/Libbox.xcframework']
+    assert_legacy.call
   end
   puts 'Podspec contract passed: isolation, selected slices, manifest copy and fail-closed receipt handling.'
 end

@@ -38,7 +38,9 @@ Dir.mktmpdir('sing box macos pod contract ') do |directory|
    "name: fixture\nsing_box_flutter:\n  macos: {mode: invalid}\n",
    "name: fixture\nsing_box_flutter:\n  macos: {mode: ne, extra: true}\n",
    "name: fixture\nsing_box_flutter:\n  macos: null\n",
-   "name: fixture\nsing_box_flutter:\n  macos: {mode: null}\n"].each do |text|
+   "name: fixture\nsing_box_flutter:\n  macos: {mode: null}\n",
+   "name: fixture\nsing_box_flutter:\n  macos: {}\n",
+   "name: fixture\nsing_box_flutter:\n  macos: {mode: user_tun}\n"].each do |text|
     pubspec.write(text)
     rejected.call
   end
@@ -103,6 +105,14 @@ Dir.mktmpdir('sing box macos pod contract ') do |directory|
     )
     receipt['macos'] = { 'mode' => mode } unless mode == 'implicit'
     save.call
+    unless block.include?('core:')
+      # Exercise the reported sequence with a genuine macOS-only receipt:
+      # building macOS must leave the same host's iOS pod on legacy artifacts.
+      ios = Pod::Specification.from_file(File.join(source_root, 'ios/sing_box_flutter.podspec'))
+      raise 'macOS-only receipt selected iOS core' unless ios.subspec_by_name('sing_box_flutter/Core').consumer(:ios).vendored_frameworks == ['Frameworks/Libbox.xcframework']
+      shared_ios = ios.subspec_by_name('sing_box_flutter/Shared').consumer(:ios)
+      raise 'macOS-only receipt installed selected iOS guards' unless shared_ios.script_phases.empty? && shared_ios.resource_bundles['sing_box_flutter_capabilities'] == ['Resources/core-capabilities.json']
+    end
     load_spec.call
   end
 

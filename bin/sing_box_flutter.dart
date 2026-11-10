@@ -22,12 +22,14 @@ Requires Python 3.11+ and Git, plus JDK 17/Android SDK/NDK for Android or
 macOS/Xcode for Apple. No global Go or separate runtime Go installation is needed.
 0.3.0 releases contain source/build scripts, with no precompiled native SDK assets.
 
-Legacy standard core (hosts without sing_box_flutter.core or .macos):
+Legacy iOS/Android standard core (hosts without sing_box_flutter.core):
   dart run sing_box_flutter install --target android --release v0.2.0
   dart run sing_box_flutter install --target apple --release v0.2.0
 
 install: download and verify historical native release artifacts (Python 3.11+).
-Without a feature selection, build retains the legacy standard source-build path.
+Without a core block, mobile targets retain the legacy standard build/install path.
+A macos-only block builds source defaults for --target macos; run mobile targets
+separately. Mixed legacy/source selections require an explicit platform target.
 Selected cores require build; install cannot satisfy a host feature selection.
 Pass --help after a subcommand for its options.''');
     return;
@@ -62,7 +64,9 @@ Pass --help after a subcommand for its options.''');
       final snapshot = invocation.pubspec == null
           ? null
           : readCoreBuildSnapshot(invocation.pubspec!);
-      if (snapshot != null) {
+      final selected = snapshot != null &&
+          (snapshot.hasCoreSelection || _macosOnlySourceTarget(forwarded));
+      if (snapshot != null && selected) {
         if (arguments.first == 'install') {
           throw const FormatException(
               'Custom core selections have no matching release artifacts. '
@@ -118,6 +122,45 @@ Pass --help after a subcommand for its options.''');
       request.parent.deleteSync(recursive: true);
     }
   }
+}
+
+/// A backend-only selection combines legacy mobile and selected macOS cores.
+/// Require one explicit target so `all` cannot change mobile capabilities or
+/// report success while omitting the configured macOS core.
+bool _macosOnlySourceTarget(List<String> arguments) {
+  String? target;
+  for (var index = 0; index < arguments.length; index++) {
+    final argument = arguments[index];
+    final option = argument.split('=').first;
+    if (option != '--target') {
+      // argparse accepts unique option abbreviations; allowing them here could
+      // override the platform used to choose the native setup script.
+      if (option.length > 2 && '--target'.startsWith(option)) {
+        throw const FormatException('Use the full --target option.');
+      }
+      continue;
+    }
+    if (target != null) throw const FormatException('Duplicate --target');
+    if (argument.contains('=')) {
+      target = argument.substring(option.length + 1);
+    } else {
+      if (++index >= arguments.length) {
+        throw const FormatException('--target requires a platform');
+      }
+      target = arguments[index];
+    }
+    if (!['android', 'apple', 'macos', 'all'].contains(target)) {
+      throw const FormatException(
+          '--target must be android, apple, macos or all');
+    }
+  }
+  if (target == null || target == 'all') {
+    throw const FormatException(
+        'A macos-only configuration mixes legacy mobile and source macOS cores. '
+        'Use an explicit --target android or --target apple for legacy setup, '
+        'and build --target macos separately.');
+  }
+  return target == 'macos';
 }
 
 /// Resolves CLI-owned host selectors while preserving legacy tool arguments.

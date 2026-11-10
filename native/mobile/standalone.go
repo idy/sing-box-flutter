@@ -176,7 +176,7 @@ func (s *CommandServer) PrepareService(config string, overrides *OverrideOptions
 		if !retained {
 			cancel()
 			if engine != nil {
-				_ = engine.Close()
+				_ = s.closeMobileEngine(engine)
 			}
 			s.state.Lock()
 			s.cancel = nil

@@ -337,7 +337,7 @@ def update_receipt(project: Path, capabilities: dict, requested: dict, artifacts
                "pubspec_sha256": current_pubspec,
                "artifacts": {**retained, **artifacts}}
     for target, platform in (("apple", "ios"), ("macos", "macos")):
-        if target in artifacts and _pod_selection(previous, target) != _pod_selection(updated, target):
+        if _pod_selection(previous, target) != _pod_selection(updated, target):
             # Refresh before publishing the new pointer. If refresh fails, the
             # old receipt remains so a retry cannot mistake stale Pods for current.
             invalidate_pods(project, platform)

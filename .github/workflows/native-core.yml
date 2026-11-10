@@ -267,6 +267,9 @@ jobs:
           ruby example/macos/configure_project_test.rb
           ruby macos/Tests/podspec_contract_test.rb
           bash macos/Tests/run-native-smoke.sh "$GITHUB_WORKSPACE/example"
+      - name: Check iOS artifact contracts
+        if: matrix.mode == 'ne'
+        run: ruby ios/Tests/podspec_contract_test.rb
       - name: Compile macOS host and selected extension without signing
         working-directory: example
         run: |

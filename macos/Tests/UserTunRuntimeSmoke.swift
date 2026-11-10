@@ -42,12 +42,13 @@ enum UserTunRuntimeSmoke {
         let hasTun: Bool
         let prepareFails: Bool
         let activateFails: Bool
+        let closeFails: Bool
         private let lock = NSLock()
         private var closed = false
         private var closes = 0
         private var dnsFailure: (() -> Void)?
 
-        init(blockPrepare: Bool = false, blockActivate: Bool = false, blockClose: Bool = false, holdActivationAfterClose: Bool = false, hasTun: Bool = true, prepareFails: Bool = false, activateFails: Bool = false) {
+        init(blockPrepare: Bool = false, blockActivate: Bool = false, blockClose: Bool = false, holdActivationAfterClose: Bool = false, hasTun: Bool = true, prepareFails: Bool = false, activateFails: Bool = false, closeFails: Bool = false) {
             self.blockPrepare = blockPrepare
             self.blockActivate = blockActivate
             self.blockClose = blockClose
@@ -55,6 +56,7 @@ enum UserTunRuntimeSmoke {
             self.hasTun = hasTun
             self.prepareFails = prepareFails
             self.activateFails = activateFails
+            self.closeFails = closeFails
         }
         var closeCount: Int { lock.lock(); defer { lock.unlock() }; return closes }
         func prepare(_ config: String) throws -> UserTunDNSPlan {
@@ -79,6 +81,7 @@ enum UserTunRuntimeSmoke {
             prepareGate.signal()
             if !holdActivationAfterClose { activateGate.signal() }
             if blockClose { userTunRequire(closeGate.wait(timeout: .now() + 5) == .success) }
+            if closeFails { throw NSError(domain: "private-close-config-credential", code: 1) }
         }
         func failDNS() { lock.lock(); let callback = dnsFailure; lock.unlock(); callback?() }
     }
@@ -180,9 +183,149 @@ enum UserTunRuntimeSmoke {
         _ = await call(failedRuntime, "stop")
 
         await checkTests()
+        await closeFailureTests()
+        try await nativeCloseTests()
         try await dnsTests()
         try await pathTests()
-        print("Fake user_tun runtime: responsive stop/status, exclusive validation, generations, DNS ownership/recovery and IPv6 paths passed without host network writes.")
+        print("Fake user_tun runtime: responsive stop/status, exclusive validation, permanent close failures, replacement guards, generations, DNS ownership/recovery and IPv6 paths passed without host network writes.")
+    }
+
+    private static func requireStopFailure(_ value: Any?) {
+        let error = value as? FlutterError
+        userTunRequire(error?.code == UserTunRuntime.stopFailed.code)
+        userTunRequire(error?.message == UserTunRuntime.stopFailed.message && error?.details == nil)
+    }
+
+    private final class Completion {
+        private let lock = NSLock()
+        private var done = false
+        func finish() { lock.lock(); done = true; lock.unlock() }
+        var finished: Bool { lock.lock(); defer { lock.unlock() }; return done }
+    }
+
+    private static func closeFailureTests() async {
+        let connected = FakeService(closeFails: true)
+        var constructions = 0
+        var checks = 0
+        let (connectedRuntime, connectedStatuses) = await runtime({ constructions += 1; return connected }, check: { _ in checks += 1 })
+        userTunRequire(await call(connectedRuntime, "start", startArguments) == nil)
+        userTunRequire(await eventually { connectedStatuses.states.last == "connected" })
+        requireStopFailure(await call(connectedRuntime, "stop"))
+        for _ in 0..<2 { requireStopFailure(await call(connectedRuntime, "stop")) }
+        userTunRequire(await call(connectedRuntime, "initialize") == nil)
+        requireStopFailure(await call(connectedRuntime, "start", startArguments))
+        requireStopFailure(await call(connectedRuntime, "checkConfig", ["config": "valid"]))
+        let status = await call(connectedRuntime, "getStatus") as? [String: Any]
+        userTunRequire(status?["state"] as? String == "error" && status?["message"] as? String == UserTunRuntime.stopFailed.message)
+        userTunRequire(constructions == 1 && checks == 0 && connected.closeCount == 1)
+
+        // Native close can fail while startup still owns its worker. Report the
+        // sanitized error promptly, but keep every stop reply and replacement
+        // behind the same two-worker barrier, including repeated stop requests.
+        let activating = FakeService(blockActivate: true, blockClose: true, holdActivationAfterClose: true, closeFails: true)
+        let (activatingRuntime, activatingStatuses) = await runtime({ activating })
+        userTunRequire(await call(activatingRuntime, "start", startArguments) == nil)
+        userTunRequire(await signalled(activating.activateEntered))
+        let firstCompletion = Completion()
+        let firstStop = Task { let value = await call(activatingRuntime, "stop"); firstCompletion.finish(); return value }
+        userTunRequire(await signalled(activating.closeEntered))
+        userTunRequire((await call(activatingRuntime, "getStatus") as? [String: Any])?["state"] as? String == "disconnecting")
+        userTunRequire((await call(activatingRuntime, "start", startArguments) as? FlutterError)?.code == "busy")
+        activating.closeGate.signal()
+        userTunRequire(await eventually { activatingStatuses.states.last == "error" })
+        userTunRequire(!firstCompletion.finished, "stop returned before the startup worker drained")
+        userTunRequire((await call(activatingRuntime, "start", startArguments) as? FlutterError)?.code == "busy")
+        let secondStop = Task { await call(activatingRuntime, "stop") }
+        activating.activateGate.signal()
+        requireStopFailure(await firstStop.value)
+        requireStopFailure(await secondStop.value)
+        requireStopFailure(await call(activatingRuntime, "stop"))
+        requireStopFailure(await call(activatingRuntime, "start", startArguments))
+        userTunRequire(!activatingStatuses.states.contains("connected") && activating.closeCount == 1)
+
+        // Preparation errors still answer the original start with its own
+        // failure, then poison replacement only if the required cleanup fails.
+        let preparing = FakeService(prepareFails: true, closeFails: true)
+        let (preparingRuntime, preparingStatuses) = await runtime({ preparing })
+        userTunRequire((await call(preparingRuntime, "start", startArguments) as? FlutterError)?.code == "invalid_config")
+        userTunRequire(await eventually { preparingStatuses.states.last == "error" })
+        requireStopFailure(await call(preparingRuntime, "stop"))
+        requireStopFailure(await call(preparingRuntime, "start", startArguments))
+        userTunRequire(!preparingStatuses.states.contains("connecting") && preparing.closeCount == 1)
+
+        // Validation owns the same native directories and must retain its close
+        // failure too, even though no tunnel session has been published.
+        var validationCalls = 0
+        let (checkingRuntime, checkingStatuses) = await runtime({ preconditionFailure("failed validation allowed a replacement") }, check: { _ in
+            validationCalls += 1
+            throw UserTunRuntime.stopFailed
+        })
+        requireStopFailure(await call(checkingRuntime, "checkConfig", ["config": "valid"]))
+        requireStopFailure(await call(checkingRuntime, "checkConfig", ["config": "valid"]))
+        requireStopFailure(await call(checkingRuntime, "start", startArguments))
+        requireStopFailure(await call(checkingRuntime, "stop"))
+        userTunRequire(validationCalls == 1 && checkingStatuses.states.last == "error")
+    }
+
+    private final class FakeNativeCloser {
+        let entered = DispatchSemaphore(value: 0)
+        let gate = DispatchSemaphore(value: 0)
+        let block: Bool
+        let fails: Bool
+        private let lock = NSLock()
+        private var calls = 0
+        init(fails: Bool, block: Bool = false) { self.fails = fails; self.block = block }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
+        func close(_ server: LibboxCommandServer) throws {
+            lock.lock(); calls += 1; lock.unlock()
+            // Construction/closing an empty standalone server opens no tunnel.
+            // Keep the real native allocation drained while injecting failure.
+            try server.closeWithError()
+            entered.signal()
+            if block { userTunRequire(gate.wait(timeout: .now() + 5) == .success) }
+            if fails { throw NSError(domain: "private-native-close-credential", code: 1) }
+        }
+    }
+
+    private static func serviceClose(_ service: UserTunService) async -> TunnelFailure? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                do { try service.close(); continuation.resume(returning: nil) }
+                catch { continuation.resume(returning: error as? TunnelFailure ?? TunnelFailure.invalidConfig) }
+            }
+        }
+    }
+
+    private static func nativeCloseTests() async throws {
+        for (dnsFails, nativeFails) in [(false, false), (true, false), (false, true), (true, true)] {
+            let store = FakeDNSStore()
+            let dns = UserTunDNSController { _, _, _ in store }
+            try dns.install(servers: ["172.19.0.2"]) {}
+            store.failRemove = dnsFails
+            let native = FakeNativeCloser(fails: nativeFails)
+            let service = try NativeUserTunService(dns: dns, closeNative: native.close)
+            for _ in 0..<2 {
+                let failure = await serviceClose(service)
+                if dnsFails || nativeFails {
+                    userTunRequire(failure?.code == UserTunRuntime.stopFailed.code && failure?.message == UserTunRuntime.stopFailed.message)
+                } else { userTunRequire(failure == nil) }
+            }
+            userTunRequire(store.closeCount == 1 && native.count == 1, "one cleanup failure skipped or retried another subsystem")
+            userTunRequire(store.value(forKey: store.addKeys[0]) == nil)
+            do { _ = try service.prepare("private-config"); preconditionFailure("closed service prepared again") }
+            catch { userTunRequire((error as? TunnelFailure)?.code == UserTunRuntime.cancelled.code) }
+        }
+
+        let native = FakeNativeCloser(fails: true, block: true)
+        let service = try NativeUserTunService(closeNative: native.close)
+        let first = Task { await serviceClose(service) }
+        userTunRequire(await signalled(native.entered))
+        let second = Task { await serviceClose(service) }
+        native.gate.signal()
+        let firstFailure = await first.value
+        let secondFailure = await second.value
+        userTunRequire(firstFailure?.code == UserTunRuntime.stopFailed.code && secondFailure?.code == UserTunRuntime.stopFailed.code)
+        userTunRequire(firstFailure?.message == secondFailure?.message && native.count == 1)
     }
 
     private final class FakeChecker {

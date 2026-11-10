@@ -72,6 +72,7 @@ class MacOSExampleProjectTest < Minitest::Test
     [project, *project.targets].each do |target|
       target.build_configurations.each do |configuration|
         assert_equal '12.0', configuration.build_settings['MACOSX_DEPLOYMENT_TARGET']
+        refute_equal '-', configuration.build_settings['CODE_SIGN_IDENTITY'] if ne_mode
       end
     end
     extension.build_configurations.each do |configuration|
@@ -123,6 +124,28 @@ class MacOSExampleProjectTest < Minitest::Test
             assert_equal ['$(inherited)', '@loader_path/CustomFrameworks'], configuration.build_settings['LD_RUNPATH_SEARCH_PATHS']
           end
         end
+      end
+    end
+  end
+
+  def test_ne_removes_only_ad_hoc_signing_defaults
+    select_mode('user_tun')
+    project = configure
+    [project, *project.targets].each do |target|
+      target.build_configurations.each do |configuration|
+        configuration.build_settings['CODE_SIGN_IDENTITY'] = '-'
+      end
+    end
+    project.save
+    # Direct TUN hosts may still choose ad-hoc signing deliberately.
+    configure.build_configurations.each do |configuration|
+      assert_equal '-', configuration.build_settings['CODE_SIGN_IDENTITY']
+    end
+    select_mode('ne')
+    project = configure
+    [project, *project.targets].each do |target|
+      target.build_configurations.each do |configuration|
+        refute_equal '-', configuration.build_settings['CODE_SIGN_IDENTITY']
       end
     end
   end

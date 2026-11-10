@@ -145,6 +145,36 @@ class HostArtifacts(unittest.TestCase):
         self.assertFalse((self.host / "macos/Pods/Manifest.lock").exists())
         self.assertEqual((self.host / "ios/Pods/Manifest.lock").read_text(), "installed selection")
 
+    def test_metadata_change_refreshes_both_retained_apple_artifacts(self):
+        entries = {target: self.publish_apple(target) for target in ("apple", "macos")}
+        update_receipt(self.host, self.capabilities, {}, entries)
+        for platform in ("ios", "macos"):
+            pods = self.host / platform / "Pods"
+            pods.mkdir(parents=True)
+            (pods / "Manifest.lock").write_text("old pubspec selection")
+            (pods.parent / "Podfile.lock").write_text("locked versions")
+        (self.host / "pubspec.yaml").write_text("name: changed_metadata\n")
+        update_receipt(self.host, self.capabilities, {}, {"android": self.publish()})
+        receipt = json.loads((self.host / RECEIPT).read_text())
+        self.assertEqual(set(receipt["artifacts"]), {"android", "apple", "macos"})
+        for platform in ("ios", "macos"):
+            self.assertFalse((self.host / platform / "Pods/Manifest.lock").exists())
+            self.assertEqual((self.host / platform / "Podfile.lock").read_text(), "locked versions")
+
+    def test_profile_change_refreshes_pods_for_removed_apple_selections(self):
+        entries = {target: self.publish_apple(target) for target in ("apple", "macos")}
+        update_receipt(self.host, self.capabilities, {}, entries)
+        for platform in ("ios", "macos"):
+            pods = self.host / platform / "Pods"
+            pods.mkdir(parents=True)
+            (pods / "Manifest.lock").write_text("retired selection")
+        changed = {**self.capabilities, "fingerprint": "b" * 64}
+        entry = publish_artifact(self.host, self.aar, "android", changed, {}, {})
+        update_receipt(self.host, changed, {}, {"android": entry})
+        self.assertEqual(set(json.loads((self.host / RECEIPT).read_text())["artifacts"]), {"android"})
+        for platform in ("ios", "macos"):
+            self.assertFalse((self.host / platform / "Pods/Manifest.lock").exists())
+
     def test_pubspec_change_refreshes_pods_even_for_cached_native_bytes(self):
         entry = self.publish_apple("macos")
         update_receipt(self.host, self.capabilities, {}, {"macos": entry})

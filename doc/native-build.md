@@ -171,9 +171,12 @@ and rerun. Do not replace it with a stock Go installation.
 
 ## Legacy standard-core build and install
 
-Hosts without either `sing_box_flutter.core` or `sing_box_flutter.macos` retain the
-historical Android/iOS standard build/install path. This compatibility path does not provide 0.3.0 SDK downloads
-and cannot satisfy a custom host selection.
+Android/iOS hosts without `sing_box_flutter.core` retain the historical standard
+build/install path, even when a `sing_box_flutter.macos` block configures macOS.
+A macOS-only block selects source defaults only for `build --target macos`; use
+explicit platform targets in this mixed setup instead of `all` or an omitted
+target. This compatibility path does not provide 0.3.0 SDK downloads and cannot
+satisfy a custom host feature selection.
 
 ### Build the standard core from source
 

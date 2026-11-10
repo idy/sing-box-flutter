@@ -38,6 +38,7 @@ final class UserTunRuntime {
         var phase = Phase.preparing
         var workerFinished = false
         var closeFinished = false
+        var closeFailure: TunnelFailure?
         var finalStatus: TunnelStatus?
         var finalStatusEmitted = false
         var startReply: FlutterResult?
@@ -52,6 +53,10 @@ final class UserTunRuntime {
     private var initialized = false
     private var session: Session?
     private var checking = false
+    // An engine can fail after partially releasing its resources. Until process
+    // restart, keep the failure even after both workers finish and reject any
+    // operation that could construct a replacement native engine.
+    private var teardownFailure: TunnelFailure?
     private var status = TunnelStatus("disconnected")
     private var observers: [UUID: (TunnelStatus) -> Void] = [:]
 
@@ -103,6 +108,7 @@ final class UserTunRuntime {
         // native setup directories. Reserve it until cleanup has returned, just
         // as a session owns those resources through both teardown workers.
         guard session == nil, !checking else { throw TunnelFailure.busy }
+        if let teardownFailure { throw teardownFailure }
         checking = true
         workers.async {
             var failure: TunnelFailure?
@@ -111,6 +117,10 @@ final class UserTunRuntime {
             let outcome = failure
             self.queue.async {
                 self.checking = false
+                if outcome?.code == Self.stopFailed.code {
+                    self.teardownFailure = Self.stopFailed
+                    self.emit(TunnelStatus("error", message: Self.stopFailed.message))
+                }
                 self.reply(result, failure: outcome)
             }
         }
@@ -122,6 +132,7 @@ final class UserTunRuntime {
         guard let config = arguments["config"] as? String, !config.isEmpty,
               let name = arguments["name"] as? String, !name.isEmpty else { throw TunnelFailure.invalidArguments }
         guard session == nil, !checking else { throw TunnelFailure.busy }
+        if let teardownFailure { throw teardownFailure }
         let current = Session(service: try dependencies.makeService(), reply: result)
         session = current // Establish cancellation ownership before entering Go.
         workers.async {
@@ -189,13 +200,19 @@ final class UserTunRuntime {
 
     private func stop(reply result: @escaping FlutterResult) {
         guard let current = session else {
-            emit(TunnelStatus("disconnected"))
-            reply(result)
+            if let teardownFailure {
+                emit(TunnelStatus("error", message: teardownFailure.message))
+                reply(result, failure: teardownFailure)
+            } else {
+                emit(TunnelStatus("disconnected"))
+                reply(result)
+            }
             return
         }
         current.stopReplies.append(result)
         finishStart(current, failure: Self.cancelled)
-        emit(TunnelStatus("disconnecting"))
+        if let failure = current.closeFailure { emit(TunnelStatus("error", message: failure.message)) }
+        else { emit(TunnelStatus("disconnecting")) }
         beginTeardown(current, finalStatus: TunnelStatus("disconnected"))
     }
 
@@ -221,8 +238,8 @@ final class UserTunRuntime {
                 guard self.session === current else { return }
                 current.closeFinished = true
                 if closeFailed {
-                    current.finalStatus = TunnelStatus("error", message: "The macOS user_tun service could not be stopped cleanly.")
-                    current.finalStatusEmitted = false
+                    current.closeFailure = Self.stopFailed
+                    self.emit(TunnelStatus("error", message: Self.stopFailed.message))
                 }
                 self.finishTeardown(current)
             }
@@ -232,12 +249,15 @@ final class UserTunRuntime {
     private func finishTeardown(_ current: Session) {
         guard session === current, current.closeFinished, current.workerFinished else { return }
         session = nil // A replacement cannot start until both workers are done.
-        if let finalStatus = current.finalStatus, !current.finalStatusEmitted { emit(finalStatus) }
-        for result in current.stopReplies {
-            if current.finalStatus?.state == "error" {
-                reply(result, failure: TunnelFailure(code: "core_stop_failed", message: "The macOS user_tun service could not be stopped cleanly."))
-            } else { reply(result) }
+        if let failure = current.closeFailure {
+            // Separate the close outcome from requested finalStatus: a repeated
+            // stop while the startup worker drains must not overwrite failure.
+            teardownFailure = failure
+            emit(TunnelStatus("error", message: failure.message))
+        } else if let finalStatus = current.finalStatus, !current.finalStatusEmitted {
+            emit(finalStatus)
         }
+        for result in current.stopReplies { reply(result, failure: current.closeFailure) }
         current.stopReplies.removeAll()
     }
 
@@ -263,6 +283,7 @@ final class UserTunRuntime {
     static let missingTun = TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound in the macOS user_tun backend.")
     static let cancelled = TunnelFailure(code: "operation_cancelled", message: "The macOS user_tun startup was stopped.")
     static let startFailed = TunnelFailure(code: "core_start_failed", message: "sing-box could not start macOS user_tun. Check the configuration and run the host as root without App Sandbox.")
+    static let stopFailed = TunnelFailure(code: "core_stop_failed", message: "The macOS user_tun service could not be stopped cleanly. Restart the host process before starting another tunnel.")
     private static let permissionRequired = TunnelFailure(code: "permission_required", message: "macOS user_tun requires an already elevated, unsandboxed process running as root. This plugin does not elevate privileges.")
 
     private static func runtimeDirectory() throws -> URL {

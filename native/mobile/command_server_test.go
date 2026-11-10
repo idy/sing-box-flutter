@@ -20,6 +20,7 @@ const lifecycleTestConfig = `{"route":{"final":"fixture"}}`
 type fakeMobileEngine struct {
 	ctx    context.Context
 	start  func() error
+	close  func() error
 	closed atomic.Int32
 	pauses atomic.Int32
 	wakes  atomic.Int32
@@ -31,7 +32,13 @@ func (e *fakeMobileEngine) Start() error {
 	}
 	return nil
 }
-func (e *fakeMobileEngine) Close() error { e.closed.Add(1); return nil }
+func (e *fakeMobileEngine) Close() error {
+	e.closed.Add(1)
+	if e.close != nil {
+		return e.close()
+	}
+	return nil
+}
 func (e *fakeMobileEngine) Pause() {
 	if e.closed.Load() != 0 {
 		panic("pause after close")
@@ -171,6 +178,153 @@ func TestConstructorFailureClosesReturnedResources(t *testing.T) {
 	}
 	if engine.closed.Load() != 1 {
 		t.Fatal("constructor resources leaked")
+	}
+}
+
+func requirePermanentCloseFailure(t *testing.T, server *CommandServer) {
+	t.Helper()
+	for range 3 {
+		err := server.CloseWithError()
+		if err == nil || err.Error() != "could not stop mobile service cleanly; restart the process" {
+			t.Fatalf("missing sanitized permanent close failure: %v", err)
+		}
+		server.Close() // The compatibility wrapper must not erase the result.
+	}
+	if server.Start() == nil || server.StartOrReloadService(lifecycleTestConfig, nil) == nil {
+		t.Fatal("failed cleanup allowed another service")
+	}
+	if _, err := server.PrepareService(lifecycleTestConfig, nil); err == nil {
+		t.Fatal("failed cleanup allowed preparation")
+	}
+	if err := server.CloseService(); err == nil || err.Error() != "could not stop mobile service cleanly; restart the process" {
+		t.Fatal("service close erased permanent failure")
+	}
+}
+
+func TestPermanentCloseKeepsActiveAndPreparedResults(t *testing.T) {
+	for _, phase := range []string{"active", "prepared"} {
+		for _, fails := range []bool{false, true} {
+			t.Run(phase+map[bool]string{false: "/success", true: "/failure"}[fails], func(t *testing.T) {
+				engine := &fakeMobileEngine{close: func() error {
+					if fails {
+						return errors.New("private-close-token")
+					}
+					return nil
+				}}
+				server := &CommandServer{standalone: true, newEngine: func(context.Context, PlatformInterface, option.Options) (mobileEngine, error) {
+					return engine, nil
+				}}
+				if phase == "active" {
+					if err := server.StartOrReloadService(lifecycleTestConfig, nil); err != nil {
+						t.Fatal(err)
+					}
+				} else if _, err := server.PrepareService(lifecycleTestConfig, nil); err != nil {
+					t.Fatal(err)
+				}
+				server.Close() // Legacy close must still preserve an inspectable result.
+				if fails {
+					requirePermanentCloseFailure(t, server)
+				} else {
+					for range 3 {
+						if err := server.CloseWithError(); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if engine.closed.Load() != 1 {
+					t.Fatal("permanent close retried cleanup")
+				}
+			})
+		}
+	}
+}
+
+func TestPermanentCloseKeepsCancelledStartupCleanupFailure(t *testing.T) {
+	for _, phase := range []string{"mobile", "prepare", "activate"} {
+		t.Run(phase, func(t *testing.T) {
+			entered := make(chan struct{})
+			engine := &fakeMobileEngine{close: func() error { return errors.New("private-close-token") }}
+			server := &CommandServer{standalone: phase != "mobile", newEngine: func(ctx context.Context, _ PlatformInterface, _ option.Options) (mobileEngine, error) {
+				block := func() error { close(entered); <-ctx.Done(); return errors.New("private-start-token") }
+				if phase == "prepare" {
+					return engine, block()
+				}
+				engine.start = block
+				return engine, nil
+			}}
+			started := make(chan error, 1)
+			go func() {
+				if phase == "mobile" {
+					started <- server.StartOrReloadService(lifecycleTestConfig, nil)
+					return
+				}
+				_, err := server.PrepareService(lifecycleTestConfig, nil)
+				if err == nil {
+					err = server.ActivateService()
+				}
+				started <- err
+			}()
+			receive(t, entered)
+			closed := make(chan error, 1)
+			go func() { closed <- server.CloseWithError() }()
+			if err := receive(t, closed); err == nil || strings.Contains(err.Error(), "private") {
+				t.Fatalf("cancelled startup lost cleanup error: %v", err)
+			}
+			if err := receive(t, started); err == nil || strings.Contains(err.Error(), "private") {
+				t.Fatalf("cancelled startup did not fail safely: %v", err)
+			}
+			requirePermanentCloseFailure(t, server)
+			if engine.closed.Load() != 1 {
+				t.Fatal("cancelled engine cleanup was retried")
+			}
+		})
+	}
+}
+
+func TestConcurrentPermanentCloseWaitsAndReturnsFailure(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	engine := &fakeMobileEngine{close: func() error {
+		close(entered)
+		<-release
+		return errors.New("private-close-token")
+	}}
+	server := &CommandServer{engine: engine, cancel: cancel}
+	results := make(chan error, 8)
+	for range cap(results) {
+		go func() { results <- server.CloseWithError() }()
+	}
+	receive(t, entered)
+	if ctx.Err() == nil || server.Start() == nil {
+		t.Fatal("permanent close did not cancel/close before blocking cleanup")
+	}
+	select {
+	case <-results:
+		t.Fatal("concurrent close returned before cleanup completed")
+	default:
+	}
+	close(release)
+	for range cap(results) {
+		if err := receive(t, results); err == nil || strings.Contains(err.Error(), "private") {
+			t.Fatalf("concurrent close lost sanitized failure: %v", err)
+		}
+	}
+	requirePermanentCloseFailure(t, server)
+	if engine.closed.Load() != 1 {
+		t.Fatal("concurrent close retried engine cleanup")
+	}
+}
+
+func TestServiceCloseFailurePoisonsServerAndDrainsBothOwners(t *testing.T) {
+	active := &fakeMobileEngine{close: func() error { return errors.New("private-token") }}
+	prepared := &fakeMobileEngine{}
+	server := &CommandServer{engine: active, prepared: &preparedStandaloneService{engine: prepared}}
+	if err := server.CloseService(); err == nil || strings.Contains(err.Error(), "private") {
+		t.Fatalf("service close lost cleanup failure: %v", err)
+	}
+	requirePermanentCloseFailure(t, server)
+	if active.closed.Load() != 1 || prepared.closed.Load() != 1 {
+		t.Fatal("failed cleanup skipped another owner or retried an engine")
 	}
 }
 

@@ -15,9 +15,13 @@ sing_box_flutter:
 ```
 
 The `core` categories have the same meaning as Android/iOS. A `macos` block
-without `core` uses the default TUN/direct/local-TCP-UDP DNS selection. This is
-not a runtime selector: changing the mode requires rebuilding the native core
-and Flutter app. Unknown modes or keys fail explicitly.
+without `core` uses the default TUN/direct/local-TCP-UDP DNS selection for macOS
+only; Android/iOS keep their legacy artifact path. In that mixed setup, pass an
+explicit `--target macos`, `android` or `apple`; `all` and an omitted target are
+rejected with guidance to build platforms separately. An explicit `core` block
+selects source features globally. This is not a runtime selector: changing the
+mode requires rebuilding the native core and Flutter app. Unknown modes or keys
+fail explicitly.
 
 Install Python 3.11+, Git, Xcode with its macOS SDK, and CocoaPods. Resolve packages
 and compile the universal arm64/x86_64 core from the host directory:
@@ -73,7 +77,9 @@ final class PacketTunnelProvider: SingBoxPacketTunnelProvider {}
 Set `NSExtensionPointIdentifier` to `com.apple.networkextension.packet-tunnel` and
 `NSExtensionPrincipalClass` to `$(PRODUCT_MODULE_NAME).PacketTunnelProvider` in the
 extension's Info.plist. Configure an Apple team and provisioning profiles that
-permit Network Extension and App Groups on both targets.
+permit Network Extension and App Groups on both targets. NE mode removes the
+Flutter template's ad-hoc `CODE_SIGN_IDENTITY = -` default so Xcode can select a
+real identity; explicit developer signing overrides are preserved.
 
 Initialize with the exact entitlement and extension identifiers. macOS also
 supports Team-ID-prefixed App Groups such as `ABCDE12345.com.example.shared`;
@@ -113,7 +119,11 @@ await vpn.initialize();
 checks reserve the native runtime through constructor cleanup: another check or
 start returns `busy` until validation finishes, and checks during connection
 startup, an active tunnel or teardown also return `busy`. Status queries and
-explicit stop requests remain responsive.
+explicit stop requests remain responsive. If validation or session teardown
+reports `core_stop_failed`, the runtime retains that sanitized error and refuses
+a replacement tunnel or another check until the host process is restarted.
+Both DNS and native cleanup are attempted, but a partly closed engine is not
+retried or treated as successfully disconnected.
 
 When automatic routing and DNS are enabled, the backend registers the effective
 TUN DNS addresses as a temporary system resolver. Stopping or failing startup

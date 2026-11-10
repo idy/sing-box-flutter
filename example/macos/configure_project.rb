@@ -74,6 +74,11 @@ module SingBoxFlutterMacOSExample
     [project, *project.targets].each do |target|
       target.build_configurations.each do |configuration|
         configuration.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '12.0'
+        # NE entitlements need a real identity selected by Xcode/provisioning.
+        # Retain developer overrides, but remove Flutter's ad-hoc template default.
+        if ne_mode && configuration.build_settings['CODE_SIGN_IDENTITY'] == '-'
+          configuration.build_settings.delete('CODE_SIGN_IDENTITY')
+        end
       end
     end
     runner.build_configurations.each do |configuration|

@@ -8,7 +8,11 @@ import 'package:path/path.dart' as p;
 import '../bin/sing_box_flutter.dart' as cli;
 
 Future<ProcessResult> _runBuild(
-    Directory host, Map<String, String> environment) async {
+  Directory host,
+  Map<String, String> environment, {
+  String command = 'build',
+  List<String> arguments = const ['--target', 'android'],
+}) async {
   final root = Directory.current.absolute;
   final packageConfig = File('${root.path}/.dart_tool/package_config.json');
   final packages =
@@ -23,14 +27,45 @@ Future<ProcessResult> _runBuild(
       [
         '--packages=${root.path}/.dart_tool/package_config.json',
         '${root.path}/bin/sing_box_flutter.dart',
-        'build',
+        command,
         '--project-dir',
         host.path,
-        '--target',
-        'android',
+        ...arguments,
       ],
       workingDirectory: host.path,
       environment: environment);
+}
+
+Map<String, String> _capturePython(Directory fixture, Directory host) {
+  final bin = Directory('${fixture.path}/bin')..createSync();
+  final shim = File('${bin.path}/python3')
+    ..writeAsStringSync(r'''#!/usr/bin/python3 -I
+import json
+import os
+from pathlib import Path
+import sys
+
+if sys.argv[1:3] == ['-I', '-c']:
+    if os.environ.get('MOCK_REWRITE'):
+        (Path(os.environ['MOCK_HOST']) / 'pubspec.yaml').write_text('sing_box_flutter:\n  core:\n    endpoints: [wgc]\n')
+    raise SystemExit(0)
+
+arguments = sys.argv[2:]
+request = None
+if '--features-file' in arguments:
+    request = json.loads(Path(arguments[arguments.index('--features-file') + 1]).read_text())
+Path(os.environ['MOCK_CAPTURE']).write_text(json.dumps({
+    'script': Path(sys.argv[1]).name,
+    'arguments': arguments,
+    'request': request,
+}))
+''');
+  Process.runSync('/bin/chmod', ['+x', shim.path]);
+  return {
+    'PATH': bin.path,
+    'MOCK_HOST': host.path,
+    'MOCK_CAPTURE': '${fixture.path}/capture.json',
+  };
 }
 
 void main() {
@@ -340,6 +375,141 @@ void main() {
     expect(invocation.pubspec!.path, pubspec.resolveSymbolicLinksSync());
     expect(invocation.pubspec!.parent.path, host.resolveSymbolicLinksSync());
   }, skip: Platform.isWindows);
+
+  for (final command in ['build', 'install']) {
+    for (final mode in ['ne', 'user_tun']) {
+      test('real CLI keeps $command mobile targets legacy with macos $mode',
+          () async {
+        final pubspec = File('${caller.path}/pubspec.yaml');
+        final python = _capturePython(fixture, caller);
+        for (final target in ['android', 'apple']) {
+          pubspec
+              .writeAsStringSync('sing_box_flutter:\n  macos: {mode: $mode}\n');
+          for (final targetArguments in [
+            ['--target', target],
+            ['--target=$target'],
+          ]) {
+            final arguments = [
+              ...targetArguments,
+              if (command == 'install') ...['--release', 'v0.2.0'],
+              '--dry-run',
+            ];
+            final result = await _runBuild(
+                caller,
+                {
+                  ...python,
+                  'MOCK_REWRITE': '1',
+                },
+                command: command,
+                arguments: arguments);
+            expect(result.exitCode, 0,
+                reason: '${result.stdout}\n${result.stderr}');
+            final observed =
+                jsonDecode(File(python['MOCK_CAPTURE']!).readAsStringSync());
+            expect(observed['script'],
+                command == 'build' ? 'build_libbox.py' : 'install_libbox.py');
+            expect(observed['arguments'], arguments);
+            expect(observed['request'], isNull);
+            expect(
+                Directory('${caller.path}/.dart_tool').existsSync(), isFalse);
+            pubspec.writeAsStringSync(
+                'sing_box_flutter:\n  macos: {mode: $mode}\n');
+          }
+        }
+      }, skip: Platform.isWindows || !File('/usr/bin/python3').existsSync());
+    }
+  }
+
+  for (final block in ['macos: {}', 'macos: {mode: user_tun}']) {
+    test('real CLI builds macOS source defaults with only $block', () async {
+      final original = utf8.encode('sing_box_flutter:\n  $block\n');
+      File('${caller.path}/pubspec.yaml').writeAsBytesSync(original);
+      final python = _capturePython(fixture, caller);
+      final result = await _runBuild(caller, {
+        ...python,
+        'MOCK_REWRITE': '1',
+      }, arguments: [
+        '--target=macos',
+        '--dry-run'
+      ]);
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+      final observed =
+          jsonDecode(File(python['MOCK_CAPTURE']!).readAsStringSync());
+      expect(observed['script'], 'build_core.py');
+      expect(observed['arguments'], contains('--target=macos'));
+      final request = observed['request'];
+      expect(request['schema'], 1);
+      expect(request.keys.toSet(), {'schema', 'pubspec', 'features', 'macos'});
+      expect(request['macos'],
+          {'mode': block.contains('user_tun') ? 'user_tun' : 'ne'});
+      expect(request['features']['inbounds'], ['tun']);
+      expect(request['features']['endpoints'], isEmpty);
+      expect(request['pubspec']['sha256'], sha256.convert(original).toString());
+      expect(Directory('${caller.path}/.dart_tool/sing_box_flutter').listSync(),
+          isEmpty);
+    }, skip: Platform.isWindows || !File('/usr/bin/python3').existsSync());
+  }
+
+  for (final command in ['build', 'install']) {
+    test('real CLI rejects mixed or ambiguous macos-only $command targets',
+        () async {
+      File('${caller.path}/pubspec.yaml')
+          .writeAsStringSync('sing_box_flutter:\n  macos: {}\n');
+      final python = _capturePython(fixture, caller);
+      for (final arguments in <List<String>>[
+        [],
+        ['--target', 'all'],
+        ['--target=all'],
+        ['--target=apple', '--target=macos'],
+        ['--target=macos', '--t=apple'],
+        ['--target='],
+        ['--target'],
+        ['--target=ios'],
+        if (command == 'install') ['--target=macos'],
+      ]) {
+        final result = await _runBuild(caller, python,
+            command: command, arguments: arguments);
+        expect(result.exitCode, 64,
+            reason: '$arguments: ${result.stdout}\n${result.stderr}');
+        if (arguments.isEmpty ||
+            arguments.contains('all') ||
+            arguments.contains('--target=all')) {
+          expect(result.stderr, contains('build --target macos separately'));
+          expect(result.stderr, contains('--target apple'));
+        }
+        expect(File(python['MOCK_CAPTURE']!).existsSync(), isFalse);
+        expect(Directory('${caller.path}/.dart_tool').existsSync(), isFalse);
+      }
+    }, skip: Platform.isWindows || !File('/usr/bin/python3').existsSync());
+  }
+
+  test('real CLI keeps explicit core global with a macOS backend', () async {
+    File('${caller.path}/pubspec.yaml').writeAsStringSync(
+        'sing_box_flutter:\n  macos: {mode: user_tun}\n  core: {}\n');
+    final python = _capturePython(fixture, caller);
+    for (final targetArguments in <List<String>>[
+      [],
+      ['--target=all'],
+      ['--target', 'android'],
+      ['--target=apple'],
+      ['--target=macos'],
+    ]) {
+      final result =
+          await _runBuild(caller, python, arguments: targetArguments);
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+      final capture = File(python['MOCK_CAPTURE']!);
+      final observed = jsonDecode(capture.readAsStringSync());
+      expect(observed['script'], 'build_core.py');
+      expect(observed['request']['macos'], {'mode': 'user_tun'});
+      expect((observed['arguments'] as List).skip(4).toList(), targetArguments);
+      capture.deleteSync();
+      final install = await _runBuild(caller, python,
+          command: 'install', arguments: targetArguments);
+      expect(install.exitCode, 64);
+      expect(install.stderr, contains('Use dart run sing_box_flutter build'));
+      expect(capture.existsSync(), isFalse);
+    }
+  }, skip: Platform.isWindows || !File('/usr/bin/python3').existsSync());
 
   for (final toolExit in [0, 73]) {
     test(
