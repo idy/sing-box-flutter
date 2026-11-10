@@ -217,7 +217,10 @@ type storageDirectoryInfo struct {
 }
 
 func storageDirectoryEntries(handle windows.Handle) ([]storageEntry, error) {
-	buffer := make([]byte, 64*1024)
+	// FILE_ID_BOTH_DIR_INFO requires DWORDLONG alignment. A byte array may be
+	// placed at an unaligned stack address even when its size is 64 KiB.
+	words := make([]uint64, 64*1024/8)
+	buffer := unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8)
 	class := uint32(windows.FileIdBothDirectoryRestartInfo)
 	var entries []storageEntry
 	for {
@@ -237,7 +240,7 @@ func storageDirectoryEntries(handle windows.Handle) ([]storageEntry, error) {
 			info := (*storageDirectoryInfo)(unsafe.Pointer(&buffer[offset]))
 			limit := uint32(len(buffer)) - offset
 			if info.NextEntryOffset != 0 {
-				if info.NextEntryOffset > limit || info.NextEntryOffset < nameOffset {
+				if info.NextEntryOffset > limit || info.NextEntryOffset < nameOffset || info.NextEntryOffset%8 != 0 {
 					return nil, errDirectories
 				}
 				limit = info.NextEntryOffset
