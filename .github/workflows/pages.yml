@@ -9,6 +9,7 @@ on:
       - tool/build_site.py
       - .github/workflows/pages.yml
       - .github/tests/test_website.py
+      - .github/workflows/native-core.yml
   pull_request:
     paths:
       - site/**
@@ -16,18 +17,17 @@ on:
       - tool/build_site.py
       - .github/workflows/pages.yml
       - .github/tests/test_website.py
+      - .github/workflows/native-core.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: project-website-${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && 'production' || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: ubuntu-24.04
+    outputs:
+      production: ${{ steps.production.outputs.eligible }}
     permissions:
       contents: read
       pages: read
@@ -36,23 +36,40 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
+      - name: Determine production deployment
+        id: production
+        env:
+          WORKFLOW_EVENT: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          # Actions expressions compare strings case-insensitively; Python does not.
+          eligible = (os.environ['WORKFLOW_REF'] == 'refs/heads/main' and
+                      os.environ['WORKFLOW_EVENT'] in ('push', 'workflow_dispatch'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('eligible=' + str(eligible).lower() + '\n')
+          PY
       - uses: actions/configure-pages@v5
         id: pages
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: steps.production.outputs.eligible == 'true'
       - name: Test website build invariants
         run: python3 -B -m unittest discover -s .github/tests -p 'test_website.py' -v
       - name: Build and validate static website
         env:
-          SITE_URL: ${{ steps.pages.outputs.base_url || 'https://idy.github.io/sing-box-flutter/' }}
+          SITE_URL: ${{ steps.pages.outputs.host && format('https://{0}{1}', steps.pages.outputs.host, steps.pages.outputs.base_path) || 'https://idy.github.io/sing-box-flutter/' }}
         run: python3 -B tool/build_site.py
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .build/site
 
   deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: needs.build.outputs.production == 'true'
     needs: build
     runs-on: ubuntu-24.04
+    concurrency:
+      group: project-website-production
+      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write

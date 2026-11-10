@@ -84,7 +84,8 @@ def build():
         encoding="utf-8",
     )
     (OUTPUT / ".nojekyll").write_text("", encoding="utf-8")
-    (OUTPUT / "robots.txt").write_text("User-agent: *\nAllow: /\n", encoding="utf-8")
+    # Byte output keeps robots.txt line endings stable on Windows as well.
+    (OUTPUT / "robots.txt").write_bytes(b"User-agent: *\nAllow: /\n")
     parser = LocalReferences()
     parser.feed(document.read_text(encoding="utf-8"))
     for reference in parser.references:

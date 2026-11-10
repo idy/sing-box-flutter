@@ -1,15 +1,12 @@
 """Website source pinning, UTF-8 builds and native-CI isolation."""
 from __future__ import annotations
 
-import ast
 import contextlib
 import importlib.util
 import io
 import os
 from pathlib import Path
-import re
 import subprocess
-from types import SimpleNamespace
 import tempfile
 import textwrap
 import unittest
@@ -74,6 +71,12 @@ class WebsiteBuild(unittest.TestCase):
             expected = self.git("show", f"{revision}:example/core-profiles/{name}.yaml")
             self.assertEqual((self.output / "profiles" / (name + ".yaml")).read_bytes(), expected)
 
+    def test_custom_domain_canonical_does_not_keep_the_repository_path(self):
+        with mock.patch.dict(os.environ, {"SITE_URL": "https://sing-box-flutter.idy.dev"}):
+            document = self.build()
+        self.assertIn('href="https://sing-box-flutter.idy.dev/"', document)
+        self.assertNotIn('https://sing-box-flutter.idy.dev/sing-box-flutter/', document)
+
     def test_dirty_profile_does_not_mismatch_an_older_dependency(self):
         path = self.profiles / "wgc-minimal.yaml"
         path.write_text("sing_box_flutter:\n  core:\n    endpoints: [future-protocol]\n", encoding="utf-8")
@@ -107,33 +110,44 @@ class WebsiteBuild(unittest.TestCase):
         self.assertEqual((self.output / "robots.txt").read_bytes(), b"User-agent: *\nAllow: /\n")
 
 
-class DeploymentConcurrency(unittest.TestCase):
-    def test_non_main_dispatch_cannot_cancel_production(self):
+class DeploymentEligibility(unittest.TestCase):
+    def test_case_sensitive_main_gate_and_deploy_only_concurrency(self):
         workflow = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
-        expression = re.search(r"group: project-website-\$\{\{ (.+) \}\}", workflow).group(1)
-        tree = ast.parse(expression.replace("&&", " and ").replace("||", " or "), mode="eval")
-        # Evaluate only the workflow's string/boolean comparisons, never calls
-        # or other arbitrary expressions in a modified workflow file.
-        allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq,
-                   ast.NotEq, ast.Attribute, ast.Name, ast.Load, ast.Constant)
-        for node in ast.walk(tree):
-            self.assertIsInstance(node, allowed)
-            if isinstance(node, ast.Name):
-                self.assertEqual(node.id, "github")
-            if isinstance(node, ast.Attribute):
-                self.assertIn(node.attr, ("event_name", "ref"))
-        compiled = compile(tree, "pages-concurrency", "eval")
+        self.assertNotIn("\nconcurrency:", workflow)
+        deploy = workflow.split("  deploy:\n", 1)[1]
+        self.assertIn("if: needs.build.outputs.production == 'true'", deploy)
+        self.assertIn("    concurrency:\n      group: project-website-production\n      cancel-in-progress: false", deploy)
+        self.assertIn("if: steps.production.outputs.eligible == 'true'", workflow)
+        body = workflow.split("python3 -I - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        body = textwrap.dedent(body)
         cases = [
-            ("push", "refs/heads/main", "production"),
-            ("workflow_dispatch", "refs/heads/main", "production"),
-            ("workflow_dispatch", "refs/heads/feature", "refs/heads/feature"),
-            ("pull_request", "refs/pull/6/merge", "refs/pull/6/merge"),
-            ("pull_request", "refs/heads/main", "refs/heads/main"),
+            ("push", "refs/heads/main", True),
+            ("workflow_dispatch", "refs/heads/main", True),
+            ("workflow_dispatch", "refs/heads/Main", False),
+            ("workflow_dispatch", "refs/heads/MAIN", False),
+            ("workflow_dispatch", "refs/heads/feature", False),
+            ("workflow_dispatch", "refs/tags/main", False),
+            ("pull_request", "refs/pull/6/merge", False),
+            ("pull_request", "refs/heads/main", False),
+            ("push", "refs/heads/Main", False),
+            ("pull_request_target", "refs/heads/main", False),
         ]
-        for event, ref, expected in cases:
-            with self.subTest(event=event, ref=ref):
-                context = SimpleNamespace(event_name=event, ref=ref)
-                self.assertEqual(eval(compiled, {"__builtins__": {}}, {"github": context}), expected)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            for event, ref, expected in cases:
+                with self.subTest(event=event, ref=ref):
+                    output.write_text("", encoding="utf-8")
+                    environment = {"WORKFLOW_EVENT": event, "WORKFLOW_REF": ref, "GITHUB_OUTPUT": str(output)}
+                    with mock.patch.dict(os.environ, environment):
+                        exec(compile(body, "pages-production-gate", "exec"), {})
+                    self.assertEqual(output.read_text(encoding="utf-8"), f"eligible={str(expected).lower()}\n")
+
+    def test_isolation_regression_runs_when_native_workflow_changes(self):
+        workflow = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
+        triggers = workflow.split("permissions:", 1)[0]
+        push, pull_request = triggers.split("  pull_request:\n", 1)
+        for event in [push, pull_request]:
+            self.assertIn("      - .github/workflows/native-core.yml\n", event)
 
 
 class NativeCIIsolation(unittest.TestCase):

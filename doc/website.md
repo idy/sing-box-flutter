@@ -27,7 +27,10 @@ Website and design working files are excluded from the pub.dev archive.
 
 `.github/workflows/pages.yml` validates builds for relevant pull requests. It can
 deploy only the default `main` branch to the `github-pages` environment, on a
-relevant push or an explicit workflow dispatch. Preview branches cannot deploy.
+relevant push or an explicit workflow dispatch. A case-sensitive runtime check
+allows production only for the exact `refs/heads/main`; preview branches, including
+case variants such as `Main`, cannot deploy. Only eligible deployment jobs enter
+the production concurrency group, and they do not cancel an in-progress deployment.
 
 Before the first deployment:
 
@@ -39,8 +42,9 @@ Before the first deployment:
    requests and local assets over HTTPS.
 
 Until custom DNS is configured, deploy to `https://idy.github.io/sing-box-flutter/`.
-The production workflow gets its canonical URL from GitHub Pages settings; local
-and PR builds use that default URL. Once DNS works, setting the custom domain in
+The production workflow builds an HTTPS canonical URL from the host and base path
+in GitHub Pages settings, including while a new custom-domain certificate is
+being provisioned. Local and PR builds use the default URL. Once DNS works, setting the custom domain in
 Pages and redeploying updates the canonical and Open Graph URLs automatically.
 For Actions-based deployments, configure the custom domain in Pages settings;
 a CNAME file in the artifact does not create the required DNS record.
