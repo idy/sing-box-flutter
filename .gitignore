@@ -7,6 +7,9 @@
 .atom/
 .build/
 .buildlog/
+
+# Local design review evidence, not website assets.
+.impeccable/review/
 **/.kotlin/
 .history
 .svn/

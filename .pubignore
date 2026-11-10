@@ -4,6 +4,11 @@
 .dart_tool/
 .git/
 .github/
+.claude/
+.impeccable/
+site/
+PRODUCT.md
+DESIGN.md
 .idea/
 .swiftpm/
 build/
