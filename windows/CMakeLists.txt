@@ -16,10 +16,14 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin)
 # A normal Flutter build validates a previously selected core. It never downloads
 # a toolchain or builds Go implicitly, including when the pub cache is shared.
 find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
+# The directory adding the plugin is the Flutter host, even in a superbuild.
+get_directory_property(FLUTTER_HOST_DIRECTORY PARENT_DIRECTORY)
+if(NOT FLUTTER_HOST_DIRECTORY)
+  set(FLUTTER_HOST_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
 if(NOT FLUTTER_APPLICATION_PATH)
-  # Flutter's generated_config.cmake keeps PROJECT_DIR in its own subdirectory.
-  # The top-level CMake source is the host's windows/ directory.
-  get_filename_component(FLUTTER_APPLICATION_PATH "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+  # generated_config.cmake keeps PROJECT_DIR in Flutter's own subdirectory.
+  get_filename_component(FLUTTER_APPLICATION_PATH "${FLUTTER_HOST_DIRECTORY}/.." ABSOLUTE)
 endif()
 if(NOT EXISTS "${FLUTTER_APPLICATION_PATH}/pubspec.yaml")
   message(FATAL_ERROR "Flutter application path is missing; build from a Flutter Windows host.")
@@ -89,12 +93,16 @@ set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_VERIFIED_CORE "${CO
 function(_sing_box_flutter_install_resources)
   get_target_property(RESOURCE_CORE_DIR sing_box_flutter_plugin SING_BOX_FLUTTER_VERIFIED_CORE)
   get_filename_component(RESOURCE_CORE_PARENT "${RESOURCE_CORE_DIR}" DIRECTORY)
-  # Relative destinations stay relocatable for normal prefixes. A Flutter
-  # generator-expression prefix must be expanded during generation instead.
+  # Match the host runner/helper destination, including a prefix local to a
+  # nested host. Without a runner, retain normal CMake --prefix relocation.
   set(RESOURCE_DESTINATION "sing_box_flutter")
   string(FIND "${CMAKE_INSTALL_PREFIX}" "$<" PREFIX_EXPRESSION)
   if(NOT PREFIX_EXPRESSION EQUAL -1)
     set(RESOURCE_DESTINATION "${CMAKE_INSTALL_PREFIX}/sing_box_flutter")
+  elseif(DEFINED BINARY_NAME)
+    if(TARGET "${BINARY_NAME}")
+      set(RESOURCE_DESTINATION "${CMAKE_INSTALL_PREFIX}/sing_box_flutter")
+    endif()
   endif()
   install(FILES "${RESOURCE_CORE_PARENT}/core-capabilities.json"
     "${RESOURCE_CORE_PARENT}/native-build.json"
@@ -106,4 +114,4 @@ function(_sing_box_flutter_install_resources)
   install(FILES "${RESOURCE_CORE_DIR}/LICENSE.wintun"
     DESTINATION "${RESOURCE_DESTINATION}/Legal" COMPONENT Runtime)
 endfunction()
-cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL _sing_box_flutter_install_resources)
+cmake_language(DEFER DIRECTORY "${FLUTTER_HOST_DIRECTORY}" CALL _sing_box_flutter_install_resources)

@@ -354,7 +354,8 @@ class WindowsIntegrity(WindowsFixture):
 
 @unittest.skipUnless(shutil.which("cmake"), "CMake is not available")
 class WindowsCMake(WindowsFixture):
-    def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None):
+    def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None,
+                  nested_host=False, discover_application=False):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -373,9 +374,9 @@ add_library(flutter_wrapper_plugin INTERFACE)
 '''
         if flutter_layout:
             text += '''set(BINARY_NAME fixture_runner)
-file(WRITE "${CMAKE_BINARY_DIR}/runner.cpp" "int main() { return 0; }")
-add_executable(${BINARY_NAME} "${CMAKE_BINARY_DIR}/runner.cpp")
-set_target_properties(${BINARY_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runner")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/runner.cpp" "int main() { return 0; }")
+add_executable(${BINARY_NAME} "${CMAKE_CURRENT_BINARY_DIR}/runner.cpp")
+set_target_properties(${BINARY_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/runner")
 '''
         text += '''add_subdirectory("${PLUGIN_DIR}/windows" plugin)
 list(LENGTH sing_box_flutter_bundled_libraries bundle_count)
@@ -390,22 +391,40 @@ file(WRITE "${CMAKE_BINARY_DIR}/bundled.txt" "${bundle_count}\\n${bundle_path}")
 elseif(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   set(CMAKE_INSTALL_PREFIX "$<TARGET_FILE_DIR:${BINARY_NAME}>" CACHE PATH "..." FORCE)
 endif()
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/host-prefix-$<CONFIG>.txt" CONTENT "${CMAKE_INSTALL_PREFIX}")
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 '''
-        (harness / "CMakeLists.txt").write_text(text, encoding="utf-8")
+        if nested_host:
+            host_source = self.host / "windows"
+            host_source.mkdir(exist_ok=True)
+            (host_source / "CMakeLists.txt").write_text(text, encoding="utf-8")
+            (harness / "CMakeLists.txt").write_text('''cmake_minimum_required(VERSION 3.19)
+project(core_superbuild LANGUAGES CXX)
+set(CMAKE_INSTALL_PREFIX "${SUPERBUILD_INSTALL_PREFIX}")
+add_subdirectory("${HOST_SOURCE_DIR}" host)
+''', encoding="utf-8")
+        else:
+            (harness / "CMakeLists.txt").write_text(text, encoding="utf-8")
         self.cmake_build = self.root / "cmake output"
         command = ["cmake", "-S", str(harness), "-B", str(self.cmake_build),
-                   f"-DPLUGIN_DIR={self.plugin}", f"-DFLUTTER_APPLICATION_PATH={self.host}",
-                   "-DFLUTTER_TARGET_PLATFORM=windows-x64", f"-DPython3_EXECUTABLE={sys.executable}"]
+                   f"-DPLUGIN_DIR={self.plugin}", "-DFLUTTER_TARGET_PLATFORM=windows-x64",
+                   f"-DPython3_EXECUTABLE={sys.executable}"]
+        if not discover_application:
+            command += [f"-DFLUTTER_APPLICATION_PATH={self.host}"]
+        if nested_host:
+            command += [f"-DHOST_SOURCE_DIR={host_source.as_posix()}",
+                        f"-DSUPERBUILD_INSTALL_PREFIX={(self.root / 'superbuild install').as_posix()}"]
         if flutter_layout and os.name != "nt":
             if not shutil.which("ninja"):
                 self.skipTest("Ninja is required for the multi-config Flutter layout")
             command += ["-G", "Ninja Multi-Config"]
+        # CMake variables without a PATH cache type retain Windows backslashes,
+        # which would become escape sequences in generated install scripts.
         if install_prefix is not None:
-            command += [f"-DCMAKE_INSTALL_PREFIX={install_prefix}"]
+            command += [f"-DCMAKE_INSTALL_PREFIX={install_prefix.as_posix()}"]
         if late_install_prefix is not None:
-            command += [f"-DLATE_INSTALL_PREFIX={late_install_prefix}"]
+            command += [f"-DLATE_INSTALL_PREFIX={late_install_prefix.as_posix()}"]
         return subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
 
     def verify_installed(self):
@@ -450,7 +469,8 @@ install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "${CMAKE_INSTALL
                          "other required notice\n")
         self.assertNotEqual((legal / "LICENSE.wintun").read_bytes(), expected)
 
-    def assert_flutter_install(self, install_prefix=None, late_install_prefix=None):
+    def assert_flutter_install(self, install_prefix=None, late_install_prefix=None,
+                               nested_host=False, discover_application=False):
         entry, _, _ = self.published()
         artifact = build_core.host_path(self.host, entry["path"])
         legal = artifact.parent / "Legal"
@@ -461,7 +481,8 @@ install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "${CMAKE_INSTALL
                 # Calling configure twice also covers the cached generator
                 # expression prefix used on Flutter's subsequent builds.
                 result = self.configure(flutter_layout=True, install_prefix=install_prefix,
-                                        late_install_prefix=late_install_prefix)
+                                        late_install_prefix=late_install_prefix, nested_host=nested_host,
+                                        discover_application=discover_application)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 result = subprocess.run(["cmake", "--build", str(self.cmake_build),
                                          "--config", configuration, "--target", "fixture_runner",
@@ -472,7 +493,15 @@ install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "${CMAKE_INSTALL
                                          "--config", configuration, "--component", "Runtime"], cwd=self.root,
                                         capture_output=True, text=True, encoding="utf-8")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                installed = late_install_prefix or install_prefix or self.cmake_build / "runner" / configuration
+                runner_build = self.cmake_build / "host" if nested_host else self.cmake_build
+                # Read the prefix chosen by the host, not any plugin output.
+                # A superbuild may change the inherited default on reconfigure.
+                installed = Path((runner_build / f"host-prefix-{configuration}.txt").read_text(encoding="utf-8"))
+                chosen = late_install_prefix or install_prefix
+                if chosen is not None:
+                    self.assertEqual(installed, chosen)
+                elif not nested_host:
+                    self.assertEqual(installed, runner_build / "runner" / configuration)
                 self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
                 resources = installed / "sing_box_flutter"
                 for name in ("core-capabilities.json", "native-build.json"):
@@ -488,6 +517,13 @@ install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "${CMAKE_INSTALL
 
     def test_flutter_multi_config_install_honors_prefix_set_after_plugin(self):
         self.assert_flutter_install(late_install_prefix=self.root / "late custom install bundle")
+
+    def test_nested_flutter_host_install_discovers_application_and_default_prefix(self):
+        self.assert_flutter_install(nested_host=True, discover_application=True)
+
+    def test_nested_flutter_host_install_honors_local_prefix_set_after_plugin(self):
+        self.assert_flutter_install(nested_host=True,
+                                    late_install_prefix=self.root / "nested host install bundle")
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         script = self.plugin / "tool/core_recipe.py"
