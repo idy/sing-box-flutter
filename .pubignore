@@ -9,8 +9,6 @@
 site/
 PRODUCT.md
 DESIGN.md
-tool/build_site.py
-tool/serve_site.mjs
 .idea/
 .swiftpm/
 build/

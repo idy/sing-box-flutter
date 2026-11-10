@@ -4,7 +4,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../.build/site');
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.build/site');
 const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.yaml': 'text/plain; charset=utf-8', '.txt': 'text/plain; charset=utf-8' };
 await readFile(path.join(root, 'index.html'));
 http.createServer(async (request, response) => {

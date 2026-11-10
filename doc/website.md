@@ -7,7 +7,7 @@ Flutter, Node packages, analytics or remote browser-side services.
 Build from the repository root:
 
 ```bash
-python3 -B tool/build_site.py
+python3 -B .github/scripts/build_site.py
 ```
 
 The builder requires a Git checkout and writes `.build/site/`. It validates local
@@ -39,8 +39,10 @@ leave the preceding website update permanently skipped.
 For the initial release before the source workflow reaches main, a verified
 static build can be published to the `gh-pages` branch with a CNAME file and Pages
 configured to serve that branch. This does not require relaxing main's CI gates.
-Once the source PR merges, the guarded production job switches Pages back to
-Actions publishing immediately before deploying the current main artifact.
+A repository administrator switches the Pages publishing source to Actions
+separately, using an administrator-authorized login. The workflow token only
+deploys content; it never updates repository Pages settings. Confirm that the
+existing static release stays reachable during that one-time switch.
 
 Before the first deployment:
 

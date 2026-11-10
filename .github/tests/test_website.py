@@ -14,7 +14,7 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location("website_builder", ROOT / "tool/build_site.py")
+spec = importlib.util.spec_from_file_location("website_builder", ROOT / ".github/scripts/build_site.py")
 site = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(site)
 
@@ -160,8 +160,8 @@ class DeploymentFreshness(unittest.TestCase):
         deploy = workflow.split("  deploy:\n", 1)[1]
         body = deploy.split("python3 -I - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
         self.body = textwrap.dedent(body)
-        self.assertEqual(deploy.count("if: steps.revision.outputs.current == 'true'"), 3)
-        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/pages" --method PUT -f build_type=workflow', deploy)
+        self.assertEqual(deploy.count("if: steps.revision.outputs.current == 'true'"), 2)
+        self.assertNotIn('gh api "repos/$GITHUB_REPOSITORY/pages" --method PUT', deploy)
         self.assertLess(deploy.index("id: revision"), deploy.index("uses: actions/configure-pages"))
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -206,11 +206,11 @@ class NativeCIIsolation(unittest.TestCase):
         body = workflow.split("python3 -I - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
         body = textwrap.dedent(body)
         cases = [
-            (["tool/build_site.py"], False),
-            (["tool/serve_site.mjs"], False),
-            (["site/index.html", "tool/build_site.py"], False),
+            ([".github/scripts/build_site.py"], False),
+            ([".github/scripts/serve_site.mjs"], False),
+            (["site/index.html", ".github/scripts/build_site.py"], False),
             ([".github/tests/test_website.py"], False),
-            (["tool/build_site.py", "tool/build_core.py"], True),
+            ([".github/scripts/build_site.py", "tool/build_core.py"], True),
             (["tool/native_common.py"], True),
             (["example/core-profiles/wgc-minimal.yaml"], True),
             (["native/mobile/config.go"], True),

@@ -11,7 +11,7 @@ import shutil
 import subprocess
 from urllib.parse import unquote, urlsplit
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / ".build/site"
 PROFILES = ("wgc-minimal", "wgc-tailscale", "singbox-full")
 

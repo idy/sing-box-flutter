@@ -8,7 +8,8 @@ on:
     paths:
       - site/**
       - example/core-profiles/*.yaml
-      - tool/build_site.py
+      - .github/scripts/build_site.py
+      - .github/scripts/serve_site.mjs
       - .github/workflows/pages.yml
       - .github/tests/test_website.py
       - .github/workflows/native-core.yml
@@ -52,7 +53,7 @@ jobs:
       - name: Build and validate static website
         env:
           SITE_URL: ${{ steps.pages.outputs.host && format('https://{0}{1}', steps.pages.outputs.host, steps.pages.outputs.base_path) || 'https://idy.github.io/sing-box-flutter/' }}
-        run: python3 -B tool/build_site.py
+        run: python3 -B .github/scripts/build_site.py
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .build/site
@@ -100,11 +101,6 @@ jobs:
               output.write('current=' + str(deploy).lower() + '\n')
           print('Deploying current main revision' if deploy else 'Skipping superseded website build')
           PY
-      - name: Enable Actions publishing after the initial static release
-        if: steps.revision.outputs.current == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api "repos/$GITHUB_REPOSITORY/pages" --method PUT -f build_type=workflow
       - uses: actions/configure-pages@v5
         if: steps.revision.outputs.current == 'true'
       - name: Deploy website
