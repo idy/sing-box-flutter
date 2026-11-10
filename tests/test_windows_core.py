@@ -354,7 +354,7 @@ class WindowsIntegrity(WindowsFixture):
 
 @unittest.skipUnless(shutil.which("cmake"), "CMake is not available")
 class WindowsCMake(WindowsFixture):
-    def configure(self):
+    def configure(self, *, flutter_layout=False, install_prefix=None):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -364,22 +364,45 @@ class WindowsCMake(WindowsFixture):
         header.write_text("// configure-only fixture\n", encoding="utf-8")
         harness = self.root / "cmake harness"
         harness.mkdir(exist_ok=True)
-        (harness / "CMakeLists.txt").write_text('''cmake_minimum_required(VERSION 3.14)
+        text = '''cmake_minimum_required(VERSION 3.14)
 project(core_harness LANGUAGES CXX)
 function(apply_standard_settings target)
 endfunction()
 add_library(flutter INTERFACE)
 add_library(flutter_wrapper_plugin INTERFACE)
-add_subdirectory("${PLUGIN_DIR}/windows" plugin)
+'''
+        if flutter_layout:
+            text += '''set(BINARY_NAME fixture_runner)
+file(WRITE "${CMAKE_BINARY_DIR}/runner.cpp" "int main() { return 0; }")
+add_executable(${BINARY_NAME} "${CMAKE_BINARY_DIR}/runner.cpp")
+set_target_properties(${BINARY_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runner")
+'''
+        text += '''add_subdirectory("${PLUGIN_DIR}/windows" plugin)
 list(LENGTH sing_box_flutter_bundled_libraries bundle_count)
 list(GET sing_box_flutter_bundled_libraries 0 bundle_path)
 file(WRITE "${CMAKE_BINARY_DIR}/bundled.txt" "${bundle_count}\\n${bundle_path}")
-''', encoding="utf-8")
+'''
+        if flutter_layout:
+            # Match Flutter's ordering: the default prefix is assigned only
+            # after generated_plugins.cmake has added the plugin subdirectory.
+            text += '''if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+  set(CMAKE_INSTALL_PREFIX "$<TARGET_FILE_DIR:${BINARY_NAME}>" CACHE PATH "..." FORCE)
+endif()
+install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+'''
+        (harness / "CMakeLists.txt").write_text(text, encoding="utf-8")
         self.cmake_build = self.root / "cmake output"
-        return subprocess.run(["cmake", "-S", str(harness), "-B", str(self.cmake_build),
-                               f"-DPLUGIN_DIR={self.plugin}", f"-DFLUTTER_APPLICATION_PATH={self.host}",
-                               "-DFLUTTER_TARGET_PLATFORM=windows-x64", f"-DPython3_EXECUTABLE={sys.executable}"],
-                              capture_output=True, text=True, encoding="utf-8")
+        command = ["cmake", "-S", str(harness), "-B", str(self.cmake_build),
+                   f"-DPLUGIN_DIR={self.plugin}", f"-DFLUTTER_APPLICATION_PATH={self.host}",
+                   "-DFLUTTER_TARGET_PLATFORM=windows-x64", f"-DPython3_EXECUTABLE={sys.executable}"]
+        if flutter_layout and os.name != "nt":
+            if not shutil.which("ninja"):
+                self.skipTest("Ninja is required for the multi-config Flutter layout")
+            command += ["-G", "Ninja Multi-Config"]
+        if install_prefix is not None:
+            command += [f"-DCMAKE_INSTALL_PREFIX={install_prefix}"]
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
 
     def verify_installed(self):
         return subprocess.run(["cmake", "--build", str(self.cmake_build), "--target", "sing_box_flutter_verify_core"],
@@ -422,6 +445,41 @@ file(WRITE "${CMAKE_BINARY_DIR}/bundled.txt" "${bundle_count}\\n${bundle_path}")
         self.assertEqual((installed / "sing_box_flutter/Legal/NOTICE").read_text(encoding="utf-8"),
                          "other required notice\n")
         self.assertNotEqual((legal / "LICENSE.wintun").read_bytes(), expected)
+
+    def assert_flutter_install(self, install_prefix=None):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        legal = artifact.parent / "Legal"
+        legal.mkdir(exist_ok=True)
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
+        for configuration in ("Debug", "Release"):
+            with self.subTest(configuration=configuration, prefix=install_prefix):
+                # Calling configure twice also covers the cached generator
+                # expression prefix used on Flutter's subsequent builds.
+                result = self.configure(flutter_layout=True, install_prefix=install_prefix)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run(["cmake", "--build", str(self.cmake_build),
+                                         "--config", configuration, "--target", "fixture_runner",
+                                         "sing_box_flutter_verify_core"],
+                                        capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run(["cmake", "--install", str(self.cmake_build),
+                                         "--config", configuration, "--component", "Runtime"],
+                                        capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                installed = install_prefix or self.cmake_build / "runner" / configuration
+                self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
+                resources = installed / "sing_box_flutter"
+                for name in ("core-capabilities.json", "native-build.json"):
+                    self.assertTrue((resources / name).is_file(), name)
+                self.assertEqual((resources / "Legal/LICENSE.wintun").read_bytes(), self.contents["license"])
+                self.assertEqual((resources / "Legal/NOTICE").read_text(encoding="utf-8"), "required notice\n")
+
+    def test_flutter_multi_config_install_expands_default_and_cached_prefix(self):
+        self.assert_flutter_install()
+
+    def test_flutter_multi_config_install_honors_custom_prefix(self):
+        self.assert_flutter_install(self.root / "custom install bundle")
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         script = self.plugin / "tool/core_recipe.py"

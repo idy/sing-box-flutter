@@ -84,12 +84,25 @@ set(sing_box_flutter_bundled_libraries
   "${CORE_DIR_LIST}/sing_box_flutter_core.exe"
   PARENT_SCOPE)
 get_filename_component(CORE_PARENT "${CORE_DIR}" DIRECTORY)
+# Relative destinations use CMAKE_INSTALL_PREFIX at install-script runtime, when
+# generator expressions are no longer expanded. Flutter assigns its default
+# $<TARGET_FILE_DIR:...> prefix after adding plugins, so capture that destination
+# explicitly during generation. Keep ordinary custom prefixes relocatable.
+set(CORE_RESOURCE_DESTINATION "sing_box_flutter")
+string(FIND "${CMAKE_INSTALL_PREFIX}" "$<" CORE_PREFIX_EXPRESSION)
+if(NOT CORE_PREFIX_EXPRESSION EQUAL -1)
+  set(CORE_RESOURCE_DESTINATION "${CMAKE_INSTALL_PREFIX}/sing_box_flutter")
+elseif(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT AND DEFINED BINARY_NAME)
+  if(TARGET "${BINARY_NAME}")
+    set(CORE_RESOURCE_DESTINATION "$<TARGET_FILE_DIR:${BINARY_NAME}>/sing_box_flutter")
+  endif()
+endif()
 install(FILES "${CORE_PARENT}/core-capabilities.json"
   "${CORE_PARENT}/native-build.json"
-  DESTINATION "sing_box_flutter" COMPONENT Runtime)
+  DESTINATION "${CORE_RESOURCE_DESTINATION}" COMPONENT Runtime)
 install(DIRECTORY "${CORE_PARENT}/Legal/"
-  DESTINATION "sing_box_flutter/Legal" COMPONENT Runtime
+  DESTINATION "${CORE_RESOURCE_DESTINATION}/Legal" COMPONENT Runtime
   PATTERN "LICENSE.wintun" EXCLUDE)
 # Install the exact license bytes covered by the bundle receipt and build guard.
 install(FILES "${CORE_DIR}/LICENSE.wintun"
-  DESTINATION "sing_box_flutter/Legal" COMPONENT Runtime)
+  DESTINATION "${CORE_RESOURCE_DESTINATION}/Legal" COMPONENT Runtime)
