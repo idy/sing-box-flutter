@@ -332,6 +332,24 @@ def resolved_tailscale_dependency(go: Path, env: dict, source: Path, pins: dict)
             "toolchain_revision": current, "next_toolchain_revision": next_revision}
 
 
+def prepare_dependencies(go: Path, env: dict, source: Path, pins: dict, *,
+                         packages: list[str] | None = None, tags: list[str] | None = None) -> dict:
+    """Resolve the requested graph and verify cached sources before compilation."""
+    if packages is None:
+        network_run([go, "mod", "download"], cwd=source, env=env)
+    else:
+        # Resolve only the selected target's imports, including its tests. A bare
+        # mod download fetches every required module, including unused Cronet ZIPs.
+        # Keep the authenticated module locks read-only; this never compiles code.
+        network_run([go, "list", "-mod=readonly", "-deps", "-test", "-tags", ",".join(tags or []),
+                     *packages], cwd=source, env=env, capture=True)
+    # Even a minimal core retains the explicit Tailscale compiler contract. Resolve
+    # it before the final verification so this download is checked as well.
+    dependency = resolved_tailscale_dependency(go, env, source, pins)
+    run([go, "mod", "verify"], cwd=source, env=env)
+    return dependency
+
+
 def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict, dict]:
     # Stay in the verified core module. An @version go install outside the module
     # queries unrelated latest versions for deprecation notices; this uses go.mod.
@@ -339,11 +357,9 @@ def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict,
                                      cwd=source, env=env, capture=True))
     if modules.get("Version") != pins["gomobile_version"]:
         raise BuildError("Selected gomobile module differs from native-core.json")
-    # Go verifies downloads against go.sum / sum.golang.org. Verify cached source
-    # before compiling any tool from it, then check the dependency runtime contract.
-    network_run([go, "mod", "download"], cwd=source, env=env)
-    run([go, "mod", "verify"], cwd=source, env=env)
-    dependency = resolved_tailscale_dependency(go, env, source, pins)
+    # Go authenticates downloads against go.sum / sum.golang.org; also verify
+    # cached sources and the dependency runtime contract before compiling tools.
+    dependency = prepare_dependencies(go, env, source, pins)
     # Rebuild rather than executing stale or altered cached mobile tools.
     network_run([go, "install", "-trimpath", f"{GOMOBILE_MODULE}/cmd/gomobile",
                  f"{GOMOBILE_MODULE}/cmd/gobind"], cwd=source, env=env)

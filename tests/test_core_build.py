@@ -1,10 +1,13 @@
 """Host artifact isolation, receipts and interrupted-build recovery."""
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest import mock
 import zipfile
@@ -12,8 +15,10 @@ import shutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
 from build_core import (RECEIPT, canonical_hash, host_path, invalidate_pods, load_host_build_request,
-                        mobile_overlay, mobile_sources, publish_artifact, update_receipt)
+                        linux_architecture, linux_command, linux_overlay, linux_sources,
+                        mobile_overlay, mobile_sources, publish_artifact, update_receipt, validate_artifact)
 from native_common import BuildError
+from native_fixtures import linux_executable
 
 
 class HostArtifacts(unittest.TestCase):
@@ -440,8 +445,238 @@ class HostArtifacts(unittest.TestCase):
                 raise RuntimeError("interrupted")
         self.assertEqual([p.name for p in original.iterdir()], ["original.go"])
 
+    def test_source_overlays_exclude_module_files_and_verify_copied_bytes(self):
+        source = self.root / "source"
+        original = source / "experimental/libbox"
+        original.mkdir(parents=True)
+        (original / "upstream.go").write_text("package libbox\n")
+        (source / "cmd").mkdir()
+        copyfile = shutil.copyfile
+        for target, snapshot, label in (("mobile", mobile_sources, "Mobile core"),
+                                        ("linux", linux_sources, "Linux helper")):
+            with self.subTest(target=target):
+                inputs = self.root / "native" / target
+                (inputs / "nested").mkdir(parents=True)
+                (inputs / "runtime.go").write_text("package main\n")
+                (inputs / "nested/fixture.txt").write_text("captured fixture\n")
+                for name in ("go.mod", "go.sum"):
+                    (inputs / name).write_text("standalone module\n")
+                captured = snapshot(self.root)
+
+                def overlay():
+                    if target == "mobile":
+                        return mobile_overlay(source, "package libbox\n", captured, self.root)
+                    return linux_overlay(source, captured, self.root)
+
+                destination = original if target == "mobile" else source / "cmd/sing-box-flutter-linux"
+                with overlay():
+                    self.assertEqual((destination / "nested/fixture.txt").read_text(), "captured fixture\n")
+                    self.assertFalse((destination / "go.mod").exists())
+                    self.assertFalse((destination / "go.sum").exists())
+
+                def corrupt(path, destination):
+                    copyfile(path, destination)
+                    Path(destination).write_bytes(b"changed during copy")
+
+                with mock.patch("build_core.shutil.copyfile", side_effect=corrupt):
+                    with self.assertRaisesRegex(BuildError, label + " source changed while capturing"):
+                        with overlay():
+                            self.fail("changed bytes must never reach compilation")
+                self.assertEqual([path.name for path in original.iterdir()], ["upstream.go"])
+                self.assertEqual(list((source / "cmd").iterdir()), [])
+                self.assertEqual([path.name for path in self.root.iterdir() if path.name.startswith("mobile-backup-")], [])
+                (inputs / "runtime.go").write_text("package main\n// edited after capture\n")
+                with self.assertRaisesRegex(BuildError, label + " source changed after"):
+                    with overlay():
+                        self.fail("stale snapshot must never reach compilation")
+                self.assertEqual([path.name for path in original.iterdir()], ["upstream.go"])
+                self.assertEqual(list((source / "cmd").iterdir()), [])
+
     def test_fingerprint_is_order_independent(self):
         self.assertEqual(canonical_hash({"a": 1, "b": 2}), canonical_hash({"b": 2, "a": 1}))
+
+
+class LinuxArtifacts(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.host = self.root / "host"
+        self.host.mkdir()
+        (self.host / "pubspec.yaml").write_text("name: linux_host\n")
+        self.output = self.root / "sing-box-core"
+        self.capabilities = {"schema": 1, "version": "1.14.4", "fingerprint": "a" * 64,
+                             "features": {"inbounds": []}}
+
+    def executable(self, arch="amd64"):
+        return linux_executable(self.output, arch)
+
+    def publish(self, arch="amd64"):
+        return publish_artifact(self.host, self.executable(arch), "linux", self.capabilities,
+                                {"target": "linux"}, {}, arch=arch)
+
+    def test_elf_architecture_and_executable_permissions_are_required(self):
+        output = self.executable()
+        validate_artifact(output, "linux", "amd64")
+        for arch in (None, "arm64", "386"):
+            with self.subTest(arch=arch), self.assertRaises(BuildError):
+                validate_artifact(output, "linux", arch)
+        output.chmod(0o644)
+        with self.assertRaisesRegex(BuildError, "executable"):
+            validate_artifact(output, "linux", "amd64")
+        self.executable().write_bytes(b"not a Linux executable")
+        with self.assertRaisesRegex(BuildError, "ELF"):
+            validate_artifact(output, "linux", "amd64")
+        output.unlink()
+        output.symlink_to("missing")
+        with self.assertRaises(BuildError):
+            validate_artifact(output, "linux", "amd64")
+
+    def test_both_architectures_remain_in_host_receipt(self):
+        amd64 = self.publish()
+        arm64 = self.publish("arm64")
+        self.assertNotEqual(amd64["path"], arm64["path"])
+        self.assertEqual(amd64["arch"], "amd64")
+        self.assertIn("/linux-arm64/", arm64["path"])
+        update_receipt(self.host, self.capabilities, {}, {"linux-amd64": amd64})
+        update_receipt(self.host, self.capabilities, {}, {"linux-arm64": arm64})
+        receipt = json.loads((self.host / RECEIPT).read_text())
+        self.assertEqual(set(receipt["artifacts"]), {"linux-amd64", "linux-arm64"})
+        artifact = host_path(self.host, amd64["path"])
+        self.assertEqual(artifact.stat().st_mode & 0o777, 0o755)
+        metadata = json.loads(host_path(self.host, amd64["metadata"]).read_text())
+        self.assertEqual(metadata["arch"], "amd64")
+        artifact.chmod(0o644)
+        with self.assertRaisesRegex(BuildError, "executable"):
+            update_receipt(self.host, self.capabilities, {}, {"linux-arm64": arm64})
+        with self.assertRaisesRegex(BuildError, "executable"):
+            self.publish()
+
+    def test_linux_overlay_restores_after_failure_and_checks_snapshot(self):
+        source = self.root / "source"
+        (source / "cmd").mkdir(parents=True)
+        helper = self.root / "native/linux"
+        helper.mkdir(parents=True)
+        (helper / "main.go").write_text("package main\n")
+        (helper / "main_test.go").write_text("package main\n// tests\n")
+        captured = linux_sources(self.root)
+        with self.assertRaisesRegex(RuntimeError, "interrupted"):
+            with linux_overlay(source, captured, self.root) as package:
+                self.assertEqual(package, "./cmd/sing-box-flutter-linux")
+                self.assertTrue((source / "cmd/sing-box-flutter-linux/main_test.go").is_file())
+                raise RuntimeError("interrupted")
+        self.assertEqual(list((source / "cmd").iterdir()), [])
+        (helper / "main.go").write_text("package main\n// changed\n")
+        with self.assertRaisesRegex(BuildError, "changed"):
+            with linux_overlay(source, captured, self.root):
+                self.fail("changed source must not compile")
+        self.assertEqual(list((source / "cmd").iterdir()), [])
+
+    def test_builder_resolves_linux_graph_after_overlays_and_verifies_before_build(self):
+        import build_core
+        from native_common import sha256
+        source = self.root / "source"
+        original = source / "experimental/libbox"
+        original.mkdir(parents=True)
+        (original / "upstream.go").write_text("package libbox\n")
+        (source / "cmd").mkdir()
+        (source / "LICENSE").write_text("fixture license\n")
+        request = self.root / "request.json"
+        request.write_text(json.dumps({"schema": 1, "pubspec": {
+            "path": str(self.host / "pubspec.yaml"), "sha256": sha256(self.host / "pubspec.yaml")},
+            "features": {"inbounds": ["tproxy"], "dns": ["resolved"], "services": ["resolved"]}}))
+        scenarios = (("Darwin", "arm64", None, False), ("Linux", "amd64", None, False),
+                     ("Darwin", "arm64", "build", False), ("Darwin", "arm64", None, True),
+                     ("Linux", "amd64", "list", False), ("Linux", "arm64", "verify", False),
+                     ("Linux", "arm64", "contract", False))
+        for system, arch, failure, bootstrap_only in scenarios:
+            with self.subTest(system=system, arch=arch, failure=failure, bootstrap_only=bootstrap_only), contextlib.ExitStack() as stack:
+                commands, events = [], []
+                compiler_env = {"GOBIN": "/verified/bin", "GOROOT": "/verified/fork", "GOTOOLCHAIN": "local",
+                                "GOSUMDB": "sum.golang.org", "GOFLAGS": "-mod=readonly -trimpath -buildvcs=false"}
+
+                def execute(command, *, cwd, env, **kwargs):
+                    commands.append((command, env))
+                    operation = command[2] if command[1] == "mod" else command[1]
+                    events.append(operation)
+                    self.assertEqual(cwd, source)
+                    self.assertEqual(command[0], Path("/verified/go"))
+                    self.assertTrue((source / "cmd/sing-box-flutter-linux/main.go").is_file())
+                    self.assertTrue((original / "registry_selected.go").is_file())
+                    if operation == failure:
+                        raise subprocess.CalledProcessError(1, command)
+                    if operation == "build":
+                        destination = Path(command[command.index("-o") + 1])
+                        shutil.copyfile(self.executable(arch), destination)
+                        destination.chmod(0o755)
+                    return ""
+
+                def contract(*args):
+                    events.append("contract")
+                    self.assertEqual(args[0], Path("/verified/go"))
+                    self.assertEqual(args[1]["GOARCH"], arch)
+                    self.assertTrue((original / "registry_selected.go").is_file())
+                    if failure == "contract":
+                        raise BuildError("incompatible Tailscale runtime requirement")
+                    return {"toolchain_revision": "verified"}
+
+                stack.enter_context(mock.patch("build_core.platform.system", return_value=system))
+                stack.enter_context(mock.patch("build_core.platform.machine", return_value=arch))
+                stack.enter_context(mock.patch("build_core.bootstrap_go", return_value=(
+                    Path("/verified/go"), compiler_env, {"revision": "verified"})))
+                stack.enter_context(mock.patch("build_core.source_checkout", return_value=source))
+                mobile = stack.enter_context(mock.patch("build_core.install_mobile"))
+                stack.enter_context(mock.patch("build_libbox.resolved_tailscale_dependency", side_effect=contract))
+                stack.enter_context(mock.patch("build_libbox.run", side_effect=execute))
+                stack.enter_context(mock.patch("build_core.run", side_effect=execute))
+                stack.enter_context(mock.patch("build_libbox.time.sleep"))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                previous = (self.host / RECEIPT).read_bytes() if (self.host / RECEIPT).exists() else None
+                arguments = ["--features-file", str(request), "--project-dir", str(self.host),
+                             "--target", "linux", "--arch", arch, "--work-dir", str(self.root / "work")]
+                result = build_core.main(arguments + (["--bootstrap-only"] if bootstrap_only else []))
+                self.assertEqual(result, 1 if failure else 0)
+                mobile.assert_not_called()
+                expected_events = ["list", "contract", "verify"]
+                if not bootstrap_only:
+                    expected_events += ["test", "build"] if system == "Linux" else ["build"]
+                if failure == "list":
+                    expected_events = ["list"] * 3  # Bounded network retries never proceed to compilation.
+                elif failure:
+                    expected_events = expected_events[:expected_events.index(failure) + 1]
+                self.assertEqual(events, expected_events)
+                resolution = commands[0][0]
+                self.assertEqual(resolution[1:7], ["list", "-mod=readonly", "-deps", "-test", "-tags", "badlinkname,tfogo_checklinkname0"])
+                self.assertEqual(resolution[-2:], ["./experimental/libbox", "./cmd/sing-box-flutter-linux"])
+                self.assertFalse(any(command[1:3] == ["mod", "download"] for command, _ in commands))
+                for _, env in commands:
+                    self.assertEqual({key: env[key] for key in ("GOOS", "GOARCH", "CGO_ENABLED")},
+                                     {"GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": "0"})
+                    self.assertTrue(all(env[key] == value for key, value in compiler_env.items()))
+                self.assertEqual([path.name for path in original.iterdir()], ["upstream.go"])
+                self.assertFalse((source / "cmd/sing-box-flutter-linux").exists())
+                if failure or bootstrap_only:
+                    current = (self.host / RECEIPT).read_bytes() if (self.host / RECEIPT).exists() else None
+                    self.assertEqual(current, previous)
+
+    def test_linux_architecture_defaults_and_pinned_linker_identity(self):
+        for machine, arch in (("aarch64", "arm64"), ("arm64", "arm64"), ("x86_64", "amd64")):
+            with self.subTest(machine=machine), mock.patch("build_core.platform.machine", return_value=machine):
+                self.assertEqual(linux_architecture(), arch)
+        with mock.patch("build_core.platform.machine", return_value="unknown"):
+            self.assertEqual(linux_architecture("arm64"), "arm64")
+            with self.assertRaises(BuildError):
+                linux_architecture()
+        command = linux_command(Path("/verified/go"), self.output, ["with_gvisor"],
+                                "a" * 64, {"sing_box_version": "1.14.4"}, "./cmd/sing-box-flutter-linux")
+        self.assertEqual(command[:2], [Path("/verified/go"), "build"])
+        self.assertIn("-trimpath", command)
+        self.assertIn("-buildvcs=false", command)
+        linker = command[command.index("-ldflags") + 1]
+        self.assertIn("-checklinkname=0", linker)
+        self.assertIn("experimental/libbox.coreFingerprint=" + "a" * 64, linker)
+        self.assertIn("constant.Version=1.14.4", linker)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,27 @@ not contain complete configs or credentials. The initial status is disconnected.
 Log: `{type: 'log', level: String, message: String}`. Optional in the first release.
 Do not forward unredacted upstream auth URLs, keys, or configuration dumps as logs.
 
+## Linux process backend
+
+Linux implements the same Dart platform API with `LinuxSingBoxFlutter`, registered
+as a Dart plugin with native CMake bundling. It uses JSON-line requests/responses
+on inherited pipes to a source-built `sing-box-core`; it opens no command socket.
+Configurations never appear in command-line arguments. The bundled capabilities
+fingerprint must match the helper handshake before initialization.
+
+Linux uses the generated registry with no mobile `PlatformInterface`, preserving
+upstream Linux TUN, routing and network monitors. `checkConfig` uses native engine
+validation. `requestPermission` probes actual TUN creation and returns a boolean;
+it does not elevate the process or display a consent dialog. Only the helper needs
+TUN capabilities. Start/stop requests are serialized in the helper, and connected
+is emitted only after the engine starts.
+
+Subscriptions and widgets do not own the Linux connection. Flutter engine/app
+exit closes stdin, which stops the helper and releases the TUN/routes. This differs
+from the persistent mobile service lifecycle. Unexpected helper exit fails pending
+requests, emits an error and requires initialization before reconnection. See
+[Linux setup](linux-setup.md).
+
 ## Native core
 
 With a host `sing_box_flutter.core` selection, use the small `native/mobile`

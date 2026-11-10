@@ -1,0 +1,82 @@
+name: Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/linux.yml'
+      - 'lib/**'
+      - 'bin/**'
+      - 'linux/**'
+      - 'native/**'
+      - 'tool/**'
+      - 'tests/**'
+      - 'example/**'
+      - 'pubspec.yaml'
+      - 'native-core.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            flutter-arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            flutter-arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libstdc++-12-dev libcap2-bin xvfb
+      - name: Resolve example
+        working-directory: example
+        run: flutter pub get
+      - name: Build selected Linux core and run native lifecycle tests
+        working-directory: example
+        run: dart run sing_box_flutter build --target linux --arch ${{ matrix.arch }}
+      - name: Build real Flutter Linux bundle
+        working-directory: example
+        run: flutter build linux --release
+      - name: Archive bundle with executable permissions
+        run: tar -C example/build/linux/${{ matrix.flutter-arch }}/release -czf linux-${{ matrix.arch }}.tar.gz bundle
+      - name: Validate unprivileged native runtime
+        run: python3 tests/linux_runtime_smoke.py --helper example/build/linux/${{ matrix.flutter-arch }}/release/bundle/lib/sing_box_flutter/sing-box-core
+      - name: Validate TUN traffic and cleanup in isolated network namespace
+        run: |
+          sudo unshare --net --mount-proc bash -euc '
+            ip link set lo up
+            ip link add sbf-uplink type dummy
+            ip address add 192.0.2.2/24 dev sbf-uplink
+            ip link set sbf-uplink up
+            ip route add default via 192.0.2.1 dev sbf-uplink
+            python3 tests/linux_runtime_smoke.py --tun --helper example/build/linux/${{ matrix.flutter-arch }}/release/bundle/lib/sing_box_flutter/sing-box-core
+          '
+      - name: Smoke test Flutter plugin registration and core initialization
+        working-directory: example
+        run: xvfb-run -a flutter test integration_test/plugin_integration_test.dart -d linux
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            linux-${{ matrix.arch }}.tar.gz
+            example/.dart_tool/sing_box_flutter/native.json
+          if-no-files-found: ignore

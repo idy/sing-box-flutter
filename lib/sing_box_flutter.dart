@@ -1,4 +1,4 @@
-/// Native sing-box VPN control for Android, iOS and macOS.
+/// Native sing-box VPN control for Android, iOS, macOS and Linux.
 ///
 /// Install the native libbox artifacts and, for Network Extension mode, a Packet Tunnel extension
 /// before using this library. See the package README for host setup.
@@ -9,12 +9,14 @@ import 'dart:convert';
 import 'sing_box_flutter_platform_interface.dart';
 import 'src/events.dart';
 
+export 'sing_box_flutter_linux.dart' show LinuxSingBoxFlutter;
 export 'src/events.dart';
 
 /// Controls the native VPN service independently of Flutter's UI lifecycle.
 ///
 /// All instances refer to the same native VPN service. Cancelling an event
-/// subscription does not stop the VPN; call [stop] explicitly.
+/// subscription does not stop the VPN; call [stop] explicitly. On Linux, exiting
+/// the Flutter engine also stops its child core; mobile services are independent.
 class SingBoxFlutter {
   /// Initializes platform integration without starting a VPN connection.
   ///
@@ -48,7 +50,7 @@ class SingBoxFlutter {
 
   /// Checks sing-box JSON without connecting.
   ///
-  /// Android validates it using the native engine. iOS performs structural and
+  /// Android and Linux use native engine validation. iOS performs structural and
   /// compiled-capability preflight in the app; the extension performs full engine
   /// validation during startup, so a successful preflight cannot guarantee start.
   /// macOS user_tun requires an idle runtime and returns `busy` while a check,
@@ -65,6 +67,8 @@ class SingBoxFlutter {
   /// attached Activity; iOS and macOS NE install the configured VPN profile.
   /// macOS user_tun checks administrator privileges and returns false when absent;
   /// it does not display an elevation dialog or install a privileged helper.
+  /// Linux probes TUN access and requires capabilities on its bundled helper;
+  /// no dialog opens.
   Future<bool> requestPermission() =>
       SingBoxFlutterPlatform.instance.requestPermission();
 
