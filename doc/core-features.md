@@ -137,21 +137,21 @@ for each profile instead of adding estimated per-feature sizes.
 
 ## Measured minimal WGC build
 
-On 2026-11-09, with sing-box 1.14.4, the pinned Go fork, Xcode/iOS SDK 27.1
+On 2026-11-10, with sing-box 1.14.4, the pinned Go fork, Xcode/iOS SDK 27.1
 (targeting iOS 15) and Android NDK 28.0.13004108:
 
 | Comparable artifact | Cached standard core | Selected WGC core |
 | --- | ---: | ---: |
-| iOS arm64 static library | 74.11 MiB | 26.60 MiB |
-| iOS Release PacketTunnel executable | 59.94 MiB | 21.75 MiB |
+| iOS arm64 static library | 74.11 MiB | 26.61 MiB |
+| iOS Release PacketTunnel executable | 59.94 MiB | 21.83 MiB |
 | Android arm64 native `.so`, uncompressed | 60.58 MiB | 22.96 MiB |
 
 The selected host uses exactly the minimal WGC block above. The cached standard
 baseline predates WGC registration; the smaller selected build includes WGC.
-The main iOS Release executable is 0.33 MiB and contains no Go runtime symbols,
+The main iOS Release executable is 0.41 MiB and contains no Go runtime symbols,
 compared with 59.93 MiB when it also linked the complete engine. These executable
 sizes exclude other app resources and the Flutter framework; they are not IPA/APK
-download sizes or RAM measurements. The arm64-only selected Android AAR is 8.22 MiB
+download sizes or RAM measurements. The arm64-only selected Android AAR is 8.23 MiB
 compressed, not directly comparable to the standard four-ABI AAR.
 
 Framework compilation, the real iOS Release app/extension link and simulator

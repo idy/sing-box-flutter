@@ -4,6 +4,11 @@ An independent Flutter plugin for running [sing-box](https://github.com/SagerNet
 as a native VPN on Android and iOS. Select the compiled protocols in your host
 `pubspec.yaml` and build them from source with the pinned **Tailscale Go** compiler.
 
+![Overview: a minimal WGC core is 62–64% smaller than the standard libbox build, the iOS app process has no Go runtime, and three steps build it from the host pubspec.yaml](doc/images/overview.svg)
+
+Sizes compare uncompressed binaries for the minimal WGC profile; see
+[measured builds](doc/core-features.md#measured-minimal-wgc-build).
+
 This project is not affiliated with or endorsed by SagerNet or Tailscale.
 
 ## Platform support

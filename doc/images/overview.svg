@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="1142" viewBox="0 0 960 1142" role="img" aria-labelledby="title desc">
+  <title id="title">sing_box_flutter: a host-selected sing-box core</title>
+  <desc id="desc">Compared with the standard libbox build, a minimal WGC core is 64 percent smaller for the iOS Packet Tunnel extension and 62 percent smaller for the Android arm64 library, and the iOS app process contains no Go runtime. Usage: select features in the app's pubspec.yaml, run dart run sing_box_flutter build for each platform, then run the app with the existing Dart API.</desc>
+  <style>
+    .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 13.5px; white-space: pre; }
+    .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 1.6px; fill: #2563EB; }
+    .title { font-size: 30px; font-weight: 700; fill: #0F172A; }
+    .subtitle { font-size: 15px; fill: #475569; }
+    .heading { font-size: 16px; font-weight: 700; fill: #0F172A; }
+    .section { font-size: 20px; font-weight: 700; fill: #0F172A; }
+    .meta { font-size: 13px; fill: #64748B; }
+    .metric { font-size: 14px; font-weight: 600; fill: #0F172A; }
+    .gain { font-size: 13px; font-weight: 700; fill: #2563EB; }
+    .item { font-size: 15px; font-weight: 600; fill: #0F172A; }
+    .body { font-size: 13px; fill: #475569; }
+    .step { font-size: 17px; font-weight: 700; fill: #0F172A; }
+    .stepbody { font-size: 14px; fill: #475569; }
+    .note { font-size: 12px; fill: #64748B; }
+    .number { font-size: 16px; font-weight: 700; fill: #FFFFFF; }
+    .c { fill: #E2E8F0; }
+    .k { fill: #93C5FD; }
+    .v { fill: #A7F3D0; }
+    .m { fill: #7C8BA1; }
+    .w { fill: #C4B5FD; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="959" height="1141" rx="18" fill="#F8FAFC" stroke="#E2E8F0"/>
+
+  <!-- Header -->
+  <text x="40" y="52" class="sans eyebrow">SING_BOX_FLUTTER 0.3.0</text>
+  <text x="40" y="88" class="sans title">Ship only the sing-box your app uses</text>
+  <text x="40" y="116" class="sans subtitle">A host-selected native core instead of the fixed libbox SDK — the same Flutter VPN API on Android and iOS.</text>
+
+  <!-- Size comparison -->
+  <rect x="40" y="144" width="430" height="360" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <text x="64" y="178" class="sans heading">Minimal WGC core vs. standard libbox</text>
+  <text x="64" y="199" class="sans meta">Uncompressed binary size (MiB)</text>
+  <rect x="64" y="212" width="12" height="12" rx="3" fill="#CBD5E1"/>
+  <text x="82" y="222" class="sans meta">Standard libbox</text>
+  <rect x="200" y="212" width="12" height="12" rx="3" fill="#2563EB"/>
+  <text x="218" y="222" class="sans meta">Selected WGC core</text>
+
+  <text x="64" y="258" class="sans metric">iOS Packet Tunnel extension</text>
+  <rect x="64" y="267" width="285" height="14" rx="3" fill="#CBD5E1"/>
+  <text x="357" y="278" class="sans meta">59.94</text>
+  <rect x="64" y="286" width="103.8" height="14" rx="3" fill="#2563EB"/>
+  <text x="175.8" y="297" class="sans gain">21.83<tspan dx="8">−64%</tspan></text>
+
+  <text x="64" y="334" class="sans metric">Android arm64 libbox.so</text>
+  <rect x="64" y="343" width="288" height="14" rx="3" fill="#CBD5E1"/>
+  <text x="360" y="354" class="sans meta">60.58</text>
+  <rect x="64" y="362" width="109.2" height="14" rx="3" fill="#2563EB"/>
+  <text x="181.2" y="373" class="sans gain">22.96<tspan dx="8">−62%</tspan></text>
+
+  <text x="64" y="410" class="sans metric">iOS main app executable</text>
+  <rect x="64" y="419" width="284.9" height="14" rx="3" fill="#CBD5E1"/>
+  <text x="356.9" y="430" class="sans meta">59.93</text>
+  <rect x="64" y="438" width="3" height="14" rx="1.5" fill="#2563EB"/>
+  <text x="75" y="449" class="sans gain">0.41<tspan dx="8">no Go runtime</tspan></text>
+
+  <text x="64" y="478" class="sans note">Same sing-box 1.14.4 pins. Not IPA/APK download size.</text>
+  <text x="64" y="494" class="sans note">The full mobile profile is broader and larger.</text>
+
+  <!-- Advantages -->
+  <rect x="490" y="144" width="430" height="360" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <text x="514" y="178" class="sans heading">What changes vs. libbox</text>
+
+  <g>
+    <circle cx="527" cy="212" r="13" fill="#DBEAFE"/>
+    <path d="M521.5 212.5 L525.5 216.5 L533 208" fill="none" stroke="#2563EB" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="552" y="217" class="sans item">Choose features in pubspec.yaml</text>
+    <text x="552" y="237" class="sans body">Endpoints, protocols, DNS, TLS and services;</text>
+    <text x="552" y="255" class="sans body">only selected constructors are registered.</text>
+  </g>
+  <g>
+    <circle cx="527" cy="286" r="13" fill="#DBEAFE"/>
+    <path d="M521.5 286.5 L525.5 290.5 L533 282" fill="none" stroke="#2563EB" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="552" y="291" class="sans item">One Go engine on iOS</text>
+    <text x="552" y="311" class="sans body">Linked only into the Packet Tunnel extension;</text>
+    <text x="552" y="329" class="sans body">the Flutter app process stays Go-free.</text>
+  </g>
+  <g>
+    <circle cx="527" cy="360" r="13" fill="#DBEAFE"/>
+    <path d="M521.5 360.5 L525.5 364.5 L533 356" fill="none" stroke="#2563EB" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="552" y="365" class="sans item">Thin mobile binding</text>
+    <text x="552" y="385" class="sans body">Replaces libbox’s RPC command server and</text>
+    <text x="552" y="403" class="sans body">profile manager with direct lifecycle calls.</text>
+  </g>
+  <g>
+    <circle cx="527" cy="434" r="13" fill="#DBEAFE"/>
+    <path d="M521.5 434.5 L525.5 438.5 L533 430" fill="none" stroke="#2563EB" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="552" y="439" class="sans item">Per-app, verified artifacts</text>
+    <text x="552" y="459" class="sans body">Fingerprinted cores in each app’s .dart_tool;</text>
+    <text x="552" y="477" class="sans body">Gradle and CocoaPods reject stale builds.</text>
+  </g>
+
+  <!-- How to use -->
+  <text x="40" y="546" class="sans eyebrow">HOW TO USE</text>
+  <text x="40" y="572" class="sans section">Three steps from pubspec.yaml to a running VPN</text>
+
+  <rect x="40" y="592" width="880" height="226" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <circle cx="76" cy="626" r="17" fill="#2563EB"/>
+  <text x="76" y="631.5" text-anchor="middle" class="sans number">1</text>
+  <text x="106" y="632" class="sans step">Select features</text>
+  <text x="106" y="660" class="sans stepbody">Add the plugin and a sing_box_flutter.core</text>
+  <text x="106" y="681" class="sans stepbody">block to your Flutter app’s pubspec.yaml.</text>
+  <text x="106" y="702" class="sans stepbody">Required dependencies are resolved for you;</text>
+  <text x="106" y="723" class="sans stepbody">unsupported names fail the build early.</text>
+  <rect x="456" y="608" width="440" height="194" rx="10" fill="#0F172A"/>
+  <text x="476" y="634" class="mono" xml:space="preserve"><tspan class="k">dependencies</tspan><tspan class="c">:</tspan></text>
+  <text x="476" y="653" class="mono" xml:space="preserve"><tspan class="c">  </tspan><tspan class="k">sing_box_flutter</tspan><tspan class="c">: </tspan><tspan class="v">^0.3.0</tspan></text>
+  <text x="476" y="691" class="mono" xml:space="preserve"><tspan class="k">sing_box_flutter</tspan><tspan class="c">:</tspan></text>
+  <text x="476" y="710" class="mono" xml:space="preserve"><tspan class="c">  </tspan><tspan class="k">core</tspan><tspan class="c">:</tspan></text>
+  <text x="476" y="729" class="mono" xml:space="preserve"><tspan class="c">    </tspan><tspan class="k">inbounds</tspan><tspan class="c">: [</tspan><tspan class="v">tun</tspan><tspan class="c">]</tspan></text>
+  <text x="476" y="748" class="mono" xml:space="preserve"><tspan class="c">    </tspan><tspan class="k">outbounds</tspan><tspan class="c">: [</tspan><tspan class="v">direct</tspan><tspan class="c">]</tspan></text>
+  <text x="476" y="767" class="mono" xml:space="preserve"><tspan class="c">    </tspan><tspan class="k">endpoints</tspan><tspan class="c">: [</tspan><tspan class="v">wgc</tspan><tspan class="c">]   </tspan><tspan class="m"># + tailscale, wireguard…</tspan></text>
+  <text x="476" y="786" class="mono" xml:space="preserve"><tspan class="c">    </tspan><tspan class="k">dns</tspan><tspan class="c">: [</tspan><tspan class="v">udp, tcp, fakeip</tspan><tspan class="c">]</tspan></text>
+
+  <rect x="40" y="832" width="880" height="128" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <circle cx="76" cy="866" r="17" fill="#2563EB"/>
+  <text x="76" y="871.5" text-anchor="middle" class="sans number">2</text>
+  <text x="106" y="872" class="sans step">Build the native core</text>
+  <text x="106" y="900" class="sans stepbody">Generates the selected registry and compiles</text>
+  <text x="106" y="921" class="sans stepbody">it with the pinned, verified Tailscale Go</text>
+  <text x="106" y="942" class="sans stepbody">toolchain — no global Go install needed.</text>
+  <rect x="456" y="856" width="440" height="80" rx="10" fill="#0F172A"/>
+  <text x="476" y="882" class="mono" xml:space="preserve"><tspan class="c">dart run sing_box_flutter build </tspan><tspan class="k">--target </tspan><tspan class="v">android</tspan></text>
+  <text x="476" y="901" class="mono" xml:space="preserve"><tspan class="c">dart run sing_box_flutter build </tspan><tspan class="k">--target </tspan><tspan class="v">apple</tspan></text>
+  <text x="476" y="920" class="mono" xml:space="preserve"><tspan class="m"># → AAR / XCFramework in .dart_tool/</tspan></text>
+
+  <rect x="40" y="974" width="880" height="132" rx="14" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <circle cx="76" cy="1008" r="17" fill="#2563EB"/>
+  <text x="76" y="1013.5" text-anchor="middle" class="sans number">3</text>
+  <text x="106" y="1014" class="sans step">Run your app</text>
+  <text x="106" y="1042" class="sans stepbody">Gradle and CocoaPods link the verified core.</text>
+  <text x="106" y="1063" class="sans stepbody">Control the VPN from Dart on Android</text>
+  <text x="106" y="1084" class="sans stepbody">VpnService and the iOS Packet Tunnel.</text>
+  <rect x="456" y="990" width="440" height="100" rx="10" fill="#0F172A"/>
+  <text x="476" y="1016" class="mono" xml:space="preserve"><tspan class="w">final </tspan><tspan class="c">vpn = SingBoxFlutter();</tspan></text>
+  <text x="476" y="1035" class="mono" xml:space="preserve"><tspan class="w">if </tspan><tspan class="c">(</tspan><tspan class="w">await </tspan><tspan class="c">vpn.</tspan><tspan class="k">requestPermission</tspan><tspan class="c">()) {</tspan></text>
+  <text x="476" y="1054" class="mono" xml:space="preserve"><tspan class="c">  </tspan><tspan class="w">await </tspan><tspan class="c">vpn.</tspan><tspan class="k">start</tspan><tspan class="c">(config: configJson);</tspan></text>
+  <text x="476" y="1073" class="mono" xml:space="preserve"><tspan class="c">}</tspan></text>
+</svg>
