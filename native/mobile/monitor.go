@@ -219,15 +219,24 @@ type updateQueue struct {
 }
 
 func (q *updateQueue) enter() (leave func()) {
+	wait, leave := q.reserve()
+	wait()
+	return leave
+}
+
+// reserve fixes publication order without waiting on callbacks that may be
+// holding a route/start lock needed by the caller.
+func (q *updateQueue) reserve() (wait func(), leave func()) {
 	done := make(chan struct{})
 	q.access.Lock()
 	previous := q.tail
 	q.tail = done
 	q.access.Unlock()
-	if previous != nil {
-		<-previous
-	}
-	return func() { close(done) }
+	return func() {
+		if previous != nil {
+			<-previous
+		}
+	}, func() { close(done) }
 }
 
 func (m *platformDefaultInterfaceMonitor) readDNSServers(interfaceIndex int) []string {
@@ -258,6 +267,26 @@ func (m *platformDefaultInterfaceMonitor) RegisterMyInterface(interfaceName stri
 	if m.defaultInterface != nil && m.defaultInterface.Name == interfaceName {
 		m.defaultInterface = nil
 		m.defaultDNSServers = nil
+		// Listeners on every platform must lose the owned default too. Reserve
+		// before unlocking so a later path cannot overtake this notification;
+		// dispatch asynchronously because registration can hold route/start locks
+		// or run inside an existing update callback.
+		wait, leave := m.updates.reserve()
+		go func() {
+			wait()
+			defer leave()
+			m.defaultInterfaceAccess.Lock()
+			// An earlier queued update may already have found a physical uplink.
+			if m.closed || m.defaultInterface != nil {
+				m.defaultInterfaceAccess.Unlock()
+				return
+			}
+			callbacks := m.callbacks.Array()
+			m.defaultInterfaceAccess.Unlock()
+			for _, callback := range callbacks {
+				callback(nil, 0)
+			}
+		}()
 	}
 	m.defaultInterfaceAccess.Unlock()
 	// Hosts may enqueue a refreshed path. Never invoke them while holding the

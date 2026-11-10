@@ -331,42 +331,76 @@ func TestMonitorRejectsOwnedInterfaceRegisteredDuringEnumeration(t *testing.T) {
 }
 
 func TestMonitorRegistrationWithdrawsPublishedDefaultWithoutReentry(t *testing.T) {
-	monitor, _, _ := newMonitorFixture()
-	published, registrations := 0, 0
-	monitor.RegisterCallback(func(*control.Interface, int) { published++ })
-	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
-	monitor.defaultInterfaceAccess.Lock()
-	monitor.defaultDNSServers = []string{"192.0.2.1"}
-	monitor.defaultInterfaceAccess.Unlock()
-	monitor.registerInterface = func(name string) {
-		registrations++
-		// The host hook must run outside the mutex and after atomic withdrawal.
-		if monitor.DefaultInterface() != nil || !slices.Contains(monitor.MyInterfaces(), name) {
-			t.Error("host refresh saw an owned default interface")
-		}
-		temporary := monitor.RegisterCallback(func(*control.Interface, int) {})
-		monitor.UnregisterCallback(temporary)
+	for _, refreshHook := range []bool{false, true} {
+		t.Run("host-refresh="+strconv.FormatBool(refreshHook), func(t *testing.T) {
+			monitor, _, _ := newMonitorFixture()
+			published, registrations := 0, 0
+			monitor.RegisterCallback(func(iif *control.Interface, _ int) {
+				published++
+				if monitor.DefaultInterface() != iif {
+					t.Error("withdrawal callback ran before the default pointer changed")
+				}
+				temporary := monitor.RegisterCallback(func(*control.Interface, int) {})
+				monitor.UnregisterCallback(temporary)
+			})
+			monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+			monitor.defaultInterfaceAccess.Lock()
+			monitor.defaultDNSServers = []string{"192.0.2.1"}
+			monitor.defaultInterfaceAccess.Unlock()
+			if refreshHook {
+				monitor.registerInterface = func(name string) {
+					registrations++
+					if monitor.DefaultInterface() != nil || !slices.Contains(monitor.MyInterfaces(), name) {
+						t.Error("host refresh saw an owned default interface")
+					}
+				}
+			}
+			// Registration must finish even while callbacks hold the update queue.
+			leave := leaveAfterTest(t, monitor.updates.enter())
+			registered := make(chan struct{})
+			go func() { monitor.RegisterMyInterface("wifi-test"); close(registered) }()
+			receive(t, registered)
+			if monitor.DefaultInterface() != nil || monitor.defaultDNSServers != nil || published != 1 || (registrations == 1) != refreshHook {
+				t.Fatal("registration retained an owned default/DNS or dispatched synchronous callbacks")
+			}
+			monitor.RegisterMyInterface("wifi-test")
+			withdrawal := queueTail(&monitor.updates)
+			leave()
+			receive(t, withdrawal)
+			if published != 2 {
+				t.Fatal("listeners did not receive exactly one withdrawal")
+			}
+			monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+			if monitor.DefaultInterface() != nil || published != 2 {
+				t.Fatal("duplicate registration or stale report restored an owned default")
+			}
+			monitor.UpdateDefaultInterface("cell-test", 102, false, false)
+			if current := monitor.DefaultInterface(); current == nil || current.Index != 102 || published != 3 {
+				t.Fatal("host refresh did not publish the physical uplink")
+			}
+		})
 	}
-	registered := make(chan struct{})
-	go func() { monitor.RegisterMyInterface("wifi-test"); close(registered) }()
-	receive(t, registered)
-	if monitor.DefaultInterface() != nil || monitor.defaultDNSServers != nil || published != 1 || registrations != 1 {
-		t.Fatal("registration retained an owned default/DNS or dispatched synchronous callbacks")
-	}
-	monitor.RegisterMyInterface("wifi-test")
-	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
-	if monitor.DefaultInterface() != nil || registrations != 1 || published != 1 {
-		t.Fatal("duplicate registration or stale report restored an owned default")
-	}
-	monitor.UpdateDefaultInterface("cell-test", 102, false, false)
-	if current := monitor.DefaultInterface(); current == nil || current.Index != 102 || published != 2 {
-		t.Fatal("host refresh did not publish the physical uplink")
-	}
+}
+
+// Ensure a failed assertion cannot leave a queued worker blocked; the returned
+// wrapper also makes explicitly releasing the queue safe to repeat in cleanup.
+func leaveAfterTest(t *testing.T, leave func()) func() {
+	t.Helper()
+	var once sync.Once
+	release := func() { once.Do(leave) }
+	t.Cleanup(release)
+	return release
 }
 
 func TestMonitorRegistrationFromCallbackDoesNotEnterUpdateQueue(t *testing.T) {
 	monitor, _, _ := newMonitorFixture()
+	var published []int
 	monitor.RegisterCallback(func(iif *control.Interface, _ int) {
+		if iif == nil {
+			published = append(published, -1)
+			return
+		}
+		published = append(published, iif.Index)
 		monitor.RegisterMyInterface(iif.Name)
 		if monitor.DefaultInterface() != nil {
 			t.Error("callback registration left an owned default")
@@ -375,6 +409,77 @@ func TestMonitorRegistrationFromCallbackDoesNotEnterUpdateQueue(t *testing.T) {
 	updated := make(chan struct{})
 	go func() { monitor.UpdateDefaultInterface("wifi-test", 101, false, false); close(updated) }()
 	receive(t, updated)
+	receive(t, queueTail(&monitor.updates))
+	if !slices.Equal(published, []int{101, -1}) {
+		t.Fatalf("callback registration did not publish withdrawal: %v", published)
+	}
+}
+
+func TestMonitorWithdrawalPrecedesLaterPath(t *testing.T) {
+	monitor, _, _ := newMonitorFixture()
+	var published []int
+	monitor.RegisterCallback(func(iif *control.Interface, _ int) {
+		if iif == nil {
+			published = append(published, -1)
+		} else {
+			published = append(published, iif.Index)
+		}
+	})
+	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+	leave := leaveAfterTest(t, monitor.updates.enter())
+	monitor.RegisterMyInterface("wifi-test")
+	withdrawal := queueTail(&monitor.updates)
+	updated := make(chan struct{})
+	go func() { monitor.UpdateDefaultInterface("cell-test", 102, false, false); close(updated) }()
+	waitForQueueTail(t, &monitor.updates, withdrawal)
+	leave()
+	receive(t, updated)
+	if !slices.Equal(published, []int{101, -1, 102}) {
+		t.Fatalf("withdrawal overtaken by a later path: %v", published)
+	}
+}
+
+func TestMonitorWithdrawalDoesNotReplaceNewerUplink(t *testing.T) {
+	monitor, manager, _ := newMonitorFixture()
+	var published []int
+	monitor.RegisterCallback(func(iif *control.Interface, _ int) {
+		if iif == nil {
+			published = append(published, -1)
+		} else {
+			published = append(published, iif.Index)
+		}
+	})
+	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+	entered, release := blockFirstEnumeration(t, manager)
+	updated := make(chan struct{})
+	go func() { monitor.UpdateDefaultInterface("cell-test", 102, false, false); close(updated) }()
+	receive(t, entered)
+	monitor.RegisterMyInterface("wifi-test")
+	withdrawal := queueTail(&monitor.updates)
+	release()
+	receive(t, updated)
+	receive(t, withdrawal)
+	if current := monitor.DefaultInterface(); current == nil || current.Index != 102 || !slices.Equal(published, []int{101, 102}) {
+		t.Fatalf("delayed withdrawal replaced the physical uplink: default=%+v callbacks=%v", current, published)
+	}
+}
+
+func TestMonitorCloseSuppressesQueuedWithdrawal(t *testing.T) {
+	monitor, _, _ := newMonitorFixture()
+	published := 0
+	monitor.RegisterCallback(func(*control.Interface, int) { published++ })
+	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+	leave := leaveAfterTest(t, monitor.updates.enter())
+	monitor.RegisterMyInterface("wifi-test")
+	withdrawal := queueTail(&monitor.updates)
+	if err := monitor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	leave()
+	receive(t, withdrawal)
+	if published != 1 {
+		t.Fatal("closed monitor published a queued withdrawal")
+	}
 }
 
 func TestMonitorCloseDoesNotWaitForQueuedUpdates(t *testing.T) {
