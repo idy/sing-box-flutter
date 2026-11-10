@@ -223,7 +223,9 @@ void main() {
       expect(directories.add(directory), isTrue, reason: 'HOME=$home');
       expect(await Directory(directory).exists(), isTrue);
       if (!Platform.isWindows) {
-        expect((await Directory(directory).stat()).mode & 0x3f, 0);
+        final mode = (await Directory(directory).stat()).mode;
+        expect(mode & 0x3f, 0);
+        expect(mode & 0x1ff, 0x1c0); // 0700, including owner access.
       }
     }
     expect(
@@ -234,6 +236,36 @@ void main() {
       ),
       throwsArgumentError,
     );
+  });
+
+  test('private temporary fallback preserves UTF-8 directory paths', () async {
+    final parent = await Directory('${bundle.path}/tmp-空间-\u{10400}').create();
+    final directory = linuxDataDirectory(
+      environment: {},
+      executable: '/opt/my_app/bin/my_app',
+      temporaryDirectory: parent.path,
+    );
+    expect(directory,
+        startsWith('${await parent.resolveSymbolicLinks()}/sing-box-flutter-'));
+    expect(await Directory(directory).exists(), isTrue);
+    expect((await Directory(directory).stat()).mode & 0x1ff, 0x1c0);
+  });
+
+  test('temporary fallback rejects NUL paths before native path truncation',
+      () async {
+    final entries = await bundle.list().length;
+    expect(
+      () => linuxDataDirectory(
+        environment: {},
+        executable: '/opt/my_app/bin/my_app',
+        temporaryDirectory: '${bundle.path}\u0000/private-path-secret',
+      ),
+      throwsA(isA<PlatformException>()
+          .having((error) => error.code, 'code', 'state_directory')
+          .having((error) => error.toString(), 'message',
+              isNot(contains('private-path-secret')))),
+    );
+    expect(await bundle.list().length, entries);
   });
 
   test('fallback ignores precreated predictable paths and symlinks', () async {

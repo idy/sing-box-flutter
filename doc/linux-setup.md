@@ -107,9 +107,10 @@ path. It stays stable across launches at the same path and separates installatio
 with identical executable names. Moving an installation changes its state location;
 old basename-only state directories are not reused.
 
-If `HOME` is also unset, empty or relative, the backend securely creates a fresh
-private directory in the system temporary directory. It reuses that directory for
-helper restarts within the same backend, but a new engine/backend gets a new one.
+If `HOME` is also unset, empty or relative, the backend calls POSIX `mkdtemp` to
+atomically create a fresh directory with mode `0700` in the system temporary
+directory. It reuses that directory for helper restarts within the same backend,
+but a new engine/backend gets a new one.
 This fallback does not provide persistence across application launches and may be
 removed by the operating system's temporary-file cleanup. Set a valid `HOME` or
 `XDG_DATA_HOME` when persistent caches or other state are required. State paths

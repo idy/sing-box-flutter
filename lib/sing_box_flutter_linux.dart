@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -32,12 +33,8 @@ String linuxDataDirectory({
       throw ArgumentError('The fallback state directory must be absolute.');
     }
     try {
-      // createTemp uses mkdtemp (0700) on Linux. Never reuse a predictable name
-      // or rely on environment variables such as USER/UID for ownership.
-      return Directory(temporaryDirectory)
-          .createTempSync('sing-box-flutter-')
-          .resolveSymbolicLinksSync();
-    } on FileSystemException {
+      return _privateTemporaryDirectory(temporaryDirectory);
+    } catch (_) {
       throw PlatformException(
         code: 'state_directory',
         message: 'Could not create a private Linux state directory.',
@@ -48,6 +45,41 @@ String linuxDataDirectory({
   // A full digest also avoids path-length limits for long executable basenames.
   final installation = sha256.convert(utf8.encode(executable)).toString();
   return p.posix.join(dataHome, installation, 'sing_box_flutter');
+}
+
+String _privateTemporaryDirectory(String parent) {
+  // Dart's Directory.createTemp does not guarantee 0700 on Linux. POSIX mkdtemp
+  // creates the unpredictable directory atomically with private permissions,
+  // without a process-wide umask change or a create-then-chmod exposure window.
+  final template = utf8.encode(p.posix.join(parent, 'sing-box-flutter-XXXXXX'));
+  if (template.contains(0)) {
+    throw const FormatException('Invalid temporary directory.');
+  }
+  final libc = ffi.DynamicLibrary.process();
+  final malloc = libc.lookupFunction<ffi.Pointer<ffi.Void> Function(ffi.IntPtr),
+      ffi.Pointer<ffi.Void> Function(int)>('malloc');
+  final free = libc.lookupFunction<ffi.Void Function(ffi.Pointer<ffi.Void>),
+      void Function(ffi.Pointer<ffi.Void>)>('free');
+  final mkdtemp = libc.lookupFunction<
+      ffi.Pointer<ffi.Uint8> Function(ffi.Pointer<ffi.Uint8>),
+      ffi.Pointer<ffi.Uint8> Function(ffi.Pointer<ffi.Uint8>)>('mkdtemp');
+  final buffer = malloc(template.length + 1).cast<ffi.Uint8>();
+  if (buffer == ffi.nullptr) {
+    throw const FileSystemException('Could not allocate temporary path.');
+  }
+  try {
+    final bytes = buffer.asTypedList(template.length + 1);
+    bytes.setAll(0, template);
+    bytes[template.length] = 0;
+    if (mkdtemp(buffer) == ffi.nullptr) {
+      throw const FileSystemException('Could not create temporary directory.');
+    }
+    // mkdtemp replaces the six ASCII Xs in place and preserves the byte length.
+    final path = utf8.decode(bytes.sublist(0, template.length));
+    return Directory(path).resolveSymbolicLinksSync();
+  } finally {
+    free(buffer.cast<ffi.Void>());
+  }
 }
 
 /// Linux backend using a bundled, source-built sing-box child process.
