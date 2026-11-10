@@ -297,7 +297,10 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 	}
 	attributes := windows.OBJECT_ATTRIBUTES{
 		RootDirectory: parent, ObjectName: objectName,
-		Attributes: objectFlags, SecurityDescriptor: descriptor,
+		Attributes: objectFlags,
+	}
+	if create {
+		attributes.SecurityDescriptor = descriptor
 	}
 	attributes.Length = uint32(unsafe.Sizeof(attributes))
 	access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
@@ -329,7 +332,11 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 			fileAttributes, share, disposition,
 			options|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	}
-	err = open()
+	if create && descriptor != nil {
+		err = withCreationSecurity(open)
+	} else {
+		err = open()
+	}
 	if create && err == windows.STATUS_OBJECT_NAME_COLLISION {
 		// Atomic creation did not win. Open the existing object without any
 		// creation security descriptor and verify it; never repair its policy.

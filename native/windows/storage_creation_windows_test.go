@@ -136,7 +136,7 @@ func TestStorageRootBlocksHostParentLabelPropagation(t *testing.T) {
 		t.Fatal(err)
 	}
 	openHost := func() (windows.Handle, error) {
-		return windows.CreateFile(name, windows.WRITE_OWNER,
+		return windows.CreateFile(name, windows.READ_CONTROL|windows.WRITE_OWNER,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
 			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	}
