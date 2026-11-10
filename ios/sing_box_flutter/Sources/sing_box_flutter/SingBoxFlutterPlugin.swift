@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Flutter
 import Foundation
-import Libbox
 import NetworkExtension
 
 /// Owns system preferences and Flutter channels, never the running VPN service.
@@ -65,7 +64,8 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
     private func execute(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         let arguments = call.arguments as? [String: Any] ?? [:]
         if call.method == "getVersion" {
-            finish(result, LibboxVersion())
+            do { finish(result, try CoreCapabilities.load().version) }
+            catch { fail(result, .coreMismatch) }
             return
         }
         if call.method == "initialize" {
@@ -82,8 +82,11 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
             guard let config = arguments["config"] as? String, !config.isEmpty else { fail(result, .invalidArguments); return }
             validationQueue.async {
                 do {
-                    try NativeCore.check(config)
+                    try ConfigPreflight.check(config, capabilities: CoreCapabilities.load())
                     DispatchQueue.main.async { self.finish(result) }
+                } catch let failure as TunnelFailure {
+                    // Only fixed, credential-free codes/messages are ever constructed.
+                    DispatchQueue.main.async { self.fail(result, failure) }
                 } catch {
                     DispatchQueue.main.async { self.fail(result, .invalidConfig) }
                 }
@@ -100,12 +103,13 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
             }
             validationQueue.async {
                 do {
-                    try NativeCore.check(config)
+                    let capabilities = try CoreCapabilities.load()
+                    try ConfigPreflight.check(config, capabilities: capabilities, requireTUN: true)
                     DispatchQueue.main.async {
                         // The OS can start the saved VPN from Settings while validation runs.
                         guard !self.isActive else { self.fail(result, .busy); return }
                         let configuration: TunnelConfiguration
-                        do { configuration = try storage.saveConfiguration(config, name: name) }
+                        do { configuration = try storage.saveConfiguration(config, name: name, coreFingerprint: capabilities.fingerprint) }
                         catch { self.fail(result, .storage); return }
                         do {
                             self.startRequested = true
@@ -172,7 +176,7 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
                     }
                     self.validationQueue.async {
                         do {
-                            try NativeCore.setup(storage: newStorage, validation: true)
+                            _ = try CoreCapabilities.load()
                             DispatchQueue.main.async {
                                 self.storage = newStorage
                                 self.providerBundleIdentifier = bundle
@@ -289,7 +293,7 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
         case .invalid, .disconnected:
             if startRequested { emit(TunnelStatus("connecting")); return }
             if let saved = storage?.readStatus(), saved.state == "error",
-               let configuration = try? storage?.loadConfiguration(), saved.sessionID == configuration.sessionID {
+               let currentSessionID = storage?.currentSessionID(), saved.sessionID == currentSessionID {
                 emit(TunnelStatus("error", message: saved.message))
             } else { emit(TunnelStatus("disconnected")) }
         @unknown default: emit(TunnelStatus("error", message: "The system returned an unknown VPN status."))

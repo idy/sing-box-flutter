@@ -11,6 +11,7 @@ import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
 import java.io.File
 import java.security.SecureRandom
+import org.json.JSONObject
 import java.util.concurrent.Executors
 
 internal class NativeFailure(val code: String, override val message: String) : Exception(message)
@@ -39,6 +40,21 @@ internal object NativeRuntime {
         if (!initialized) {
             if (Libbox.version() != CORE_VERSION) {
                 throw NativeFailure("core_version_mismatch", "Expected libbox $CORE_VERSION; rebuild the pinned native artifact.")
+            }
+            // Selected cores carry their build identity in both JNI and an asset.
+            // Reflection keeps standard published libbox artifacts compatible.
+            val manifestText = try {
+                context.assets.open("sing_box_flutter/core-capabilities.json").bufferedReader().use { it.readText() }
+            } catch (_: java.io.FileNotFoundException) { null }
+            if (manifestText != null) {
+                try {
+                    val manifest = JSONObject(manifestText)
+                    val fingerprint = Libbox::class.java.getMethod("coreFingerprint").invoke(null) as? String
+                    check(manifest.getInt("schema") == 1 && manifest.getString("version") == CORE_VERSION)
+                    check(fingerprint != null && fingerprint.matches(Regex("[0-9a-f]{64}")) && fingerprint == manifest.getString("fingerprint"))
+                } catch (_: Exception) {
+                    throw NativeFailure("core_profile_mismatch", "The selected native core and app capabilities differ. Rebuild the core and app.")
+                }
             }
             val root = File(context.noBackupFilesDir, "sing_box_flutter")
             val base = File(root, "base")

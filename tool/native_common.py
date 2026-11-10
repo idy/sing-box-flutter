@@ -55,12 +55,14 @@ def load_pins(root: Path = ROOT) -> dict:
     return pins
 
 
-def pin_identity(pins: dict) -> dict:
+def pin_identity(pins: dict, root: Path | None = None) -> dict:
     from source_inputs import adapter_digest
+    if root is None:
+        root = ROOT
     identity = {key: pins[key] for key in ("sing_box_version", "sing_box_revision",
                                           "tailscale_go_revision", "gomobile_version", "wgc_version")}
-    identity["wgc_source_sha256"] = adapter_digest(ROOT / "native/wgc")
-    identity["wgc_overlay_sha256"] = sha256(ROOT / "tool/wgc_overlay.py")
+    identity["wgc_source_sha256"] = adapter_digest(root / "native/wgc")
+    identity["wgc_overlay_sha256"] = sha256(root / "tool/wgc_overlay.py")
     return identity
 
 
@@ -89,9 +91,9 @@ def build_directory(path: str | Path, root: Path = ROOT) -> Path:
 
 
 @contextlib.contextmanager
-def project_lock(root: Path = ROOT):
+def project_lock(root: Path = ROOT, base: Path | None = None):
     import fcntl  # Builds support macOS/Linux, including Android cross builds.
-    base = build_directory(root / ".build", root)
+    base = build_directory(root / ".build", root) if base is None else base
     base.mkdir(parents=True, exist_ok=True)
     with (base / "native-core.lock").open("w") as handle:
         try:

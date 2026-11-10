@@ -1,8 +1,13 @@
 # sing_box_flutter
 
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
-as a native VPN on Android and iOS. Includes a reproducible **Tailscale Go** build
-of libbox with Tailscale endpoints enabled.
+as a native VPN on Android and iOS. Select the compiled protocols in your host
+`pubspec.yaml` and build them from source with the pinned **Tailscale Go** compiler.
+
+![Overview: a minimal WGC core is 62–64% smaller than the standard libbox build, the iOS app process has no Go runtime, and three steps build it from the host pubspec.yaml](doc/images/overview.svg)
+
+Sizes compare uncompressed binaries for the minimal WGC profile; see
+[measured builds](doc/core-features.md#measured-minimal-wgc-build).
 
 This project is not affiliated with or endorsed by SagerNet or Tailscale.
 
@@ -24,21 +29,79 @@ The first release provides core version lookup, configuration validation, explic
 VPN consent, start/stop, and connection status. It accepts complete sing-box JSON;
 it does not provide a profile editor, subscription manager, or Tailscale account UI.
 
-## Install
+## Install and build from source
 
-Add the dependency to a Flutter application:
+Version 0.3.0 ships source and build scripts. Its GitHub Release has no universal
+precompiled libbox `.a`, AAR or XCFramework SDK assets. Compile the capabilities
+your app needs from the pinned sources.
+
+Add the dependency and a top-level feature selection to your **Flutter app's**
+`pubspec.yaml`, alongside its existing `flutter` configuration:
 
 ```yaml
 dependencies:
-  sing_box_flutter: ^0.2.0
+  sing_box_flutter: ^0.3.0
+
+sing_box_flutter:
+  core:
+    inbounds: [tun]
+    outbounds: [direct]
+    endpoints: [wgc]
+    dns: [udp, tcp, fakeip]
 ```
+
+Install these build prerequisites:
+
+- Python 3.11+ and Git. Python is also used when Gradle or CocoaPods validates a
+  selected core; no third-party Python packages are needed.
+- For Android: OpenJDK 17, the Android SDK and NDK `28.0.13004108`.
+- For iOS: macOS with Xcode and its iPhoneOS/simulator SDKs, plus CocoaPods for the
+  Flutter host integration.
+
+The builder automatically downloads and verifies the pinned **Tailscale Go**
+compiler and mobile tools. You do not need to install Go globally. The installed
+app needs no separate Go installation; its native core contains the Go runtime.
+See [native build details](doc/native-build.md) for SDK configuration and caches.
+
+Run these commands from your Flutter app, selecting the platform you need:
 
 ```bash
 flutter pub get
+dart run sing_box_flutter build --target android
 ```
 
-Native binaries are distributed separately from the pub.dev package. Python 3.11+
-is required to install them. Run the matching command from your Flutter app:
+```bash
+dart run sing_box_flutter build --target apple
+```
+
+The builder generates a constructor registry and compiles a small mobile binding
+layer directly against the pinned sing-box engine. It does not link the official
+libbox RPC/profile-management layer. Required dependencies, such as WGC's userspace
+network stack or Hysteria2's QUIC implementation, are resolved automatically.
+
+Artifacts stay in your app's `.dart_tool/sing_box_flutter/`, keyed by feature and
+source fingerprints. Gradle and CocoaPods resolve that app's artifact; changing
+another app's selection does not overwrite binaries in a shared pub cache.
+Rebuild the core after editing the host pubspec, then rebuild the app (on iOS,
+rerun `pod install` or let Flutter run it). Neither `flutter pub get` nor a normal
+app build silently downloads Go or compiles a new core.
+
+Add `tailscale` or `wireguard` to `endpoints`, or protocols such as `vless`,
+`shadowsocks`, and `hysteria2` to `outbounds`. Missing capabilities and unsupported
+platform selections fail explicitly. A selected core requires a source build;
+`install` cannot satisfy a host feature selection.
+
+The example includes [WGC minimal, WGC + Tailscale and full mobile
+profiles](example/core-profiles/README.md), with a tool that switches only its
+pubspec feature block. See [feature selection](doc/core-features.md) for defaults,
+dependencies, validation semantics, architecture options and the complete
+capability catalogue.
+
+### Legacy standard-core compatibility
+
+Hosts without a `sing_box_flutter.core` block retain the standard build/install
+path. The installer remains available for historical binary releases such as
+`v0.2.0`; 0.3.0 does not publish replacement SDK assets:
 
 ```bash
 dart run sing_box_flutter install --target android --release v0.2.0
@@ -48,12 +111,10 @@ dart run sing_box_flutter install --target android --release v0.2.0
 dart run sing_box_flutter install --target apple --release v0.2.0
 ```
 
-The installer verifies the release checksums and pinned build metadata before
-placing artifacts in the resolved plugin directory. Reinstall the artifacts after
-changing the package version or clearing your pub cache. Native artifacts are not
-downloaded silently during a normal Dart dependency resolution.
-
-To build them yourself instead, use the `build` command described below.
+This legacy installer requires Python 3.11+, verifies release checksums and pinned
+build metadata, and places artifacts in the resolved plugin directory. Reinstall
+them after changing the package version or clearing your pub cache. The standard
+source-build helper is also retained; see [legacy build and install details](doc/native-build.md#legacy-standard-core-build-and-install).
 
 ### Android host setup
 
@@ -104,8 +165,11 @@ await vpn.stop();
 await subscription.cancel();
 ```
 
-Invalid JSON is rejected locally. Native validation and connection failures
-surface as `PlatformException`; the plugin avoids including configurations or
+Invalid JSON is rejected locally. Android checks use the native engine; iOS
+`checkConfig` performs structural/capability preflight in the Go-free app, with
+full engine validation deferred to extension startup. A successful iOS preflight
+does not guarantee startup. Validation and connection failures surface as
+`PlatformException`; the plugin avoids including configurations or
 authentication keys in its own errors. Treat your configuration JSON as sensitive
 and do not write it to application logs.
 
@@ -124,8 +188,9 @@ protocol implementation into this repository.
 
 ## Tailscale support
 
-The pinned native build includes `with_tailscale` and the upstream mobile build's
-memory-saving options. An endpoint can be included in normal sing-box JSON:
+Add `tailscale` to `core.endpoints` (and to `core.dns` if using its DNS transport),
+then rebuild the selected core. The builder retains the upstream mobile
+memory-saving options. Include the endpoint in normal sing-box JSON:
 
 ```json
 {
@@ -160,26 +225,18 @@ substitute a system Go toolchain. Inputs are fixed in [native-core.json](native-
 - Tailscale Go: revision `63ae404c8203317fd3c82d972e5dc8f0fcb425cb`.
 - SagerNet gomobile: `v0.1.12`.
 
-From a source checkout:
+Use the host-selected `dart run sing_box_flutter build` commands above, whether
+the dependency comes from pub.dev or a local source checkout. The builder
+bootstraps the pinned compiler automatically; it never substitutes a system Go
+installation. Toolchains and source caches live under `.build/` inside the package
+checkout, while selected artifacts stay in the host app's `.dart_tool/`.
 
-```bash
-python3 tool/build_libbox.py --target apple
-```
-
-```bash
-python3 tool/build_libbox.py --target android
-```
-
-Or, from a Flutter app that depends on the package:
-
-```bash
-dart run sing_box_flutter build --target apple
-```
-
-Apple builds require macOS and Xcode. Android builds require a JDK, Android SDK,
-and NDK. Toolchains and source caches live under `.build/` inside the package
-checkout; they are excluded from Git and pub.dev. See [native build details](doc/native-build.md)
-for prerequisites, verification, and artifact provenance.
+The pub package must retain `native/mobile/`, `native/wgc/`, `tool/`, pin files and
+license notices so hosts can build from source. Build caches and native outputs
+are excluded from Git and pub.dev. Temporary CI binary archives are validation
+inputs, not 0.3.0 GitHub Release SDK assets. See [native build details](doc/native-build.md)
+for SDK prerequisites, verification, artifact provenance and the source-only
+publication policy.
 
 ## Example and development
 

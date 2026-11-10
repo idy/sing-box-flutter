@@ -4,24 +4,31 @@ The iOS backend requires iOS 15 or later and CocoaPods. A signed host app and a
 separately signed Packet Tunnel Network Extension are required for a real VPN.
 The plugin does not create an extension target or provision Apple capabilities.
 
-The Flutter process manages VPN preferences with `NETunnelProviderManager`, checks
-configuration with libbox, and passes configuration through an App Group container.
+The Flutter process manages VPN preferences with `NETunnelProviderManager`, performs
+Foundation-only structural/capability preflight, and passes configuration through an
+App Group container. The extension performs full libbox validation before startup;
+a successful app-side `checkConfig` does not guarantee that all engine options are
+valid. The main app does not link Go merely for validation or version lookup.
 The actual sing-box service, TUN descriptor, and network monitor run exclusively in
 the extension process. Canceling a Flutter event subscription, detaching its engine,
 or terminating the host app does not stop the VPN.
 
 ## Install the pinned native artifact
 
-Install the native build artifact before `pod install`:
+For a host with `sing_box_flutter.core` in its pubspec, run
+`dart run sing_box_flutter build --target apple` from that host before `pod install`.
+CocoaPods resolves the host's `.dart_tool/sing_box_flutter/native.json` and verifies
+the selected framework and capabilities. It does not copy a new SDK into the plugin
+pub cache. See [feature selection](core-features.md).
 
-```text
-ios/Frameworks/Libbox.xcframework
-```
+For a host using the standard distribution without feature selection, install the
+native artifact at `ios/Frameworks/Libbox.xcframework` in the resolved plugin.
 
 Use the repository's native artifact tooling and the exact pins in
 `native-core.json`: sing-box **v1.14.4**, its pinned Tailscale Go toolchain, and
-SagerNet gomobile **v0.1.12**. The framework needs device arm64 and simulator
-arm64/x86_64 slices. Do not substitute another libbox release: its generated Swift
+SagerNet gomobile **v0.1.12**. Default builds include device arm64 and simulator
+arm64/x86_64 slices. A device-only selected SDK works for physical builds but cannot
+build a simulator target. Do not substitute another libbox release: its generated Swift
 method signatures and platform protocol can change. Build artifacts are installed
 separately from the source package.
 
@@ -124,8 +131,9 @@ end
 If nesting the extension under Runner, use `inherit! :search_paths`, not
 `inherit! :complete`. Do not call `flutter_install_all_ios_pods` inside the
 extension target. The extension's resolved sing_box_flutter pod variant contains
-`Core` and `PacketTunnel`, with no Flutter dependency; the host variant contains
-`Core` and `Plugin`. The Swift module name for both is `sing_box_flutter`.
+`Shared`, `Core` and `PacketTunnel`, with no Flutter dependency; the host variant
+contains only `Shared` and `Plugin`, without the Go engine. The Swift module name
+for both is `sing_box_flutter`.
 
 Run `flutter pub get`, then `pod install` in the host's `ios` directory. Open the
 resulting `.xcworkspace`. Do not manually embed the static `Libbox.framework`;
@@ -221,9 +229,12 @@ xcrun simctl list devices booted
 bash ios/Tests/run-native-smoke.sh <simulator-uuid>
 ```
 
-An optional second argument is the built extension executable, for example
-`example/build/ios/iphonesimulator/Runner.app/PlugIns/PacketTunnel.appex/PacketTunnel`.
-The script compiles and links the physical arm64 extension with extension-safe
+Set `SINGBOX_HOST_PROJECT` to the absolute host project path to check its selected
+artifact; the script also detects the checked-in example's receipt. An optional
+second argument is the built extension executable; a third is the main app
+executable, whose symbols must not contain Go/libbox. With no arguments the script
+runs only Go-free Foundation checks. The script compiles and links the physical
+arm64 extension with extension-safe
 compiler checks, then executes a real simulator binary to verify the installed
 libbox version against `native-core.json`, valid/invalid configuration handling,
 and bounded credential-safe events. It also rejects Flutter linkage in the

@@ -15,10 +15,14 @@ repository is `idy/sing-box-flutter`. Native core inputs are pinned in
 - `initialize`: arguments `{appGroup?: String, providerBundleIdentifier?: String,
   notificationTitle: String}`. The two Apple identifiers are required on iOS.
   Initializes native directories and system integration; does not connect. Returns null.
-- `getVersion`: returns the embedded libbox version string.
-- `checkConfig`: arguments `{config: String}` containing sing-box JSON. Returns null
-  if valid; otherwise throws a platform error. Never include configuration contents,
-  auth keys, or other credentials in error messages.
+- `getVersion`: returns the native core version. On iOS the app reads its bundled
+  capabilities manifest; the extension verifies it against the linked engine on start.
+- `checkConfig`: arguments `{config: String}` containing sing-box JSON. Android uses
+  native engine validation. iOS performs app-side structural and compiled-capability
+  preflight without linking a second Go engine; full engine validation occurs in the
+  extension before startup. Returns null when those checks pass, otherwise a platform
+  error. A successful iOS preflight does not guarantee startup. Never include config
+  contents, auth keys, or other credentials in error messages.
 - `requestPermission`: returns a boolean. Handles Android's activity result and
   the Apple VPN configuration consent. Cancellation returns false.
 - `start`: arguments `{config: String, name: String}`. Starts the native VPN service.
@@ -44,10 +48,18 @@ Do not forward unredacted upstream auth URLs, keys, or configuration dumps as lo
 
 ## Native core
 
-Use the pinned upstream `experimental/libbox` API. Tailscale must be included.
-Android uses `android/libs/libbox.aar`; iOS uses `ios/Frameworks/Libbox.xcframework`.
-The binary artifacts are build outputs, not source files. Document any extra host
-setup clearly. The iOS packet tunnel runs in its own extension process, outside
-Flutter; expose its provider as a separate source/subspec for host extension targets.
+With a host `sing_box_flutter.core` selection, use the small `native/mobile`
+platform binding and generated constructor registry. Preserve the existing mobile
+platform API while omitting the upstream RPC/profile-management layer. Tailscale is
+optional. Artifacts and capabilities manifests are host-local under
+`.dart_tool/sing_box_flutter`; native integration must reject stale or mismatched
+artifacts, rather than fall back to a different core.
+
+Hosts without a selection retain the standard upstream `experimental/libbox`
+build/install path, using `android/libs/libbox.aar` and
+`ios/Frameworks/Libbox.xcframework`. Binary artifacts are build outputs, not source
+files. The iOS packet tunnel runs in its own extension process, outside Flutter;
+only the PacketTunnel/Core subspec links Go. Shared storage, capability preflight,
+and Flutter channels must not link the engine into the main app.
 Android uses a foreground `VpnService`, protects outbound sockets and monitors the
 underlying network. GPL source attribution and license notices must be retained.

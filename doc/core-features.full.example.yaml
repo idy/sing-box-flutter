@@ -1,0 +1,141 @@
+# Host pubspec.yaml feature catalogue for the selectable sing-box Go core.
+# Merge sing_box_flutter at the same level as dependencies and flutter.
+#
+# This is a catalogue of component types, not a runtime sing-box configuration.
+# The build command reads this schema, but the entire catalogue is deliberately
+# not a supported mobile preset. Remove unsupported/unneeded entries first.
+# It follows sing-box 1.14.4, revision c005f35300ce76427dc285481ec5695f5b179cd2,
+# plus this plugin's WGC endpoint. Removed-type error stubs are excluded.
+#
+# Every listed component is selected. Remove entries to define a smaller build.
+# This is NOT a supported Android/iOS build preset: some entries are platform
+# specific. The selectable mobile builder rejects Linux-only integrations,
+# native bridge/helper facilities, USB/IP and Apple's incompatible Naive outbound.
+# OpenVPN/OpenConnect are selectable; device VPN acceptance is separate from builds.
+# Unsupported selections fail explicitly rather than being ignored.
+#
+# Routing, rule sets, sniffing, logging and cache settings remain runtime JSON
+# options within the selected core. Nodes, keys and rules do not belong here.
+# The builder must resolve dependencies (including QUIC, uTLS and gVisor).
+# Registering a component and independently removing all of its implementation
+# are different tasks: some components share packages or upstream build tags.
+
+sing_box_flutter:
+  core:
+    # Traffic listeners and transparent interception.
+    # redirect and tproxy require platform facilities unavailable to iOS VPN apps.
+    inbounds:
+      - tun
+      - direct
+      - socks
+      - http
+      - mixed
+      - shadowsocks
+      - snell
+      - vmess
+      - vless
+      - trojan
+      - naive
+      - shadowtls
+      - anytls
+      - hysteria
+      - hysteria2
+      - tuic
+      - cloudflared
+      - redirect
+      - tproxy
+
+    # Outgoing connections, outbound groups and compatibility components.
+    # WireGuard is an endpoint in this version, not an outbound.
+    outbounds:
+      - direct
+      - bridge
+      - block
+      - selector
+      - urltest
+      - socks
+      - http
+      - shadowsocks
+      - snell
+      - vmess
+      - vless
+      - trojan
+      - naive
+      - tor
+      - ssh
+      - shadowtls
+      - anytls
+      - hysteria
+      - hysteria2
+      - tuic
+
+    # Bidirectional tunnel components. Only wgc is a plugin extension.
+    endpoints:
+      - wireguard
+      - tailscale
+      - openconnect
+      - openvpn-client
+      - openvpn-server
+      - wgc
+
+    # DNS server/transport types. tls=DoT, https=DoH, quic=DoQ, h3=DoH3.
+    # resolved integrates with systemd-resolved on Linux.
+    dns:
+      - udp
+      - tcp
+      - tls
+      - https
+      - quic
+      - h3
+      - local
+      - hosts
+      - fakeip
+      - mdns
+      - dhcp
+      - resolved
+      - tailscale
+      - openconnect
+      - openvpn
+
+    # V2Ray transport types used by compatible proxy protocols.
+    # This does not select raw TCP/UDP, TLS engines or WGC outer transports.
+    transports:
+      - http
+      - ws
+      - quic
+      - grpc
+      - httpupgrade
+
+    # Additional TLS capabilities; ordinary TLS is a resolved dependency.
+    # REALITY requires uTLS in this pin. ECH is included by the pinned Go 1.26
+    # implementation; upstream has no effective standalone ECH size toggle.
+    # Independent exclusion may require source changes, not just build tags.
+    tls:
+      - utls
+      - reality
+      - ech
+
+    # Experimental compatibility APIs, separate from the api service below.
+    api:
+      - clash_api
+      - v2ray_api
+
+    # Independently configured services, including server/desktop facilities.
+    # Selecting tailscale does not require hosting a DERP server.
+    services:
+      - api
+      - resolved
+      - ssm-api
+      - hysteria-realm
+      - derp
+      - ccm
+      - ocm
+      - oom-killer
+      - usbip-server
+      - usbip-client
+
+    # Certificate provisioning backends, primarily for server use.
+    certificate_providers:
+      - acme
+      - tailscale
+      - cloudflare-origin-ca

@@ -1,0 +1,8 @@
+# Small WGC-only VPN client, equivalent in scope to the earlier wgc-ne core.
+# Apply with: dart run tool/select_core_profile.dart wgc-minimal
+sing_box_flutter:
+  core:
+    inbounds: [tun]
+    outbounds: [direct]
+    endpoints: [wgc]
+    dns: [udp, tcp, fakeip]

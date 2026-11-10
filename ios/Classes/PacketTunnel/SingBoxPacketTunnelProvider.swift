@@ -27,13 +27,20 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
                 }
                 let storage = try TunnelStorage(appGroup: group)
                 self.storage = storage
+                self.sessionID = storage.currentSessionID()
+                // Loading migrates sessions saved before session.json existed. Associate
+                // that ID before any check can fail, so the app accepts the error status.
                 let saved = try storage.loadConfiguration()
                 self.sessionID = saved.sessionID
+                let capabilities = try CoreCapabilities.load()
+                try NativeCore.verify(capabilities)
+                try NativeCore.verifySession(saved.coreFingerprint, capabilities: capabilities)
                 if let requestedSession = options?["sessionID"] as? String, requestedSession != saved.sessionID {
                     throw TunnelFailure(code: "stale_configuration", message: "The requested VPN configuration was replaced before startup.")
                 }
                 self.setStatus("connecting")
-                try NativeCore.setup(storage: storage, validation: false)
+                try ConfigPreflight.check(saved.config, capabilities: capabilities, requireTUN: true)
+                try NativeCore.setup(storage: storage)
                 try NativeCore.check(saved.config)
                 let platform = ApplePlatformInterface(provider: self)
                 self.platform = platform

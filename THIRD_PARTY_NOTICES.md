@@ -15,8 +15,12 @@ The upstream README additionally states:
 > In addition, no derivative work may use the name or imply association with this
 > application without prior consent.
 
-Native artifacts are built separately. Distributors must retain applicable
-notices and provide corresponding source as required by the licenses.
+Native artifacts are built separately. The selectable core adapts the pinned
+libbox platform helpers under `native/mobile`; copied files retain their upstream
+copyright and the exact source pin is recorded in `native/mobile/NOTICE`. It replaces
+the upstream mobile management layer and generates only selected registrations.
+Distributors must retain applicable notices and provide corresponding source as
+required by the licenses.
 
 ## WGC
 

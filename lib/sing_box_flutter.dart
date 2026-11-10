@@ -44,8 +44,11 @@ class SingBoxFlutter {
   /// The version of the libbox core actually linked into this application.
   Future<String> getVersion() => SingBoxFlutterPlatform.instance.getVersion();
 
-  /// Validates sing-box JSON using the native core, without connecting.
+  /// Checks sing-box JSON without connecting.
   ///
+  /// Android validates it using the native engine. iOS performs structural and
+  /// compiled-capability preflight in the app; the extension performs full engine
+  /// validation during startup, so a successful preflight cannot guarantee start.
   /// Invalid JSON is rejected locally without including its contents in errors.
   Future<void> checkConfig(String config) {
     _validateConfig(config);

@@ -8,20 +8,25 @@ import Libbox
 struct NativeCoreSmoke {
     static func main() throws {
         guard CommandLine.arguments.count == 2 else {
-            fatalError("Pass the expected libbox version from native-core.json.")
+            fatalError("Pass the selected core-capabilities.json path.")
         }
         guard ProcessInfo.processInfo.environment["TS_PERMIT_TOOLCHAIN_MISMATCH"] != "1" else {
             fatalError("The Tailscale toolchain assertion must not be bypassed for this smoke test.")
         }
-        let version = LibboxVersion()
-        guard version == CommandLine.arguments[1] else {
-            fatalError("The installed libbox version does not match native-core.json.")
-        }
-        print("libbox version: \(version)")
+        let capabilities = try CoreCapabilities.decode(Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
+        try NativeCore.verify(capabilities)
+        try NativeCore.verifySession(capabilities.fingerprint, capabilities: capabilities)
+        do {
+            try NativeCore.verifySession("wrong-fingerprint", capabilities: capabilities)
+            fatalError("Mismatched saved session accepted")
+        } catch let failure as TunnelFailure { precondition(failure.code == "core_mismatch") }
+        print("libbox version and runtime fingerprint: verified")
 
         // Validation does not start the service or require VPN/App Group consent.
-        try NativeCore.check("{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}]}")
-        print("valid configuration: accepted")
+        if capabilities.supports("outbounds", "direct") {
+            try NativeCore.check("{\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}]}")
+            print("valid configuration: accepted")
+        }
 
         let stateDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
@@ -34,9 +39,11 @@ struct NativeCoreSmoke {
             ]],
             "outbounds": [["type": "direct", "tag": "direct"]],
         ]
-        let tailscaleJSON = try JSONSerialization.data(withJSONObject: tailscaleConfig)
-        try NativeCore.check(String(decoding: tailscaleJSON, as: UTF8.self))
-        print("Tailscale endpoint: registered and configuration accepted")
+        if capabilities.supports("endpoints", "tailscale") && capabilities.supports("outbounds", "direct") {
+            let tailscaleJSON = try JSONSerialization.data(withJSONObject: tailscaleConfig)
+            try NativeCore.check(String(decoding: tailscaleJSON, as: UTF8.self))
+            print("Tailscale endpoint: registered and configuration accepted")
+        }
 
         let wgcConfig: [String: Any] = [
             "log": ["disabled": true],
@@ -58,9 +65,17 @@ struct NativeCoreSmoke {
                 "final": "wgc",
             ],
         ]
-        let wgcJSON = try JSONSerialization.data(withJSONObject: wgcConfig)
-        try NativeCore.check(String(decoding: wgcJSON, as: UTF8.self))
-        print("WGC endpoint: registered using idy/wgc")
+        if capabilities.supports("endpoints", "wgc") && capabilities.supports("inbounds", "tun") && capabilities.supports("dns", "udp") {
+            let wgcJSON = try JSONSerialization.data(withJSONObject: wgcConfig)
+            try NativeCore.check(String(decoding: wgcJSON, as: UTF8.self))
+            print("WGC endpoint: registered using idy/wgc")
+        }
+        for (group, type) in [("endpoints", "tailscale"), ("outbounds", "vmess"), ("services", "api"), ("certificate_providers", "tailscale")] where !capabilities.supports(group, type) {
+            do {
+                try NativeCore.check("{\"\(group)\":[{\"type\":\"\(type)\"}]}")
+                fatalError("An uncompiled component was accepted")
+            } catch let failure as TunnelFailure { precondition(failure.code == "invalid_config") }
+        }
 
         let secret = "native-smoke-private-auth-sentinel"
         do {
