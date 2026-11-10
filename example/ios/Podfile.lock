@@ -30,7 +30,7 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
-  sing_box_flutter: 7ce27f6c5a1196052351af5afb91e29fb95c34e6
+  sing_box_flutter: b8124d5075a16658bc8c25e7f32a47259de96c20
 
 PODFILE CHECKSUM: 62daac93dabb89d8282c6fdc509f06ae7fc8d217
 

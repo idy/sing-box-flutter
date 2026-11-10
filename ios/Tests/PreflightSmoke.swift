@@ -16,7 +16,7 @@ struct PreflightSmoke {
         try ConfigPreflight.check(valid, capabilities: minimal, requireTUN: true)
         try ConfigPreflight.check("{}", capabilities: full)
         try rejects("{}", capabilities: full, requireTUN: true)
-        for invalid in ["[]", "null", "1", "{", #"{"inbounds":{}}"#, #"{"inbounds":[null]}"#, #"{"inbounds":[{"type":1}]}"#, #"{"dns":{"servers":{}}}"#, #"{"outbounds":[{"type":"direct","server_port":true}]}"#, #"{"inbounds":[{"type":"tun","auto_route":"yes"}]}"#, #"{"inbounds":[{"type":"tun","mtu":1.5}]}"#, #"{"outbounds":[{"type":"direct","password":{}}]}"#, #"{"route":{"rules":{}}}"#, #"{"inbounds":[{"type":"tun"},{"type":"tun"}]}"#, #"{"experimental":{"clash_api":true}}"#, #"{"outbounds":[{"type":"vmess","transport":{"type":"unknown"}}]}"#, #"{"unexpected":true}"#] {
+        for invalid in ["[]", "null", "1", "{", #"{"inbounds":{}}"#, #"{"inbounds":[null]}"#, #"{"inbounds":[{"type":1}]}"#, #"{"outbounds":[{"type":"direct","server_port":true}]}"#, #"{"inbounds":[{"type":"tun","auto_route":"yes"}]}"#, #"{"inbounds":[{"type":"tun","mtu":1.5}]}"#, #"{"route":{"rules":{}}}"#, #"{"inbounds":[{"type":"tun"},{"type":"tun"}]}"#, #"{"experimental":{"clash_api":true}}"#, #"{"outbounds":[{"type":"vmess","transport":{"type":"unknown"}}]}"#, #"{"unexpected":true}"#] {
             try rejects(invalid, capabilities: full)
         }
         for group in ["inbounds", "outbounds", "endpoints", "services", "certificate_providers"] {
@@ -45,6 +45,10 @@ struct PreflightSmoke {
         try opaqueMapChecks(full)
         try caseFoldingChecks(full, minimal)
         try precedenceChecks(full, minimal)
+        try syntaxChecks(full, minimal)
+        try nullChecks(full)
+        try replacedChecks(full)
+        try emptyUnionChecks(full, minimal)
         try parserChecks(full, minimal)
         // Deliberately beyond preflight: references, key material and unknown
         // protocol fields must still be rejected by the extension's real core.
@@ -58,14 +62,14 @@ struct PreflightSmoke {
         precondition(decodedSession.coreFingerprint == nil)
         let event = TunnelStatus("error", message: String(repeating: "a", count: 1000)).event
         precondition(event["type"] as? String == "status" && (event["message"] as? String)?.count == 240)
-        print("Foundation preflight: ordered parsing, member precedence, scoped shapes, field-name folding, transports, TLS, ACME, implicit direct, opaque maps and existing contract checks passed.")
+        print("Foundation preflight: native syntax, ordered parsing, member precedence, null resets, replaced and empty union values, scoped shapes, field-name folding, transports, TLS, ACME, implicit direct, opaque maps and existing contract checks passed.")
     }
 
     private static func scopedPrimitiveChecks(_ full: CoreCapabilities) throws {
         for key in [#""private-key-secret-sentinel""#, #"["PEM header","PEM body","PEM footer"]"#] {
             try ConfigPreflight.check(#"{"inbounds":[{"type":"tun"}],"outbounds":[{"type":"ssh","private_key":\#(key)}]}"#, capabilities: full, requireTUN: true)
         }
-        for key in ["true", "1", "null", "{}", "[1]", #"["PEM",false]"#] {
+        for key in ["true", "1", "[1]", #"["PEM",false]"#] {
             try rejects(#"{"outbounds":[{"type":"ssh","private_key":\#(key)}]}"#, capabilities: full)
         }
         try rejects(#"{"endpoints":[{"type":"wgc","private_key":["PEM"]}]}"#, capabilities: full)
@@ -97,14 +101,14 @@ struct PreflightSmoke {
         ] {
             try rejects(#"{"route":{"rule_set":[\#(definition)]}}"#, capabilities: full)
         }
-        for definitions in [#""cn""#, #"["cn"]"#, "{}", "null"] {
+        for definitions in [#""cn""#, #"["cn"]"#, "{}"] {
             try rejects(#"{"route":{"rule_set":\#(definitions)}}"#, capabilities: full)
         }
         let openVPN = withFeatures(full, ["endpoints": ["openvpn-client"]])
         for fragment in ["0", "1300", "4294967295"] {
             try ConfigPreflight.check(#"{"inbounds":[{"type":"tun"}],"endpoints":[{"type":"openvpn-client","fragment":\#(fragment)}]}"#, capabilities: openVPN, requireTUN: true)
         }
-        for fragment in ["true", "false", "-1", "1.5", "4294967296", #""1300""#, "null", "{}", "[]"] {
+        for fragment in ["true", "false", "-1", "1.5", "4294967296", #""1300""#] {
             try rejects(#"{"endpoints":[{"type":"openvpn-client","fragment":\#(fragment)}]}"#, capabilities: openVPN)
         }
         for fragment in ["true", "false"] {
@@ -119,10 +123,10 @@ struct PreflightSmoke {
         for field in ["", #", "transport":"plain""#, #", "transport":"dot""#, #", "transport":"doh""#, #", "transport":"""#] {
             try ConfigPreflight.check(#"{"inbounds":[{"type":"tun"}],"endpoints":[{"type":"openvpn-server","push":{"dns_servers":[{"addresses":["1.1.1.1"]\#(field)}]}}]}"#, capabilities: selected, requireTUN: true)
         }
-        for transport in ["true", "1", "null", "[]", #"{"type":"ws"}"#] {
+        for transport in ["true", "1", #"{"type":"ws"}"#] {
             try rejects(#"{"endpoints":[{"type":"openvpn-server","push":{"dns_servers":[{"transport":\#(transport)}]}}]}"#, capabilities: withFeatures(full, ["endpoints": ["openvpn-server"]]))
         }
-        for push in ["true", "null", "[]", #"{"dns_servers":{}}"#, #"{"dns_servers":[1]}"#] {
+        for push in ["true", #"{"dns_servers":[1]}"#] {
             try rejects(#"{"endpoints":[{"type":"openvpn-server","push":\#(push)}]}"#, capabilities: selected)
         }
         try ConfigPreflight.check(#"{"outbounds":[{"type":"vmess","transport":{"type":"ws"}}]}"#, capabilities: full)
@@ -141,14 +145,14 @@ struct PreflightSmoke {
         let withoutTLS = withFeatures(full, ["tls": []])
         for outer in ["", #""enabled":true,"#, #""enabled":false,"#] {
             for feature in ["utls", "reality", "ech"] {
-                // Null resets the native pointer, like an omitted feature.
-                for settings in ["{}", #"{"enabled":false}"#, "null"] {
+                // Null resets the pointer or leaves enabled unchanged; a union drops an empty array.
+                for settings in ["{}", #"{"enabled":false}"#, "null", "[]", #"{"enabled":null}"#] {
                     try ConfigPreflight.check("{\"outbounds\":[{\"type\":\"http\",\"tls\":{\(outer)\"\(feature)\":\(settings)}}]}", capabilities: withoutTLS)
                 }
                 let active = "{\"outbounds\":[{\"type\":\"http\",\"tls\":{\(outer)\"\(feature)\":{\"enabled\":true}}}]}"
                 try rejects(active, capabilities: withoutTLS)
                 try ConfigPreflight.check(active, capabilities: full)
-                for settings in ["false", "[]", #""settings""#, #"{"enabled":"false"}"#, #"{"enabled":0}"#, #"{"enabled":1}"#, #"{"enabled":null}"#] {
+                for settings in ["false", #""settings""#, #"{"enabled":"false"}"#, #"{"enabled":0}"#, #"{"enabled":1}"#] {
                     try rejects("{\"outbounds\":[{\"type\":\"http\",\"tls\":{\(outer)\"\(feature)\":\(settings)}}]}", capabilities: full)
                 }
             }
@@ -164,7 +168,7 @@ struct PreflightSmoke {
             try ConfigPreflight.check(config, capabilities: selected, requireTUN: true)
             try rejects(config, capabilities: unselected, requireTUN: true)
         }
-        for acme in ["true", "[]", #""acme""#, #"{"domain":1}"#, #"{"domain":["example.com",false]}"#] {
+        for acme in ["true", #""acme""#, #"{"domain":1}"#, #"{"domain":["example.com",false]}"#] {
             try rejects(#"{"inbounds":[{"type":"trojan","tls":{"acme":\#(acme)}}]}"#, capabilities: selected)
         }
         try ConfigPreflight.check(#"{"inbounds":[{"type":"trojan","tls":{"acme":null}}]}"#, capabilities: unselected)
@@ -396,8 +400,154 @@ struct PreflightSmoke {
         try ConfigPreflight.check(#"{"route":{"rule_set":[{"type":"remote","tag":"a","url":"https://e.example/a.srs","url":"https://e.example/{tag}.srs","tag":["a","b"]}]}}"#, capabilities: full)
     }
 
-    /// The ordered parser accepts RFC 8259 only (the native decoder also accepts
-    /// comments and trailing commas) and bounds nesting at 128 levels.
+    /// The pinned decoder blanks `#`, `//` and `/* */` comments outside strings and
+    /// then accepts trailing commas; its scanner also lets a final lone slash pass.
+    private static func syntaxChecks(_ full: CoreCapabilities, _ minimal: CoreCapabilities) throws {
+        let http = #""type":"http","tag":"h","server":"192.0.2.1","server_port":8080"#
+        let vmess = #""type":"vmess","tag":"v","server":"192.0.2.1","server_port":443,"uuid":"11111111-1111-4111-8111-111111111111""#
+        for config in [
+            #"/*c*/{"route":{}}//c"#, "#c\n{\"route\":{}}#c", #"{"route"/*c*/:/*c*/{}}"#,
+            "{\"outbounds\":[{/*c*/\"type\"/*c*/:/*c*/\"direct\"/*c*/,#c\n\"tag\"://c\n\"d\"/*c*/}]}",
+            #"{}/"#, #"{} /"#, "{\"route\":{}}\n/", #"{/* a * b **/}"#, "{//c\r\"route\":{}}", "{/*\n*/\"route\":{}}",
+            #"{/* # */"route":{}}"#, #"{"outbounds":[{"type":"direct","tag":"x"}]}#"#,
+            #"{"outbounds":[{"type":"direct"}/*c*/,/*c*/]}"#, "{\"route\":{\"final\":\"a\"//c\n,//c\n}}",
+            #"{"outbounds":[{"type":"direct","tag":"d",}]}"#, #"{"route":{"rules":[{"outbound":"direct",},],},}"#,
+            #"{"route":{"final":"a"}/**/,}"#, #"{"experimental":{"cache_file":{},},}"#,
+            // Comment-like text inside strings stays text.
+            #"{"route":{"final":"a#b"}}"#, #"{"route":{"final":"a\"//b"}}"#, #"{"route":{"final":"x"},"$schema":"/*"}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: minimal)
+        }
+        for config in [
+            #"{"outbounds":[{\#(http),"tls":{"enabled":true,"alpn":["h2",],},}]}"#,
+            #"{"outbounds":[{\#(http),"tls":{"alpn":["h2"/*c*/,/*c*/]}}]}"#,
+            #"{"outbounds":[{\#(vmess),"transport":{"type":"ws","path":"/",},}]}"#,
+            #"{"dns":{"servers":[{"type":"udp","tag":"u","server":"1.1.1.1",},],},}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: full)
+        }
+        for config in [
+            #"{}/*"#, #"{} /* x"#, #"{}/*/"#, #"{}/ "#, #"{"route":/}"#, #"/{}"#, #"{"route":{}/"#, #"/*c*/"#, #"//c"#,
+            #"{"outbounds":[,]}"#, #"{,}"#, #"{"outbounds":[{"type":"direct"},,]}"#, #"{"route":{"final":"a",,}}"#, #"{},"#,
+            #"{"inbounds":[{"type":"tun","mtu":15/**/00}]}"#, #"{"inbounds":[{"type":"tun","mtu":-/**/1}]}"#, #"{"route"/**/}"#
+        ] {
+            try rejects(config, capabilities: full)
+        }
+    }
+
+    /// Null resets pointers and slices and leaves plain values unchanged, except
+    /// where a decoder needs a value: an enum string, a rule set tag, an entry.
+    private static func nullChecks(_ full: CoreCapabilities) throws {
+        let http = #""type":"http","tag":"h","server":"192.0.2.1","server_port":8080"#
+        let trojan = #""type":"trojan","tag":"t","listen_port":1"#
+        let client = #""type":"openvpn-client","tag":"o","server":"192.0.2.1","server_port":1194"#
+        let server = #""type":"openvpn-server","tag":"s","listen_port":1194,"address":["10.8.0.1/24"]"#
+        let key = "aGVsbG8gd29ybGQgaGVsbG8gd29ybGQgaGVsbG8gd28="
+        let selected = withFeatures(full, ["endpoints": ["wireguard", "openvpn-client", "openvpn-server"]])
+        for config in [
+            #"{"dns":{"servers":null}}"#, #"{"dns":{"rules":null}}"#, #"{"route":{"rules":null,"rule_set":null}}"#,
+            #"{"route":{"rules":[{"outbound":"direct","rule_set":null}]}}"#,
+            #"{"endpoints":[{"type":"wireguard","tag":"w","address":["10.0.0.2/32"],"private_key":"\#(key)","peers":null}]}"#,
+            #"{"outbounds":[{\#(http),"tag":null,"detour":null,"username":null,"tls":{"enabled":null,"server_name":null,"alpn":null,"min_version":null}}]}"#,
+            #"{"inbounds":[{"type":"tun","mtu":null,"address":null,"auto_route":null,"stack":null}]}"#,
+            #"{"outbounds":[{"type":"socks","server":"192.0.2.1","server_port":1,"domain_resolver":null,"udp_over_tcp":null}]}"#,
+            #"{"outbounds":[{"type":"ssh","server":"192.0.2.1","server_port":22,"private_key":null}]}"#,
+            #"{"route":{"rule_set":[{"type":"remote","tag":"a","tag":null,"url":"https://e.example/a.srs"}]}}"#,
+            #"{"endpoints":[{\#(client),"fragment":null}]}"#, #"{"endpoints":[{\#(server),"push":null}]}"#,
+            #"{"endpoints":[{\#(server),"push":{"dns_servers":null}}]}"#,
+            #"{"endpoints":[{\#(server),"push":{"dns_servers":[{"addresses":["1.1.1.1"],"transport":null}]}}]}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: selected)
+        }
+        for config in [
+            #"{"inbounds":[{\#(trojan),"listen":null,"listen_port":null,"tls":{"enabled":true,"client_authentication":null}}]}"#,
+            #"{"route":{"rule_set":[{"type":"remote","tag":null,"url":"https://e.example/a.srs"}]}}"#,
+            #"{"route":{"rules":[null]}}"#, #"{"dns":{"servers":[null]}}"#
+        ] {
+            try rejects(config, capabilities: full)
+        }
+    }
+
+    /// Construction-time capabilities apply only to options that take effect;
+    /// decoding still fails on an unknown type a later value replaces.
+    private static func replacedChecks(_ full: CoreCapabilities) throws {
+        let http = #""type":"http","tag":"h","server":"192.0.2.1","server_port":8080"#
+        let vmess = #""type":"vmess","tag":"v","server":"192.0.2.1","server_port":443,"uuid":"11111111-1111-4111-8111-111111111111""#
+        let trojan = #""type":"trojan","tag":"t","listen_port":1"#
+        let noTLS = withFeatures(full, ["tls": []])
+        // A later array, null or union entry replaces the earlier options.
+        for config in [
+            #"{"outbounds":[{\#(http),"tls":{"enabled":true,"utls":{"enabled":true}}}],"outbounds":[]}"#,
+            #"{"outbounds":[{\#(http),"tls":{"utls":{"enabled":true}}}],"Outbounds":[{\#(http)}]}"#,
+            #"{"outbounds":[{\#(http),"tls":{"utls":{"enabled":true}},"TLS":null}]}"#,
+            #"{"http_clients":[{"tag":"c","version":1,"tls":{"utls":{"enabled":true}}}],"http_clients":[]}"#,
+            #"{"http_clients":[{"tag":"c","version":1,"tls":{"utls":{"enabled":true}}}],"http_clients":null,"http_clients":[{"tag":"c","version":1}]}"#,
+            #"{"dns":{"servers":[{"type":"https","tag":"a","server":"1.1.1.1","tls":{"utls":{"enabled":true}}}],"Servers":[{"type":"https","tag":"a","server":"1.1.1.1"}]}}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: noTLS)
+        }
+        // Plain HTTP client entries merge into the entry at the same index instead.
+        for config in [
+            #"{"http_clients":[{"tag":"c","version":1,"tls":{"utls":{"enabled":true}}}],"http_clients":[{"tag":"c","version":1}]}"#,
+            #"{"http_clients":[{"tag":"a","version":1},{"tag":"b","version":1,"tls":{"utls":{"enabled":true}}}],"http_clients":[{"tag":"a","version":1}],"http_clients":[{"tag":"a","version":1},{"tag":"b","version":1}]}"#,
+            #"{"dns":{"servers":[{"type":"https","tag":"a","server":"1.1.1.1","tls":{"utls":{"enabled":true}}}]}}"#
+        ] {
+            try rejects(config, capabilities: noTLS)
+        }
+        let grpcOnly = withFeatures(full, ["transports": ["grpc"]])
+        for config in [
+            #"{"outbounds":[{\#(vmess),"transport":{"type":"ws"}}],"outbounds":[{\#(vmess)}]}"#,
+            #"{"outbounds":[{\#(vmess),"transport":{"type":"ws"}},{"type":"direct","tag":"d"}],"Outbounds":[{\#(vmess)}]}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: grpcOnly)
+        }
+        try ConfigPreflight.check(#"{"inbounds":[{\#(trojan),"tls":{"enabled":true,"acme":{"domain":"example.com"}}}],"inbounds":[]}"#, capabilities: full)
+        for config in [
+            #"{"outbounds":[{\#(vmess),"transport":{"type":"unknown-x"}}],"outbounds":[]}"#,
+            #"{"inbounds":[{\#(trojan),"tls":{"certificate_provider":{"type":"unknown-x"}}}],"inbounds":[]}"#,
+            #"{"dns":{"servers":[{"type":"unknown-x"}]},"dns":null}"#
+        ] {
+            try rejects(config, capabilities: full)
+        }
+    }
+
+    /// Inside unions, empty objects and arrays never reach the options decoder;
+    /// plain options and a root entry's own `type` and `tag` still read them.
+    private static func emptyUnionChecks(_ full: CoreCapabilities, _ minimal: CoreCapabilities) throws {
+        let http = #""type":"http","tag":"h","server":"192.0.2.1","server_port":8080"#
+        let vmess = #""type":"vmess","tag":"v","server":"192.0.2.1","server_port":443,"uuid":"11111111-1111-4111-8111-111111111111""#
+        let trojan = #""type":"trojan","tag":"t","listen_port":1"#
+        let client = #""type":"openvpn-client","tag":"o","server":"192.0.2.1","server_port":1194"#
+        let server = #""type":"openvpn-server","tag":"s","listen_port":1194,"address":["10.8.0.1/24"]"#
+        let bare = withFeatures(full, ["tls": [], "transports": [], "certificate_providers": [], "endpoints": ["openvpn-client", "openvpn-server"]])
+        for config in [
+            #"{"inbounds":[{\#(trojan),"tls":{"enabled":true,"certificate_provider":{}}}]}"#,
+            #"{"inbounds":[{\#(trojan),"tls":{"enabled":true,"certificate_provider":{"type":{}}}}]}"#,
+            #"{"outbounds":[{\#(vmess),"transport":{"type":[]}}]}"#,
+            #"{"outbounds":[{"type":"ssh","server":"192.0.2.1","server_port":22,"private_key":{}}]}"#,
+            #"{"outbounds":[{"type":"direct","password":{}}]}"#, #"{"dns":{"servers":{}}}"#, #"{"dns":{"rules":[{}]}}"#,
+            #"{"outbounds":[{\#(http),"tls":{"utls":[]}}]}"#, #"{"inbounds":[{\#(trojan),"tls":{"acme":[]}}]}"#,
+            #"{"dns":{"servers":[{"type":"udp","server":"1.1.1.1","tag":{}}]}}"#,
+            #"{"endpoints":[{\#(client),"fragment":{}}]}"#, #"{"endpoints":[{\#(client),"fragment":[]}]}"#,
+            #"{"endpoints":[{\#(server),"push":[]}]}"#, #"{"endpoints":[{\#(server),"push":{"dns_servers":{}}}]}"#,
+            #"{"endpoints":[{\#(server),"push":{"dns_servers":[{"addresses":["1.1.1.1"],"transport":[]}]}}]}"#
+        ] {
+            try ConfigPreflight.check(config, capabilities: bare)
+        }
+        try ConfigPreflight.check(#"{"outbounds":[{\#(vmess),"transport":{"type":"ws","Type":{}}}]}"#, capabilities: full)
+        try ConfigPreflight.check(#"{"inbounds":[{"type":"tun","mtu":[]}]}"#, capabilities: minimal, requireTUN: true)
+        for config in [
+            #"{"route":{"rules":{}}}"#, #"{"http_clients":[{"tag":"c","version":1,"tls":{"utls":[]}}]}"#,
+            #"{"outbounds":[{"type":"direct","tag":{}}]}"#, #"{"route":{"rule_set":[{}]}}"#, #"{"inbounds":[{}]}"#,
+            #"{"endpoints":[{\#(server),"push":{"dns_servers":[{"addresses":["1.1.1.1"],"transport":true}]}}]}"#,
+            #"{"endpoints":[{\#(server),"push":{"dns_servers":[1]}}]}"#, #"{"endpoints":[{\#(server),"push":true}]}"#
+        ] {
+            try rejects(config, capabilities: bare)
+        }
+    }
+
+    /// Beyond comments and trailing commas, the ordered parser is strict JSON,
+    /// decodes escapes like Go, and bounds nesting at 128 levels.
     private static func parserChecks(_ full: CoreCapabilities, _ minimal: CoreCapabilities) throws {
         // JSON escapes decode before field matching: t\u0075n is tun, \u212a folds to k.
         try ConfigPreflight.check(#"{"inbounds":[{"type":"t\u0075n"}],"networ\u212a_namespaces":[]}"#, capabilities: minimal, requireTUN: true)

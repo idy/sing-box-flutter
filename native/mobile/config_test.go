@@ -42,6 +42,18 @@ func TestParseConfigRejectsUnselectedImplicitDirect(t *testing.T) {
 	}
 }
 
+func TestParseConfigAcceptsNativeCommentSyntax(t *testing.T) {
+	if !slices.Contains(compiledCapabilities(t)["outbounds"], "direct") {
+		t.Skip("requires direct selected")
+	}
+	// Comment text survives re-encoding inside protocol entries; the capability
+	// gate must still read it like the engine does.
+	content := "{\"outbounds\":[{\"type\":\"direct\", /* c */ \"tag\":\"d\"},], // c\n\"route\":{\"final\":\"d\"},}"
+	if _, err := parseConfig(mobileBaseContext(nil), content); err != nil {
+		t.Fatalf("commented configuration rejected: %v", err)
+	}
+}
+
 func TestParseConfigRejectsEffectiveMixedCaseTransport(t *testing.T) {
 	selected := compiledCapabilities(t)
 	if !slices.Contains(selected["outbounds"], "vmess") || slices.Contains(selected["transports"], "ws") {

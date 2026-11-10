@@ -35,6 +35,22 @@ func TestCapabilityGatesSharedImplementations(t *testing.T) {
 	}
 }
 
+func TestCapabilityGateReadsNativeCommentSyntax(t *testing.T) {
+	selected := map[string][]string{"outbounds": {"direct"}, "tls": {}}
+	accepted := "{\"outbounds\":[{\"type\":\"direct\", /* c */ \"tag\":\"d\"},], // c\n\"route\":{}}"
+	if err := checkCapabilities(accepted, selected); err != nil {
+		t.Fatalf("native comment syntax rejected: %v", err)
+	}
+	for _, config := range []string{
+		`{"outbounds":[{"type":"vmess" /* c */}],}`,
+		"{\"outbounds\":[{\"type\":\"direct\",\"tls\":{\"utls\":{\"enabled\":true}}, // c\n}]}",
+	} {
+		if err := checkCapabilities(config, selected); err == nil {
+			t.Fatalf("comments hid an unselected feature: %s", config)
+		}
+	}
+}
+
 func TestCapabilityGateRequiresSelectedImplicitDirect(t *testing.T) {
 	for _, direct := range []bool{false, true} {
 		selected := map[string][]string{"outbounds": {"vmess"}, "endpoints": {"wgc"}, "dns": {"udp"}, "inbounds": {"tun"}}

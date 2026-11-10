@@ -2,9 +2,13 @@
 package libbox
 
 import (
-	"encoding/json"
 	"errors"
 	"slices"
+
+	// The engine's decoder: it accepts comments and trailing commas, and the
+	// options re-encoder keeps comment text inside protocol entries, so the
+	// gate must read canonical options with the same syntax rules.
+	"github.com/sagernet/sing/common/json"
 )
 
 // Registries prevent unselected protocol constructors. Shared upstream TLS and
