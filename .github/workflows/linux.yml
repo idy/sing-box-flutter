@@ -40,12 +40,23 @@ jobs:
         with:
           python-version: '3.13'
       - uses: subosito/flutter-action@v2
+        if: matrix.arch == 'amd64'
         with:
           flutter-version: '3.47.2'
           channel: stable
           cache: true
+      - name: Install Flutter from pinned source on ARM64
+        if: matrix.arch == 'arm64'
+        run: |
+          # Linux ARM64 engine/Dart artifacts exist, but this release has no SDK archive.
+          git clone --depth 1 --branch 3.47.2 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter-sdk"
+          test "$(git -C "$RUNNER_TEMP/flutter-sdk" rev-parse HEAD)" = d3b14c876900e553bc736ca19295fc09e3853e8e
+          printf '%s\n' "$RUNNER_TEMP/flutter-sdk/bin" >> "$GITHUB_PATH"
+          printf 'FLUTTER_ROOT=%s\n' "$RUNNER_TEMP/flutter-sdk" >> "$GITHUB_ENV"
       - name: Install Linux build dependencies
         run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libstdc++-12-dev libcap2-bin xvfb
+      - name: Verify Flutter SDK
+        run: flutter --version
       - name: Resolve example
         working-directory: example
         run: flutter pub get
