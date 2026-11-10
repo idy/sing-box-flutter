@@ -355,10 +355,11 @@ class WindowsIntegrity(WindowsFixture):
 @unittest.skipUnless(shutil.which("cmake"), "CMake is not available")
 class WindowsCMake(WindowsFixture):
     def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None,
-                  nested_host=False, discover_application=False, relative_install=False):
+                  nested_host=False, discover_application=False, relative_install=False, bundle_subdir=""):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
+        shutil.copyfile(ROOT / "windows/install_resources.cmake.in", windows / "install_resources.cmake.in")
         (windows / "sing_box_flutter_plugin_c_api.cpp").write_text("// configure-only fixture\n", encoding="utf-8")
         header = windows / "include/sing_box_flutter/sing_box_flutter_plugin_c_api.h"
         header.parent.mkdir(parents=True, exist_ok=True)
@@ -393,7 +394,9 @@ elseif(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 endif()
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/host-prefix-$<CONFIG>.txt" CONTENT "${CMAKE_INSTALL_PREFIX}")
 '''
-            destination = "." if relative_install else "${CMAKE_INSTALL_PREFIX}"
+            destination = (bundle_subdir or ".") if relative_install else "${CMAKE_INSTALL_PREFIX}"
+            if bundle_subdir and not relative_install:
+                destination += "/" + bundle_subdir
             text += ('install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "' + destination + '" COMPONENT Runtime)\n'
                      'install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "' + destination + '" COMPONENT Runtime)\n')
         if nested_host:
@@ -472,7 +475,7 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
 
     def assert_flutter_install(self, install_prefix=None, late_install_prefix=None,
                                nested_host=False, discover_application=False,
-                               relative_install=False, override_prefix=None):
+                               relative_install=False, override_prefix=None, bundle_subdir=""):
         entry, _, _ = self.published()
         artifact = build_core.host_path(self.host, entry["path"])
         legal = artifact.parent / "Legal"
@@ -484,7 +487,8 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                 # expression prefix used on Flutter's subsequent builds.
                 result = self.configure(flutter_layout=True, install_prefix=install_prefix,
                                         late_install_prefix=late_install_prefix, nested_host=nested_host,
-                                        discover_application=discover_application, relative_install=relative_install)
+                                        discover_application=discover_application, relative_install=relative_install,
+                                        bundle_subdir=bundle_subdir)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 result = subprocess.run(["cmake", "--build", str(self.cmake_build),
                                          "--config", configuration, "--target", "fixture_runner",
@@ -509,6 +513,8 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                     self.assertEqual(installed, runner_build / "runner" / configuration)
                 if relative_install and override_prefix is not None:
                     installed = override_prefix
+                if bundle_subdir:
+                    installed /= bundle_subdir
                 self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
                 resources = installed / "sing_box_flutter"
                 for name in ("core-capabilities.json", "native-build.json"):
@@ -544,6 +550,14 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
     def test_absolute_runner_install_keeps_resources_with_helper_under_override_prefix(self):
         self.assert_flutter_install(late_install_prefix=self.root / "absolute host bundle",
                                     override_prefix=self.root / "unused override bundle")
+
+    def test_relative_runner_install_preserves_semicolons_in_subdirectory(self):
+        self.assert_flutter_install(install_prefix=self.root / "configured bundle", relative_install=True,
+                                    override_prefix=self.root / "staged root; with spaces", bundle_subdir="bin;tools")
+
+    def test_nested_absolute_runner_install_preserves_semicolons_in_subdirectory(self):
+        self.assert_flutter_install(nested_host=True, late_install_prefix=self.root / "absolute bundle",
+                                    override_prefix=self.root / "unused staging", bundle_subdir="nested;bin")
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         script = self.plugin / "tool/core_recipe.py"

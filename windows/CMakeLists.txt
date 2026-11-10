@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.19)
+cmake_minimum_required(VERSION 3.27)
 project(sing_box_flutter LANGUAGES CXX)
 
 set(PLUGIN_NAME "sing_box_flutter_plugin")
@@ -87,65 +87,31 @@ string(REPLACE ";" "\\;" CORE_DIR_LIST "${CORE_DIR}")
 set(sing_box_flutter_bundled_libraries
   "${CORE_DIR_LIST}/sing_box_flutter_core.exe"
   PARENT_SCOPE)
-# Preserve the verified source independently of child-directory variables, then
-# register install rules after the host has selected its final install prefix.
+# File API installer records retain paths as JSON strings, including semicolons
+# anywhere in a destination. Request them for this generation, not a later run.
+cmake_file_api(QUERY API_VERSION 1 CODEMODEL 2)
 set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_VERIFIED_CORE "${CORE_DIR}")
+set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_INSTALL_PYTHON "${Python3_EXECUTABLE}")
+set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_INSTALL_RESOLVER "${PLUGIN_ROOT}/tool/windows_install.py")
+set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_INSTALL_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/install_resources.cmake.in")
 function(_sing_box_flutter_install_resources)
   get_target_property(RESOURCE_CORE_DIR sing_box_flutter_plugin SING_BOX_FLUTTER_VERIFIED_CORE)
-  get_filename_component(RESOURCE_CORE_PARENT "${RESOURCE_CORE_DIR}" DIRECTORY)
-  # Host rules have installed the helper before these deferred resource rules.
-  # Follow its actual install-manifest destination, whether the host uses
-  # absolute paths, relative paths or an install-time --prefix override.
-  file(GENERATE
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-prefix-$<CONFIG>.txt"
-    CONTENT "${CMAKE_INSTALL_PREFIX}")
-  install(CODE [=[
-    set(_sbf_original_prefix "${CMAKE_INSTALL_PREFIX}")
-    file(READ "${CMAKE_CURRENT_LIST_DIR}/sing_box_flutter-prefix-$<CONFIG>.txt" _sbf_configured_prefix)
-    # CMake's manifest is a list. Protect semicolons belonging to either known
-    # prefix before iterating its file records.
-    string(REPLACE ";" "\\;" _sbf_escaped_prefix "${CMAKE_INSTALL_PREFIX}")
-    string(REPLACE "${CMAKE_INSTALL_PREFIX}" "${_sbf_escaped_prefix}" _sbf_manifest "${CMAKE_INSTALL_MANIFEST_FILES}")
-    string(REPLACE ";" "\\;" _sbf_escaped_prefix "${_sbf_configured_prefix}")
-    string(REPLACE "${_sbf_configured_prefix}" "${_sbf_escaped_prefix}" _sbf_manifest "${_sbf_manifest}")
-    set(_sbf_helper_installed FALSE)
-    foreach(_sbf_file IN LISTS _sbf_manifest)
-      get_filename_component(_sbf_name "${_sbf_file}" NAME)
-      if(_sbf_name STREQUAL "sing_box_flutter_core.exe")
-        get_filename_component(CMAKE_INSTALL_PREFIX "${_sbf_file}" DIRECTORY)
-        set(_sbf_helper_installed TRUE)
-      endif()
-    endforeach()
-    if(NOT _sbf_helper_installed)
-      # A resource-only install keeps normal runtime relocation. Only Flutter's
-      # unresolved generator-expression prefix needs its generated fallback.
-      string(CONCAT _sbf_genex "$" "<")
-      string(FIND "${CMAKE_INSTALL_PREFIX}" "${_sbf_genex}" _sbf_expression)
-      if(NOT _sbf_expression EQUAL -1)
-        set(CMAKE_INSTALL_PREFIX "${_sbf_configured_prefix}")
-      endif()
-    endif()
-  ]=] COMPONENT Runtime)
-  install(FILES "${RESOURCE_CORE_PARENT}/core-capabilities.json"
-    "${RESOURCE_CORE_PARENT}/native-build.json"
-    DESTINATION "sing_box_flutter" COMPONENT Runtime)
-  install(DIRECTORY "${RESOURCE_CORE_PARENT}/Legal/"
-    DESTINATION "sing_box_flutter/Legal" COMPONENT Runtime
-    PATTERN "LICENSE.wintun" EXCLUDE)
-  # Install the exact license bytes covered by the receipt and build guard.
-  install(FILES "${RESOURCE_CORE_DIR}/LICENSE.wintun"
-    DESTINATION "sing_box_flutter/Legal" COMPONENT Runtime)
-  install(CODE [=[
-    set(CMAKE_INSTALL_PREFIX "${_sbf_original_prefix}")
-    unset(_sbf_original_prefix)
-    unset(_sbf_helper_installed)
-    unset(_sbf_configured_prefix)
-    unset(_sbf_escaped_prefix)
-    unset(_sbf_manifest)
-    unset(_sbf_file)
-    unset(_sbf_name)
-    unset(_sbf_genex)
-    unset(_sbf_expression)
-  ]=] COMPONENT Runtime)
+  get_target_property(RESOURCE_PYTHON sing_box_flutter_plugin SING_BOX_FLUTTER_INSTALL_PYTHON)
+  get_target_property(RESOURCE_RESOLVER sing_box_flutter_plugin SING_BOX_FLUTTER_INSTALL_RESOLVER)
+  get_target_property(RESOURCE_TEMPLATE sing_box_flutter_plugin SING_BOX_FLUTTER_INSTALL_TEMPLATE)
+  set(RESOURCE_SETTINGS "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-input.json")
+  execute_process(
+    COMMAND "${RESOURCE_PYTHON}" -I -X utf8 "${RESOURCE_RESOLVER}" configure
+      --output "${RESOURCE_SETTINGS}" --build-dir "${CMAKE_BINARY_DIR}"
+      --core-dir "${RESOURCE_CORE_DIR}" --fallback-prefix "${CMAKE_INSTALL_PREFIX}"
+    RESULT_VARIABLE RESOURCE_RESULT ERROR_VARIABLE RESOURCE_ERROR ENCODING UTF-8)
+  if(NOT RESOURCE_RESULT EQUAL 0)
+    message(FATAL_ERROR "${RESOURCE_ERROR}")
+  endif()
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-$<CONFIG>.json"
+    INPUT "${RESOURCE_SETTINGS}")
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-$<CONFIG>.cmake"
+    INPUT "${RESOURCE_TEMPLATE}")
+  install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-$<CONFIG>.cmake" COMPONENT Runtime)
 endfunction()
 cmake_language(DEFER DIRECTORY "${FLUTTER_HOST_DIRECTORY}" CALL _sing_box_flutter_install_resources)

@@ -1,0 +1,34 @@
+# Generated per configuration; all path values remain JSON strings.
+block(PROPAGATE CMAKE_INSTALL_MANIFEST_FILES)
+  set(_sbf_settings "${CMAKE_CURRENT_LIST_DIR}/sing_box_flutter-install-$<CONFIG>.json")
+  file(READ "${_sbf_settings}" _sbf_data)
+  string(JSON _sbf_python GET "${_sbf_data}" python)
+  string(JSON _sbf_resolver GET "${_sbf_data}" resolver)
+  string(JSON _sbf_core GET "${_sbf_data}" core_dir)
+  get_filename_component(_sbf_parent "${_sbf_core}" DIRECTORY)
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_resolver}" resolve
+      --settings "${_sbf_settings}" --configuration "${CMAKE_INSTALL_CONFIG_NAME}"
+      --prefix "${CMAKE_INSTALL_PREFIX}" --component "${CMAKE_INSTALL_COMPONENT}"
+    RESULT_VARIABLE _sbf_result OUTPUT_VARIABLE _sbf_roots ERROR_VARIABLE _sbf_error
+    ENCODING UTF-8 OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _sbf_result EQUAL 0)
+    message(FATAL_ERROR "${_sbf_error}")
+  endif()
+  string(JSON _sbf_count LENGTH "${_sbf_roots}")
+  if(_sbf_count LESS 1)
+    message(FATAL_ERROR "No Windows companion-resource destination was resolved")
+  endif()
+  math(EXPR _sbf_last "${_sbf_count} - 1")
+  foreach(_sbf_index RANGE 0 ${_sbf_last})
+    string(JSON _sbf_root GET "${_sbf_roots}" ${_sbf_index})
+    file(INSTALL DESTINATION "${_sbf_root}/sing_box_flutter" TYPE FILE FILES
+      "${_sbf_parent}/core-capabilities.json" "${_sbf_parent}/native-build.json")
+    file(INSTALL DESTINATION "${_sbf_root}/sing_box_flutter/Legal" TYPE DIRECTORY
+      FILES "${_sbf_parent}/Legal/"
+      REGEX "/[Ll][Ii][Cc][Ee][Nn][Ss][Ee][.][Ww][Ii][Nn][Tt][Uu][Nn]$" EXCLUDE)
+    # The receipt and guard cover this exact copy, not the cached Legal copy.
+    file(INSTALL DESTINATION "${_sbf_root}/sing_box_flutter/Legal" TYPE FILE
+      FILES "${_sbf_core}/LICENSE.wintun")
+  endforeach()
+endblock()

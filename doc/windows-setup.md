@@ -9,9 +9,9 @@ runner and the core must have matching architectures.
 ## Build the selected core
 
 Install Flutter 3.47.2+, Python 3.11+, Git, and Visual Studio's **Desktop development
-with C++** workload, including the Windows SDK and CMake 3.19+ (the bundled Visual
-Studio version is sufficient). Packaging defers resource installation rules until
-the host has selected its final install prefix. Flutter's Windows packaging runs
+with C++** workload, including the Windows SDK and CMake 3.27+ (update the Visual
+Studio CMake component if needed). Packaging reads CMake's structured installer
+records so complete destination paths, including semicolons, remain intact. Flutter's Windows packaging runs
 on Windows. The Go core can also be cross-compiled on macOS/Linux.
 
 Add `sing_box_flutter.core` to the host app's pubspec, for example:
