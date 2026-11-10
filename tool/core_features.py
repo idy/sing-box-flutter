@@ -63,7 +63,7 @@ def selection_hash(selection: dict) -> str:
 
 def resolve_features(selection: dict, target: str) -> dict:
     requested = canonicalize(selection)
-    if target not in {"android", "apple", "ios"}:
+    if target not in {"android", "apple", "ios", "macos"}:
         raise FeatureError(f"Unsupported core target: {target}")
     unsupported = {
         "inbounds": {"redirect", "tproxy"},
@@ -71,7 +71,7 @@ def resolve_features(selection: dict, target: str) -> dict:
         "dns": {"resolved"},
         "services": {"resolved", "usbip-server", "usbip-client"},
     }
-    if target in {"apple", "ios"}:
+    if target in {"apple", "ios", "macos"}:
         unsupported["outbounds"].add("naive")
     reasons = {
         "redirect": "Linux transparent interception is unavailable to the mobile VPN host",

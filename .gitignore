@@ -39,5 +39,6 @@ migrate_working_dir/
 # Reproducible native build outputs (install with tool/build_libbox.py).
 /android/libs/*.aar
 /ios/Frameworks/Libbox.xcframework/
+/macos/Frameworks/Libbox.xcframework/
 /native-artifacts/
 **/__pycache__/

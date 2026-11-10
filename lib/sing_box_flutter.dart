@@ -1,6 +1,6 @@
-/// Native sing-box VPN control for Android and iOS.
+/// Native sing-box VPN control for Android, iOS and macOS.
 ///
-/// Install the native libbox artifacts and, on iOS, a Packet Tunnel extension
+/// Install the native libbox artifacts and, for Network Extension mode, a Packet Tunnel extension
 /// before using this library. See the package README for host setup.
 library;
 
@@ -18,8 +18,10 @@ export 'src/events.dart';
 class SingBoxFlutter {
   /// Initializes platform integration without starting a VPN connection.
   ///
-  /// On iOS, [appGroup] must match the shared App Group entitlement and
-  /// [providerBundleIdentifier] must identify the host's Packet Tunnel extension.
+  /// In iOS and macOS NE mode, [appGroup] must match the shared App Group
+  /// entitlement and [providerBundleIdentifier] identifies the Packet Tunnel
+  /// extension. macOS user_tun mode requires neither identifier. Select the
+  /// macOS backend at build time in the host pubspec.yaml.
   /// Android uses [notificationTitle] for its foreground-service notification.
   Future<void> initialize({
     String? appGroup,
@@ -49,6 +51,8 @@ class SingBoxFlutter {
   /// Android validates it using the native engine. iOS performs structural and
   /// compiled-capability preflight in the app; the extension performs full engine
   /// validation during startup, so a successful preflight cannot guarantee start.
+  /// macOS user_tun requires an idle runtime and returns `busy` while a check,
+  /// connection startup, active tunnel, or teardown owns the native resources.
   /// Invalid JSON is rejected locally without including its contents in errors.
   Future<void> checkConfig(String config) {
     _validateConfig(config);
@@ -58,7 +62,9 @@ class SingBoxFlutter {
   /// Requests the operating system's VPN permission.
   ///
   /// Returns false when consent is denied or cancelled. Android requires an
-  /// attached Activity; iOS installs the configured VPN profile.
+  /// attached Activity; iOS and macOS NE install the configured VPN profile.
+  /// macOS user_tun checks administrator privileges and returns false when absent;
+  /// it does not display an elevation dialog or install a privileged helper.
   Future<bool> requestPermission() =>
       SingBoxFlutterPlatform.instance.requestPermission();
 

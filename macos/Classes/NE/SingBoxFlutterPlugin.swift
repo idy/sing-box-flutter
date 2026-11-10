@@ -1,0 +1,1 @@
+../../../ios/sing_box_flutter/Sources/sing_box_flutter/SingBoxFlutterPlugin.swift

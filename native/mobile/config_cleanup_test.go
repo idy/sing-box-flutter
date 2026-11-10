@@ -3,6 +3,7 @@ package libbox
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"runtime/pprof"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 func validationTCPWorkers() (int, string) {
@@ -64,21 +67,45 @@ func TestCheckConfigClosesConstructorStacks(t *testing.T) {
 				t.Skip("endpoint not selected in this build")
 			}
 			before, _ := validationTCPWorkers()
+			content := `{"endpoints":[` + tc.endpoint + `],"route":{"final":"vpn"}}`
 			for range 4 {
-				content := `{"endpoints":[` + tc.endpoint + `],"route":{"final":"vpn"}}`
 				if err := CheckConfig(content); err != nil {
 					t.Fatal(err)
 				}
 				requireValidationWorkers(t, before)
 			}
+			// Allocating profiles retain disposable validation; preparation must
+			// never retain its closed/stub-context box for runtime activation.
+			constructors := 0
+			server := &CommandServer{standalone: true, newEngine: func(ctx context.Context, _ PlatformInterface, _ option.Options) (mobileEngine, error) {
+				constructors++
+				return &fakeMobileEngine{ctx: ctx}, nil
+			}}
+			if _, err := server.PrepareService(content, nil); err != nil {
+				t.Fatal(err)
+			}
+			if constructors != 0 || server.prepared == nil || server.prepared.engine != nil || server.prepared.options == nil {
+				t.Fatal("allocating validation engine was retained")
+			}
+			requireValidationWorkers(t, before)
+			if err := server.ActivateService(); err != nil || constructors != 1 {
+				t.Fatal("fallback activation did not construct a fresh runtime")
+			}
+			server.Close()
 			if !slices.Contains(selected["endpoints"], "openconnect") {
 				return
 			}
 			// The first endpoint must be freed even when box.New returns no box.
-			content := `{"endpoints":[` + tc.endpoint + `,{"type":"openconnect","tag":"invalid","server":"https://["}],"route":{"final":"vpn"}}`
+			content = `{"endpoints":[` + tc.endpoint + `,{"type":"openconnect","tag":"invalid","server":"https://["}],"route":{"final":"vpn"}}`
 			if err := CheckConfig(content); err == nil {
 				t.Fatal("later constructor unexpectedly succeeded")
 			}
+			requireValidationWorkers(t, before)
+			failed := &CommandServer{standalone: true, newEngine: server.newEngine}
+			if _, err := failed.PrepareService(content, nil); err == nil {
+				t.Fatal("preparation retained a partially constructed validation box")
+			}
+			failed.Close()
 			requireValidationWorkers(t, before)
 		})
 	}

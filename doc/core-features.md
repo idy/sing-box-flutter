@@ -50,7 +50,17 @@ explicitly selects a host manifest; otherwise the CLI finds the nearest pubspec
 from the caller's directory. A `pubspec.yaml` inside a dependency is never silently
 substituted for the host manifest.
 
-Apple defaults to device arm64 plus arm64/x86_64 simulators. Use
+macOS uses `--target macos` and builds a universal arm64/x86_64 XCFramework for
+macOS 12+. Select the backend in the same pubspec with
+`sing_box_flutter.macos.mode: ne` (default) or `user_tun`. A macOS-only block can
+omit `core` and use the normal feature defaults for `build --target macos`, while
+Android/iOS keep their legacy artifacts. With only a `macos` block, use explicit
+targets: `all` or an omitted target is rejected rather than silently changing the
+mobile core. An explicit `core` block remains a global source selection. The mode
+is part of the selected build fingerprint; switch it by rebuilding the core and
+app. See [macOS setup](macos-setup.md).
+
+The `apple` target defaults to device arm64 plus arm64/x86_64 simulators. Use
 `--apple-platform ios` for a device-only SDK; that artifact cannot build simulator
 apps. Android defaults to all four supported ABIs; use
 `--android-abis arm64-v8a` for an arm64-only SDK. Architecture choices and SDK
@@ -121,7 +131,7 @@ stacks, optional VPN endpoints and services. Tailscale retains the upstream mobi
 Selecting the Tailscale endpoint does not enable those omitted subsystems.
 
 Linux transparent interception (`redirect`/`tproxy`) and systemd-resolved integration
-are unavailable through these Android/iOS hosts. Native bridge/helper-process and
+are unavailable through these Android/iOS/macOS hosts. Native bridge/helper-process and
 USB/IP selections also fail when their required host facilities are unavailable.
 Apple Naive outbound is rejected because the pinned Cronet archive has unresolved
 symbols in a real NetworkExtension link. OpenVPN/OpenConnect have selectable tags;
@@ -233,9 +243,11 @@ not disable this mobile cache.
 
 The selected mobile core does not forward raw engine diagnostics, which can contain
 credential-bearing URLs. An explicitly requested private log file receives fixed
-lifecycle messages only; stdout/stderr log targets are rejected. This differs from
-standard upstream protocol logging and should be considered when diagnosing a
-connection.
+lifecycle messages only; stdout/stderr log targets are rejected. Log destinations
+must stay beneath the host's private runtime Working directory. Traversal, symlink
+escapes, hard-link aliases and non-regular files are rejected before permissions
+or contents are changed. This differs from standard upstream protocol logging and
+should be considered when diagnosing a connection.
 
 Hot reload does not replace native binaries or the capabilities bundle. After a
 core or pubspec change, rebuild the core and app. Apple core builds invalidate the

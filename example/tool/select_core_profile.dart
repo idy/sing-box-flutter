@@ -36,9 +36,15 @@ String applyCoreProfile(String pubspec, String profile) {
       settings['core']); // Reject unknown or malformed features first.
   final presetKey = preset.nodes.keys.single;
   final presetValue = preset.nodes[presetKey]!;
-  final block = profile
+  var block = profile
       .substring(presetKey.span.start.offset, presetValue.span.end.offset)
       .trimRight();
+  final oldSettings = host['sing_box_flutter'];
+  String? macosMode;
+  if (oldSettings is Map && oldSettings.containsKey('macos')) {
+    macosMode = parseMacosSelection(oldSettings['macos']);
+    block = '$block\n  macos:\n    mode: $macosMode';
+  }
   final oldKeys =
       host.nodes.keys.where((key) => key.value == 'sing_box_flutter');
   if (oldKeys.isEmpty) {
@@ -62,8 +68,8 @@ String applyCoreProfile(String pubspec, String profile) {
   // The parsed node may consume the newline before its next sibling, or end at
   // its last scalar. Normalize only that boundary, not unrelated YAML/comments.
   return _validatedCandidate(
-      '$before$block\n\n${after.replaceFirst(RegExp(r'^\s*\n'), '')}',
-      settings);
+      '$before$block\n\n${after.replaceFirst(RegExp(r'^\s*\n'), '')}', settings,
+      macosMode: macosMode);
 }
 
 YamlNode _loadYaml(String text) {
@@ -98,14 +104,16 @@ void _rejectSharedNodes(YamlNode root) {
   visit(root);
 }
 
-String _validatedCandidate(String candidate, YamlMap settings) {
+String _validatedCandidate(String candidate, YamlMap settings,
+    {String? macosMode}) {
   final parsed = _loadYaml(candidate);
   if (parsed is! YamlMap || parsed['sing_box_flutter'] is! YamlMap) {
     throw const FormatException(
         'Updated pubspec must contain the core profile');
   }
   final updated = parsed['sing_box_flutter'] as YamlMap;
-  if (updated.length != 1 ||
+  if (updated.length != (macosMode == null ? 1 : 2) ||
+      (macosMode != null && updated['macos']?['mode'] != macosMode) ||
       !updated.containsKey('core') ||
       jsonEncode(parseCoreSelection(updated['core'])) !=
           jsonEncode(parseCoreSelection(settings['core']))) {

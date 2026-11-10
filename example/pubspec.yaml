@@ -23,6 +23,8 @@ dev_dependencies:
 
 # Switch this block with dart run tool/select_core_profile.dart <profile>.
 sing_box_flutter:
+  macos:
+    mode: ne
   core:
     inbounds: [tun]
     outbounds: [direct]

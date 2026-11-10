@@ -11,7 +11,7 @@ sys.dont_write_bytecode = True
 # -I deliberately removes the script directory. Restore only this trusted package
 # directory, never the host project or downloaded artifact, for sibling imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_core import RECEIPT, build_identity, canonical_hash, host_path
+from build_core import RECEIPT, build_identity, canonical_hash, canonical_macos, host_path
 from core_features import canonicalize, resolve_features
 from native_common import BuildError, ROOT, artifact_hashes, load_pins, sha256
 
@@ -42,7 +42,8 @@ def verify_current_recipe(project: Path, receipt: dict, metadata: dict, *,
         if (not isinstance(extensions, list) or
                 any(not isinstance(entry, dict) or "path" in entry for entry in extensions)):
             raise ValueError("invalid extension descriptors")
-        expected = build_identity(requested, extensions, pins, root)
+        macos = canonical_macos(receipt["macos"]) if "macos" in receipt else None
+        expected = build_identity(requested, extensions, pins, root, macos=macos)
         fingerprint = canonical_hash(expected)
         resolved = resolve_features(requested, target)
         if (identity != expected or receipt.get("fingerprint") != fingerprint or
@@ -88,7 +89,7 @@ def verify_current_artifact(project: Path, receipt: dict, target: str,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-dir", type=Path, required=True)
-    parser.add_argument("--target", choices=("android", "apple"), required=True)
+    parser.add_argument("--target", choices=("android", "apple", "macos"), required=True)
     parser.add_argument("--installed-artifact", help="Artifact path baked in at pod install")
     parser.add_argument("--installed-sha256", help="Artifact digest baked in at pod install")
     parser.add_argument("--print-artifact-digest", action="store_true",

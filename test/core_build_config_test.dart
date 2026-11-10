@@ -17,7 +17,9 @@ void main() {
       expect(readCoreBuildSnapshot(pubspec), isNull);
     }
     pubspec.writeAsStringSync('sing_box_flutter:\n  core: {}\n');
-    final selection = readCoreBuildSnapshot(pubspec)!.features;
+    final snapshot = readCoreBuildSnapshot(pubspec)!;
+    expect(snapshot.hasCoreSelection, isTrue);
+    final selection = snapshot.features;
     expect(selection['inbounds'], ['tun']);
     expect(selection['outbounds'], ['direct']);
     expect(selection['dns'], ['local', 'tcp', 'udp']);
@@ -151,6 +153,51 @@ void main() {
       expect(request.parent.listSync(), hasLength(1));
     }
     expect(features.first, features.last);
+  });
+
+  test('macOS mode uses default core and is captured in private requests', () {
+    final pubspec = File('${fixture.path}/pubspec.yaml');
+    for (final mode in ['ne', 'user_tun']) {
+      pubspec
+          .writeAsStringSync('sing_box_flutter:\n  macos:\n    mode: $mode\n');
+      final snapshot = readCoreBuildSnapshot(pubspec)!;
+      expect(snapshot.macosMode, mode);
+      expect(snapshot.hasCoreSelection, isFalse);
+      expect(snapshot.features['inbounds'], ['tun']);
+      final request = writeCoreBuildRequest(snapshot);
+      expect(jsonDecode(request.readAsStringSync())['macos'], {'mode': mode});
+    }
+    pubspec.writeAsStringSync('sing_box_flutter:\n  macos: {}\n');
+    final macosOnly = readCoreBuildSnapshot(pubspec)!;
+    expect(macosOnly.macosMode, 'ne');
+    expect(macosOnly.hasCoreSelection, isFalse);
+    for (final macos in ['', '  macos: {mode: user_tun}\n']) {
+      pubspec.writeAsStringSync('sing_box_flutter:\n  core: {}\n$macos');
+      final explicitCore = readCoreBuildSnapshot(pubspec)!;
+      expect(explicitCore.hasCoreSelection, isTrue);
+      expect(explicitCore.macosMode, macos.isEmpty ? isNull : 'user_tun');
+    }
+    expect(macosOnly.hasCoreSelection, isFalse);
+    final request =
+        jsonDecode(writeCoreBuildRequest(macosOnly).readAsStringSync());
+    expect(request.keys.toSet(), {'schema', 'pubspec', 'features', 'macos'});
+    expect(request['pubspec']['sha256'], macosOnly.pubspecSha256);
+  });
+
+  test('macOS mode rejects null, runtime lists, typos and duplicate YAML', () {
+    final pubspec = File('${fixture.path}/pubspec.yaml');
+    for (final source in [
+      'macos: null',
+      'macos: [ne, user_tun]',
+      'macos: {mode: tun}',
+      'macos: {mode: null}',
+      'macos: {mode: true}',
+      'macos: {mode: ne, helper: true}',
+      'macos: {mode: ne, mode: user_tun}',
+    ]) {
+      pubspec.writeAsStringSync('sing_box_flutter:\n  $source\n');
+      expect(() => readCoreBuildSnapshot(pubspec), throwsFormatException);
+    }
   });
 
   test('nearest parent pubspec wins over package ancestors', () {

@@ -4,8 +4,10 @@ package libbox
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -15,11 +17,16 @@ type CommandServer struct {
 	operations     sync.Mutex
 	state          sync.Mutex
 	closed         bool
+	closeErr       error // Sanitized, sticky result; failed cleanup requires a new process.
 	stopGeneration uint64
 	cancel         context.CancelFunc
 	engine         mobileEngine
+	prepared       *preparedStandaloneService
+	standalone     bool
+	monitor        StandalonePlatformInterface
 	platform       PlatformInterface
 	newEngine      func(context.Context, PlatformInterface, option.Options) (mobileEngine, error)
+	routeTable     func() ([]standaloneRoute, error) // nil selects the read-only native routing table.
 }
 
 // Retained in full so the existing Swift/Kotlin implementations remain source
@@ -57,6 +64,31 @@ func NewCommandServer(handler CommandServerHandler, platform PlatformInterface) 
 	return &CommandServer{platform: platform, newEngine: newBoxEngine}, nil
 }
 
+// NewStandaloneCommandServer uses native macOS utun networking without a Network
+// Extension or host platform callbacks. Service startup requires the host to have
+// the permissions needed by sing-tun; construction does not open a tunnel.
+func NewStandaloneCommandServer() (*CommandServer, error) {
+	if runtime.GOOS != "darwin" || C.IsIos {
+		return nil, errors.New("standalone core requires macOS")
+	}
+	return &CommandServer{standalone: true, newEngine: newBoxEngine}, nil
+}
+
+// NewStandaloneCommandServerWithMonitor keeps native networking while accepting
+// an IPv6-aware host path monitor. The unmonitored constructor remains useful
+// for non-VPN standalone services and lifecycle smoke tests.
+func NewStandaloneCommandServerWithMonitor(monitor StandalonePlatformInterface) (*CommandServer, error) {
+	if monitor == nil {
+		return nil, errors.New("standalone interface monitor is required")
+	}
+	server, err := NewStandaloneCommandServer()
+	if err != nil {
+		return nil, err
+	}
+	server.monitor = monitor
+	return server, nil
+}
+
 // Start is optional and idempotent. It never opens a command listener.
 func (s *CommandServer) Start() error {
 	s.state.Lock()
@@ -79,13 +111,25 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	s.state.Unlock()
 	// Decode before stopping a healthy instance. Registries must be exactly the
 	// generated selection both here and in CheckConfig; never import include.
-	ctx := mobileBaseContext(s.platform)
+	ctx := s.baseContext()
 	configuration, err := parseConfig(ctx, config)
 	if err != nil {
 		return errors.New("invalid mobile configuration")
 	}
 	if err = applyOverrides(&configuration, options); err != nil {
 		return err
+	}
+	var routes standaloneRoutePlan
+	if s.standalone {
+		if err = validateStandaloneOptions(configuration); err != nil {
+			return err
+		}
+		if _, err = standaloneDNSPlan(configuration); err != nil {
+			return err
+		}
+		if routes, err = buildStandaloneRoutePlan(configuration); err != nil {
+			return err
+		}
 	}
 	if err = s.closeEngine(); err != nil {
 		return errors.New("could not stop mobile service")
@@ -99,9 +143,14 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	}
 	s.cancel = cancel
 	s.state.Unlock()
-	engine, err := s.newEngine(ctx, s.platform, configuration)
+	engine, err := s.createEngine(ctx, s.platform, configuration)
 	if err == nil && engine == nil {
 		err = errors.New("missing mobile engine")
+	}
+	// Inspect after removing our previous routes for an early diagnostic. The
+	// standalone TUN wrapper also enforces add-only routing during actual Start.
+	if err == nil && s.standalone {
+		err = s.checkStandaloneRoutes(routes)
 	}
 	if err == nil {
 		err = engine.Start()
@@ -109,7 +158,7 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	if err != nil || ctx.Err() != nil || s.isClosed() {
 		cancel()
 		if engine != nil {
-			_ = engine.Close()
+			_ = s.closeMobileEngine(engine)
 		}
 		s.state.Lock()
 		s.cancel = nil
@@ -122,7 +171,7 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	if s.closed {
 		s.state.Unlock()
 		cancel()
-		_ = engine.Close()
+		_ = s.closeMobileEngine(engine)
 		return errors.New("mobile core is closed")
 	}
 	s.engine = engine
@@ -158,7 +207,11 @@ func (s *CommandServer) CloseService() error {
 	// Interrupt an in-flight Start before acquiring the serialization lock.
 	s.state.Lock()
 	if s.closed {
+		err := s.closeErr
 		s.state.Unlock()
+		if err != nil {
+			return err
+		}
 		return errors.New("mobile core is closed")
 	}
 	s.stopGeneration++
@@ -169,17 +222,29 @@ func (s *CommandServer) CloseService() error {
 	s.operations.Lock()
 	defer s.operations.Unlock()
 	if s.isClosed() {
+		s.state.Lock()
+		err := s.closeErr
+		s.state.Unlock()
+		if err != nil {
+			return err
+		}
 		return errors.New("mobile core is closed")
 	}
-	if err := s.closeEngine(); err != nil {
-		return errors.New("could not stop mobile service")
-	}
-	return nil
+	return s.closeEngine()
 }
 
-// Close preserves the no-result signature expected by Swift. It waits for all
-// resources, is idempotent, and permanently prevents another startup.
+// Close preserves the void ABI used by existing Android/iOS callers. Call
+// CloseWithError when the host must know whether permanent teardown succeeded.
 func (s *CommandServer) Close() {
+	_ = s.CloseWithError()
+}
+
+// CloseWithError cancels before waiting for an in-flight operation, permanently
+// prevents startup and drains all owned engines exactly once. Every call waits
+// for cleanup and returns the same sanitized failure, including failures from
+// partial startup or a prior CloseService. Failed cleanup is never retried: the
+// engine may already have partially released resources and requires process exit.
+func (s *CommandServer) CloseWithError() error {
 	s.state.Lock()
 	s.closed = true
 	if s.cancel != nil {
@@ -188,19 +253,41 @@ func (s *CommandServer) Close() {
 	s.state.Unlock()
 	s.operations.Lock()
 	defer s.operations.Unlock()
-	_ = s.closeEngine()
+	return s.closeEngine()
 }
 
 func (s *CommandServer) closeEngine() error {
 	s.state.Lock()
-	engine, cancel := s.engine, s.cancel
-	s.engine, s.cancel = nil, nil
+	engine, prepared, cancel := s.engine, s.prepared, s.cancel
+	s.engine, s.prepared, s.cancel = nil, nil, nil
 	s.state.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	if engine != nil {
-		return engine.Close()
+		_ = s.closeMobileEngine(engine)
+	}
+	if prepared != nil && prepared.engine != nil {
+		_ = s.closeMobileEngine(prepared.engine)
+	}
+	s.state.Lock()
+	defer s.state.Unlock()
+	return s.closeErr
+}
+
+// closeMobileEngine is called by the serialized owner, including partial
+// startup cleanup. Retain only a fixed message: native errors may contain
+// credentials or configuration. Failure poisons the server even if the engine
+// pointer has already been removed, so a later no-op close cannot hide it.
+func (s *CommandServer) closeMobileEngine(engine mobileEngine) error {
+	if err := engine.Close(); err != nil {
+		s.state.Lock()
+		defer s.state.Unlock()
+		if s.closeErr == nil {
+			s.closeErr = errors.New("could not stop mobile service cleanly; restart the process")
+		}
+		s.closed = true
+		return s.closeErr
 	}
 	return nil
 }

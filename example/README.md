@@ -75,6 +75,32 @@ flutter run
 Run these from this example directory. The editable default configuration creates
 a direct-routing VPN for testing, with no external proxy or Tailscale login.
 
+## macOS
+
+The checked-in macOS host supports the pubspec-selected `ne` and `user_tun`
+backends. Select `sing_box_flutter.macos.mode` in this example's `pubspec.yaml`,
+then configure the host project and build its native core:
+
+```bash
+ruby macos/configure_project.rb
+```
+
+```bash
+dart run sing_box_flutter build --target macos
+```
+
+```bash
+flutter build macos --debug
+```
+
+NE mode embeds PacketTunnel and requires matching signing, App Groups and Network
+Extension entitlements. Replace the example IDs with your own and pass the same
+`APP_GROUP` / `TUNNEL_BUNDLE_ID` defines as iOS. `user_tun` disables sandboxing and
+extension embedding; creating a tunnel requires an already privileged process.
+The plugin does not elevate the app or install a privileged helper. Follow
+[macOS setup](../doc/macos-setup.md) for the complete requirements. The protocol
+profile switcher preserves the chosen macOS mode.
+
 ## iOS
 
 The checked-in Xcode project contains an embedded PacketTunnel target and uses
