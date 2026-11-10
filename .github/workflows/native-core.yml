@@ -105,6 +105,31 @@ jobs:
         if: steps.select.outputs.enabled == 'true'
         with:
           python-version: '3.13'
+      - name: Release unused Android hosted-runner toolchains
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${RUNNER_ENVIRONMENT:-}" = 'github-hosted'
+          test "$RUNNER_OS" = 'Linux'
+          mkdir -p .build/logs
+          # Ubuntu image inventory: https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md
+          # This job uses Go, JDK 17 and a project-local Android SDK, not .NET,
+          # CodeQL or any of the image's preinstalled Android NDKs. Keep the
+          # hosted SDK command-line tools used to bootstrap our pinned SDK.
+          {
+            printf '### Android hosted-runner storage\n\n```text\nBefore cleanup\n'
+            df -h "$GITHUB_WORKSPACE"
+            for toolchain in /usr/share/dotnet "${RUNNER_TOOL_CACHE:?}/CodeQL" /usr/local/lib/android/sdk/ndk; do
+              if [ -d "$toolchain" ]; then
+                sudo du -sh "$toolchain"
+              fi
+            done
+            sudo rm -rf -- /usr/share/dotnet "${RUNNER_TOOL_CACHE:?}/CodeQL" /usr/local/lib/android/sdk/ndk
+            printf '\nAfter cleanup\n'
+            df -h "$GITHUB_WORKSPACE"
+            printf '```\n'
+          } | tee .build/logs/android-disk-space.log "$GITHUB_STEP_SUMMARY"
       - name: Prepare project-local Android SDK
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
         shell: bash
@@ -120,12 +145,17 @@ jobs:
           set +o pipefail
           yes | "$sdk_manager" --sdk_root="$native_sdk" --licenses >/dev/null
           set -o pipefail
+          # Only the native build's SDK/NDK is needed during the large Go builds.
+          # Install the packaging NDK and emulator immediately before their users.
           "$sdk_manager" --sdk_root="$native_sdk" \
             'platform-tools' 'platforms;android-36' 'build-tools;36.0.0' \
-            'ndk;28.0.13004108' 'ndk;28.2.13676358' \
-            'cmdline-tools;latest' 'emulator' 'system-images;android-35;default;x86_64'
+            'ndk;28.0.13004108' 'cmdline-tools;latest'
           printf 'JAVA_HOME=%s\nANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\n' \
             "$JAVA_HOME" "$native_sdk" "$native_sdk" >> "$GITHUB_ENV"
+          # Drop stale pointers to the removed hosted NDKs. The native builder
+          # selects 28.0 explicitly; Gradle selects its pinned 28.2 via ndkVersion.
+          printf 'ANDROID_NDK=\nANDROID_NDK_HOME=\nANDROID_NDK_ROOT=\nANDROID_NDK_LATEST_HOME=\n' >> "$GITHUB_ENV"
+          df -h "$GITHUB_WORKSPACE"
       - name: Build pinned core with Tailscale Go
         if: steps.select.outputs.enabled == 'true'
         shell: bash
@@ -158,6 +188,14 @@ jobs:
           flutter test
           dart run sing_box_flutter build --target '${{ matrix.target }}' \
             2>&1 | tee '../.build/logs/selected-${{ matrix.target }}.log'
+      - name: Prepare Android packaging NDK
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
+            'ndk;28.2.13676358'
+          df -h "$GITHUB_WORKSPACE"
       - name: Compile plugin and example against the built core
         if: steps.select.outputs.enabled == 'true'
         shell: bash
@@ -176,6 +214,14 @@ jobs:
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
         working-directory: example/android
         run: bash gradlew :sing_box_flutter:testDebugUnitTest
+      - name: Prepare Android emulator runtime
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
+            'emulator' 'system-images;android-35;default;x86_64'
+          df -h "$GITHUB_WORKSPACE"
       - name: Execute Android WGC runtime smoke
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
         timeout-minutes: 20
@@ -202,6 +248,17 @@ jobs:
       - name: Record selected core artifact checksums
         if: steps.select.outputs.enabled == 'true' && matrix.target == 'android'
         run: python3 -B tool/restore_core_artifact.py --project-dir example --write-manifest
+      - name: Record final Android disk space
+        if: always() && steps.select.outputs.enabled == 'true' && matrix.target == 'android'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .build/logs
+          {
+            printf '### Final Android job storage\n\n```text\n'
+            df -h "$GITHUB_WORKSPACE"
+            printf '```\n'
+          } | tee -a .build/logs/android-disk-space.log "$GITHUB_STEP_SUMMARY"
       - name: Upload release inputs and diagnostics
         if: always() && steps.select.outputs.enabled == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
