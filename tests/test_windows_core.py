@@ -355,7 +355,7 @@ class WindowsIntegrity(WindowsFixture):
 @unittest.skipUnless(shutil.which("cmake"), "CMake is not available")
 class WindowsCMake(WindowsFixture):
     def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None,
-                  nested_host=False, discover_application=False):
+                  nested_host=False, discover_application=False, relative_install=False):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -392,9 +392,10 @@ elseif(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   set(CMAKE_INSTALL_PREFIX "$<TARGET_FILE_DIR:${BINARY_NAME}>" CACHE PATH "..." FORCE)
 endif()
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/host-prefix-$<CONFIG>.txt" CONTENT "${CMAKE_INSTALL_PREFIX}")
-install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
-install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 '''
+            destination = "." if relative_install else "${CMAKE_INSTALL_PREFIX}"
+            text += ('install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "' + destination + '" COMPONENT Runtime)\n'
+                     'install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "' + destination + '" COMPONENT Runtime)\n')
         if nested_host:
             host_source = self.host / "windows"
             host_source.mkdir(exist_ok=True)
@@ -470,7 +471,8 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
         self.assertNotEqual((legal / "LICENSE.wintun").read_bytes(), expected)
 
     def assert_flutter_install(self, install_prefix=None, late_install_prefix=None,
-                               nested_host=False, discover_application=False):
+                               nested_host=False, discover_application=False,
+                               relative_install=False, override_prefix=None):
         entry, _, _ = self.published()
         artifact = build_core.host_path(self.host, entry["path"])
         legal = artifact.parent / "Legal"
@@ -482,15 +484,18 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                 # expression prefix used on Flutter's subsequent builds.
                 result = self.configure(flutter_layout=True, install_prefix=install_prefix,
                                         late_install_prefix=late_install_prefix, nested_host=nested_host,
-                                        discover_application=discover_application)
+                                        discover_application=discover_application, relative_install=relative_install)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 result = subprocess.run(["cmake", "--build", str(self.cmake_build),
                                          "--config", configuration, "--target", "fixture_runner",
                                          "sing_box_flutter_verify_core"], cwd=self.root,
                                         capture_output=True, text=True, encoding="utf-8")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                result = subprocess.run(["cmake", "--install", str(self.cmake_build),
-                                         "--config", configuration, "--component", "Runtime"], cwd=self.root,
+                install_command = ["cmake", "--install", str(self.cmake_build),
+                                   "--config", configuration, "--component", "Runtime"]
+                if override_prefix is not None:
+                    install_command += ["--prefix", str(override_prefix)]
+                result = subprocess.run(install_command, cwd=self.root,
                                         capture_output=True, text=True, encoding="utf-8")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 runner_build = self.cmake_build / "host" if nested_host else self.cmake_build
@@ -502,6 +507,8 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                     self.assertEqual(installed, chosen)
                 elif not nested_host:
                     self.assertEqual(installed, runner_build / "runner" / configuration)
+                if relative_install and override_prefix is not None:
+                    installed = override_prefix
                 self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
                 resources = installed / "sing_box_flutter"
                 for name in ("core-capabilities.json", "native-build.json"):
@@ -524,6 +531,19 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
     def test_nested_flutter_host_install_honors_local_prefix_set_after_plugin(self):
         self.assert_flutter_install(nested_host=True,
                                     late_install_prefix=self.root / "nested host install bundle")
+
+    def test_relative_runner_install_honors_override_prefix(self):
+        self.assert_flutter_install(install_prefix=self.root / "configured bundle",
+                                    relative_install=True, override_prefix=self.root / "staged bundle; with spaces")
+
+    def test_nested_relative_runner_install_honors_override_prefix(self):
+        self.assert_flutter_install(nested_host=True, relative_install=True,
+                                    late_install_prefix=self.root / "local configured bundle",
+                                    override_prefix=self.root / "nested staged bundle")
+
+    def test_absolute_runner_install_keeps_resources_with_helper_under_override_prefix(self):
+        self.assert_flutter_install(late_install_prefix=self.root / "absolute host bundle",
+                                    override_prefix=self.root / "unused override bundle")
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         script = self.plugin / "tool/core_recipe.py"
