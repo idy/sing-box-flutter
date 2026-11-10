@@ -11,6 +11,7 @@
   const profileButtons = [...document.querySelectorAll('[data-profile]')];
   const profileCache = new Map([['wgc-minimal', profileCode.textContent]]);
   const source = document.querySelector('#profile-source');
+  const sourceRevision = document.body.dataset.coreRevision;
   const error = document.querySelector('#profile-error');
   let currentProfile = 'wgc-minimal';
   let requestNumber = 0;
@@ -57,7 +58,7 @@
     panel.setAttribute('aria-labelledby', chosen.id);
     panel.setAttribute('aria-busy', 'true');
     error.hidden = true;
-    source.href = `https://github.com/idy/sing-box-flutter/blob/main/example/core-profiles/${name}.yaml`;
+    source.href = `https://github.com/idy/sing-box-flutter/blob/${sourceRevision}/example/core-profiles/${name}.yaml`;
     document.querySelector('#copy-profile').disabled = true;
     try {
       if (!profileCache.has(name)) {

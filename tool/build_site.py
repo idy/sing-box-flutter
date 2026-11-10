@@ -6,7 +6,9 @@ import html
 import os
 from html.parser import HTMLParser
 from pathlib import Path
+import re
 import shutil
+import subprocess
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +34,25 @@ class LocalReferences(HTMLParser):
                 self.references.append(value)
 
 
+def source_profiles():
+    """Pin the dependency, downloads and source links to one committed tree."""
+    revision = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD^{commit}"],
+        encoding="utf-8",
+    ).strip()
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError("Website source revision must be a full commit ID")
+    profiles = {}
+    for name in PROFILES:
+        profiles[name] = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", f"{revision}:example/core-profiles/{name}.yaml"]
+        )
+        profiles[name].decode("utf-8")  # Reject invalid text before publishing any output.
+    return revision, profiles
+
+
 def build():
+    revision, profiles = source_profiles()
     if (ROOT / ".build").is_symlink() or OUTPUT.is_symlink():
         raise ValueError("Website build output must not be a symlink")
     if OUTPUT.exists():
@@ -41,27 +61,32 @@ def build():
     profile_dir = OUTPUT / "profiles"
     profile_dir.mkdir()
     for name in PROFILES:
-        source = ROOT / "example/core-profiles" / f"{name}.yaml"
-        shutil.copyfile(source, profile_dir / source.name)
+        (profile_dir / f"{name}.yaml").write_bytes(profiles[name])
     document = OUTPUT / "index.html"
-    template = document.read_text()
+    template = document.read_text(encoding="utf-8")
     marker = "{{WGC_PROFILE}}"
     if template.count(marker) != 1:
         raise ValueError("Expected exactly one default-profile marker")
     # Keep the initial page readable without JavaScript. Strip only introductory
     # comments for this view; profile downloads retain every original byte.
-    profile = (profile_dir / "wgc-minimal.yaml").read_text()
+    profile = profiles["wgc-minimal"].decode("utf-8")
     profile = profile[profile.index("sing_box_flutter:"):]
     site_url = os.environ.get("SITE_URL", "https://idy.github.io/sing-box-flutter/").rstrip("/") + "/"
     parsed_url = urlsplit(site_url)
     if (parsed_url.scheme != "https" or not parsed_url.hostname or parsed_url.username or
             parsed_url.password or parsed_url.query or parsed_url.fragment):
         raise ValueError("SITE_URL must be a public HTTPS site URL without credentials, query or fragment")
-    document.write_text(template.replace(marker, html.escape(profile)).replace("{{SITE_URL}}", html.escape(site_url, quote=True)))
-    (OUTPUT / ".nojekyll").write_text("")
-    (OUTPUT / "robots.txt").write_text("User-agent: *\nAllow: /\n")
+    if "{{CORE_REVISION}}" not in template:
+        raise ValueError("Missing dependency revision marker")
+    document.write_text(
+        template.replace(marker, html.escape(profile)).replace("{{CORE_REVISION}}", revision)
+        .replace("{{SITE_URL}}", html.escape(site_url, quote=True)),
+        encoding="utf-8",
+    )
+    (OUTPUT / ".nojekyll").write_text("", encoding="utf-8")
+    (OUTPUT / "robots.txt").write_text("User-agent: *\nAllow: /\n", encoding="utf-8")
     parser = LocalReferences()
-    parser.feed(document.read_text())
+    parser.feed(document.read_text(encoding="utf-8"))
     for reference in parser.references:
         parsed = urlsplit(reference)
         if not parsed.path:

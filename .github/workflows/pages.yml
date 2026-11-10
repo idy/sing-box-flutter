@@ -8,19 +8,21 @@ on:
       - example/core-profiles/*.yaml
       - tool/build_site.py
       - .github/workflows/pages.yml
+      - .github/tests/test_website.py
   pull_request:
     paths:
       - site/**
       - example/core-profiles/*.yaml
       - tool/build_site.py
       - .github/workflows/pages.yml
+      - .github/tests/test_website.py
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: project-website-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
+  group: project-website-${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && 'production' || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -37,6 +39,8 @@ jobs:
       - uses: actions/configure-pages@v5
         id: pages
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      - name: Test website build invariants
+        run: python3 -B -m unittest discover -s .github/tests -p 'test_website.py' -v
       - name: Build and validate static website
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url || 'https://idy.github.io/sing-box-flutter/' }}

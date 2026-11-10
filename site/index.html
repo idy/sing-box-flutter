@@ -15,7 +15,7 @@
   <script src="./app.js" defer></script>
   <title>sing_box_flutter — Your app. Your sing-box.</title>
 </head>
-<body>
+<body data-core-revision="{{CORE_REVISION}}">
   <a class="skip-link" href="#main">Skip to content</a>
   <header class="site-header wrap">
     <a class="brand" href="#main" aria-label="sing_box_flutter home"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 3h11v11H3zM18 3h11v11H18zM3 18h11v11H3z"/><path class="offset" d="M21 21h8v8h-8z"/></svg><span>sing_box<span class="brand-suffix">_flutter</span></span></a>
@@ -46,7 +46,7 @@
           <div class="code-topline"><span>Feature selection</span><button type="button" class="copy-button" id="copy-profile" data-copy="profile-code" aria-label="Copy feature selection">Copy YAML</button></div>
           <pre class="profile-pre"><code id="profile-code">{{WGC_PROFILE}}</code></pre>
         </div>
-        <div class="recipe-note"><p id="profile-description">TUN, direct, WGC and basic DNS. A small place to start.</p><a id="profile-source" href="https://github.com/idy/sing-box-flutter/blob/main/example/core-profiles/wgc-minimal.yaml">View source <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></div>
+        <div class="recipe-note"><p id="profile-description">TUN, direct, WGC and basic DNS. A small place to start.</p><a id="profile-source" href="https://github.com/idy/sing-box-flutter/blob/{{CORE_REVISION}}/example/core-profiles/wgc-minimal.yaml">View source <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></div>
         <p class="recipe-error" id="profile-error" hidden>Couldn’t load this profile. <button type="button" id="retry-profile">Try again</button>, or open its source.</p>
       </div>
     </section>
@@ -75,7 +75,7 @@
   sing_box_flutter:
     git:
       url: https://github.com/idy/sing-box-flutter.git
-      ref: 6b5f2549c83af42ea1b02da1755a6ceec682fec8
+      ref: {{CORE_REVISION}}
 
 # Add the feature selection shown above
 # as a separate top-level block.</code></pre><div class="inline-command"><code>flutter pub get</code></div></div></li>

@@ -10,9 +10,13 @@ Build from the repository root:
 python3 -B tool/build_site.py
 ```
 
-The builder writes `.build/site/`, validates local HTML references, and copies the
-three example YAML files without changing their bytes. The default profile is also
-embedded in the page for readers without JavaScript. The Manrope Latin variable
+The builder requires a Git checkout and writes `.build/site/`. It validates local
+HTML references and reads all three example YAML files from the exact commit used
+for the displayed dependency pin and source links. Downloaded YAML bytes are kept
+unchanged. Commit profile changes before previewing them; uncommitted profile
+edits do not alter a website pinned to an older core. All text is UTF-8 regardless
+of the build machine's locale. The default profile is also embedded in the page
+for readers without JavaScript. The Manrope Latin variable
 font is served locally under the SIL Open Font License retained in `site/assets/`.
 
 The `project-page` entry in `.claude/launch.json` serves the built directory on

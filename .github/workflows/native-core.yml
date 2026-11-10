@@ -53,7 +53,9 @@ jobs:
               prefixes = (b'native/', b'ios/', b'android/', b'bin/', b'lib/', b'example/', b'tool/', b'tests/')
               files = {b'native-core.json', b'pubspec.yaml', b'THIRD_PARTY_NOTICES.md', b'LICENSE',
                        b'.github/workflows/native-core.yml', b'.github/scripts/publish_native_release.py'}
-              required = any(path.startswith(prefixes) or path in files for path in changed.split(b'\0') if path)
+              website_tools = {b'tool/build_site.py', b'tool/serve_site.mjs'}
+              required = any(path not in website_tools and (path.startswith(prefixes) or path in files)
+                             for path in changed.split(b'\0') if path)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('native=' + str(required).lower() + '\n')
           PY
