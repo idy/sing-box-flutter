@@ -121,8 +121,9 @@ func TestStandaloneServiceLifecycleUsesNativeContext(t *testing.T) {
 	defer server.Close()
 	var engines []*fakeMobileEngine
 	server.newEngine = func(ctx context.Context, platform PlatformInterface, _ option.Options) (mobileEngine, error) {
-		if platform != nil || service.FromContext[adapter.PlatformInterface](ctx) != nil {
-			t.Fatal("standalone lifecycle installed a host platform")
+		wrapper, ok := service.FromContext[adapter.PlatformInterface](ctx).(*standalonePlatformWrapper)
+		if platform != nil || !ok || !wrapper.UsePlatformInterface() || wrapper.UsePlatformDefaultInterfaceMonitor() || wrapper.UsePlatformNetworkInterfaces() || wrapper.UsePlatformAutoDetectInterfaceControl() {
+			t.Fatal("standalone lifecycle lost its native add-only route boundary")
 		}
 		engine := &fakeMobileEngine{ctx: ctx}
 		engines = append(engines, engine)

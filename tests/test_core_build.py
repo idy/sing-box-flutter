@@ -1,4 +1,5 @@
 """Host artifact isolation, receipts and interrupted-build recovery."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -116,20 +117,112 @@ class HostArtifacts(unittest.TestCase):
             info.write_text("fixture framework metadata")
         return publish_artifact(self.host, output, target, self.capabilities, {"target": target}, {})
 
+    def install_pods(self, target, platform, *, selected=True, receipt=None):
+        receipt = receipt or json.loads((self.host / RECEIPT).read_text())
+        shared = {"name": "Shared"}
+        if selected:
+            marker = {"schema": 1, "target": target, "fingerprint": receipt["fingerprint"],
+                      "pubspec_sha256": receipt["pubspec_sha256"], "macos": receipt.get("macos"),
+                      "artifact": receipt["artifacts"][target]}
+            shared["script_phases"] = [{"name": "Validate selected core artifacts",
+                                        "execution_position": "before_compile", "always_out_of_date": "1",
+                                        "script": "set -eu\n# sing_box_flutter pod selection: " + json.dumps(marker) + "\n"}]
+        pods = self.host / platform / "Pods"
+        local_specs = pods / "Local Podspecs"
+        local_specs.mkdir(parents=True, exist_ok=True)
+        data = json.dumps({"name": "sing_box_flutter", "subspecs": [shared]}).encode()
+        (local_specs / "sing_box_flutter.podspec.json").write_bytes(data)
+        locked = ("PODS:\n  - sing_box_flutter (0.1.0)\n\nSPEC CHECKSUMS:\n"
+                  f"  sing_box_flutter: {hashlib.sha1(data).hexdigest()}\n\nCOCOAPODS: 1.17.0\n")
+        (pods.parent / "Podfile.lock").write_text(locked)
+        manifest = pods / "Manifest.lock"
+        manifest.write_text(locked)
+        return manifest
+
     def test_identical_apple_receipts_keep_installed_pods(self):
         for target, platform in (("apple", "ios"), ("macos", "macos")):
             with self.subTest(target=target):
                 entry = self.publish_apple(target)
                 update_receipt(self.host, self.capabilities, {}, {target: entry})
-                pods = self.host / platform / "Pods"
-                pods.mkdir(parents=True)
-                manifest = pods / "Manifest.lock"
-                manifest.write_text("installed selection")
-                lock = pods.parent / "Podfile.lock"
-                lock.write_text("locked dependency versions")
+                manifest = self.install_pods(target, platform)
+                locked = manifest.read_bytes()
                 update_receipt(self.host, self.capabilities, {}, {target: entry})
-                self.assertEqual(manifest.read_text(), "installed selection")
-                self.assertEqual(lock.read_text(), "locked dependency versions")
+                self.assertEqual(manifest.read_bytes(), locked)
+                self.assertEqual((self.host / platform / "Podfile.lock").read_bytes(), locked)
+
+    def test_restored_selection_refreshes_legacy_pods_even_with_identical_receipt(self):
+        entry = self.publish_apple("apple")
+        selected_pubspec = "name: host\nsing_box_flutter:\n  core: {}\n"
+        for rebuilt_target in ("apple", "android"):
+            with self.subTest(rebuilt_target=rebuilt_target):
+                (self.host / "pubspec.yaml").write_text(selected_pubspec)
+                update_receipt(self.host, self.capabilities, {}, {"apple": entry})
+                self.install_pods("apple", "ios")
+                previous = (self.host / RECEIPT).read_bytes()
+                # Legacy pod install ignores the obsolete selected receipt.
+                (self.host / "pubspec.yaml").write_text("name: host\n")
+                manifest = self.install_pods("apple", "ios", selected=False)
+                locked = manifest.read_bytes()
+                (self.host / "pubspec.yaml").write_text(selected_pubspec)
+                artifacts = {"apple": self.publish_apple("apple")} if rebuilt_target == "apple" else {"android": self.publish()}
+                update_receipt(self.host, self.capabilities, {}, artifacts)
+                self.assertFalse(manifest.exists())
+                self.assertEqual((self.host / "ios/Podfile.lock").read_bytes(), locked)
+                if rebuilt_target == "apple":
+                    self.assertEqual((self.host / RECEIPT).read_bytes(), previous)
+                # After pod install restores the selected guard, another identical
+                # build must leave the installation alone, including retained iOS.
+                self.install_pods("apple", "ios")
+                installed = manifest.read_bytes()
+                update_receipt(self.host, self.capabilities, {}, artifacts)
+                self.assertEqual(manifest.read_bytes(), installed)
+
+    def test_installed_guard_must_match_the_receipt_and_completed_installation(self):
+        entry = self.publish_apple("macos")
+        update_receipt(self.host, self.capabilities, {}, {"macos": entry})
+        for invalid in ("stale selection", "uncommitted podspec", "mismatched locks", "missing guard"):
+            with self.subTest(invalid=invalid):
+                receipt = json.loads((self.host / RECEIPT).read_text())
+                if invalid == "stale selection":
+                    receipt["macos"] = {"mode": "user_tun"}
+                manifest = self.install_pods("macos", "macos", receipt=receipt)
+                if invalid == "uncommitted podspec":
+                    # An interrupted pod install can replace Local Podspecs before
+                    # it updates the Xcode project and publishes the new locks.
+                    spec = manifest.parent / "Local Podspecs/sing_box_flutter.podspec.json"
+                    spec.write_bytes(spec.read_bytes() + b"\n")
+                elif invalid == "mismatched locks":
+                    manifest.write_text(manifest.read_text() + "# incomplete install\n")
+                elif invalid == "missing guard":
+                    self.install_pods("macos", "macos", selected=False)
+                locked = (self.host / "macos/Podfile.lock").read_bytes()
+                update_receipt(self.host, self.capabilities, {}, {"macos": entry})
+                self.assertFalse(manifest.exists())
+                self.assertEqual((self.host / "macos/Podfile.lock").read_bytes(), locked)
+
+    def test_identical_receipt_refresh_failure_retries_all_stale_apple_pods(self):
+        entries = {target: self.publish_apple(target) for target in ("apple", "macos")}
+        update_receipt(self.host, self.capabilities, {}, entries)
+        before = (self.host / RECEIPT).read_bytes()
+        ios_manifest = self.install_pods("apple", "ios", selected=False)
+        outside = self.root / "shared-pods"
+        outside.mkdir()
+        (outside / "Manifest.lock").write_text("external legacy installation")
+        macos = self.host / "macos"
+        macos.mkdir()
+        (macos / "Pods").symlink_to(outside)
+        with self.assertRaises(BuildError):
+            update_receipt(self.host, self.capabilities, {}, entries)
+        self.assertFalse(ios_manifest.exists())
+        self.assertEqual((self.host / RECEIPT).read_bytes(), before)
+        self.assertEqual((outside / "Manifest.lock").read_text(), "external legacy installation")
+        (macos / "Pods").unlink()
+        macos_manifest = self.install_pods("macos", "macos", selected=False)
+        # A retry must check installed state again, even though the receipt is equal.
+        update_receipt(self.host, self.capabilities, {}, entries)
+        self.assertFalse(ios_manifest.exists())
+        self.assertFalse(macos_manifest.exists())
+        self.assertEqual((self.host / RECEIPT).read_bytes(), before)
 
     def test_changed_native_artifact_invalidates_only_its_platform(self):
         entry = self.publish_apple("macos")

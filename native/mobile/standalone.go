@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"sync"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -96,12 +97,15 @@ func standaloneDNSPlan(options option.Options) (*StandaloneDNSPlan, error) {
 	return plan, nil
 }
 
-// standalonePlatformWrapper replaces only the IPv4-only native default-route
-// monitor. All TUN, route, interface enumeration and socket binding stay native.
+// standalonePlatformWrapper keeps native networking and opens native utun with
+// add-only route ownership. An optional host supplies IPv6-aware path updates.
 type standalonePlatformWrapper struct {
 	platformInterfaceStub
-	state platformInterfaceWrapper
-	host  StandalonePlatformInterface
+	state      platformInterfaceWrapper
+	host       StandalonePlatformInterface
+	openTun    func(tun.Options) (tun.Tun, error)
+	tunAccess  sync.Mutex
+	interfaces []tun.Tun
 }
 
 var _ adapter.PlatformInterface = (*standalonePlatformWrapper)(nil)
@@ -114,6 +118,65 @@ func (w *standalonePlatformWrapper) Initialize(manager adapter.NetworkManager) e
 }
 
 func (w *standalonePlatformWrapper) UsePlatformAutoDetectInterfaceControl() bool { return false }
+func (w *standalonePlatformWrapper) UsePlatformInterface() bool                  { return true }
+func (w *standalonePlatformWrapper) UsePlatformDefaultInterfaceMonitor() bool    { return w.host != nil }
+
+func (w *standalonePlatformWrapper) OpenInterface(options *tun.Options, _ option.TunPlatformOptions) (tun.Tun, error) {
+	open := w.openTun
+	if open == nil {
+		open = openStandaloneTun
+	}
+	iface, err := open(*options)
+	if iface != nil {
+		w.tunAccess.Lock()
+		w.interfaces = append(w.interfaces, iface)
+		w.tunAccess.Unlock()
+	}
+	return iface, err
+}
+
+func (w *standalonePlatformWrapper) closeInterfaces() error {
+	w.tunAccess.Lock()
+	defer w.tunAccess.Unlock()
+	var failure error
+	for _, iface := range w.interfaces {
+		if err := iface.Close(); err != nil {
+			failure = errors.New("could not close standalone TUN")
+		}
+	}
+	return failure
+}
+
+// Upstream Box.Start drains its cleanup scope on failure and discards close
+// errors. Retain the owned wrappers so a later engine close still reports those
+// sticky failures to CommandServer, without closing the native descriptor twice.
+type standaloneEngine struct {
+	mobileEngine
+	platform  *standalonePlatformWrapper
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (e *standaloneEngine) Close() error {
+	e.closeOnce.Do(func() {
+		engineErr := e.mobileEngine.Close()
+		tunErr := e.platform.closeInterfaces()
+		if engineErr != nil || tunErr != nil {
+			e.closeErr = errors.New("could not close standalone service")
+		}
+	})
+	return e.closeErr
+}
+
+func (s *CommandServer) createEngine(ctx context.Context, platform PlatformInterface, options option.Options) (mobileEngine, error) {
+	engine, err := s.newEngine(ctx, platform, options)
+	if engine != nil && s.standalone {
+		if wrapper, ok := service.FromContext[adapter.PlatformInterface](ctx).(*standalonePlatformWrapper); ok {
+			engine = &standaloneEngine{mobileEngine: engine, platform: wrapper}
+		}
+	}
+	return engine, err
+}
 
 func (w *standalonePlatformWrapper) CreateDefaultInterfaceMonitor(log logger.Logger) tun.DefaultInterfaceMonitor {
 	return &platformDefaultInterfaceMonitor{
@@ -124,7 +187,7 @@ func (w *standalonePlatformWrapper) CreateDefaultInterfaceMonitor(log logger.Log
 
 func (s *CommandServer) baseContext() context.Context {
 	ctx := mobileBaseContext(s.platform)
-	if s.monitor != nil {
+	if s.standalone || s.monitor != nil {
 		ctx = service.ContextWith[adapter.PlatformInterface](ctx, &standalonePlatformWrapper{host: s.monitor})
 	}
 	return ctx
@@ -136,6 +199,7 @@ type preparedStandaloneService struct {
 	engine  mobileEngine
 	ctx     context.Context
 	options *option.Options
+	routes  standaloneRoutePlan
 }
 
 // These pinned constructors allocate stacks whose cleanup is installed only by
@@ -197,14 +261,18 @@ func (s *CommandServer) PrepareService(config string, overrides *OverrideOptions
 	if err != nil {
 		return nil, err
 	}
-	prepared := &preparedStandaloneService{ctx: ctx}
+	routes, err := buildStandaloneRoutePlan(options)
+	if err != nil {
+		return nil, err
+	}
+	prepared := &preparedStandaloneService{ctx: ctx, routes: routes}
 	if needsDisposableValidation(options) {
 		if err = CheckConfig(config); err != nil {
 			return nil, errors.New("invalid standalone configuration")
 		}
 		prepared.options = &options
 	} else {
-		engine, err = s.newEngine(ctx, nil, options)
+		engine, err = s.createEngine(ctx, nil, options)
 		if err != nil || engine == nil {
 			return nil, errors.New("invalid standalone configuration")
 		}
@@ -234,7 +302,7 @@ func (s *CommandServer) ActivateService() error {
 	s.state.Unlock()
 	if prepared.options != nil {
 		var err error
-		prepared.engine, err = s.newEngine(prepared.ctx, nil, *prepared.options)
+		prepared.engine, err = s.createEngine(prepared.ctx, nil, *prepared.options)
 		if err != nil || prepared.engine == nil {
 			_ = s.closeEngine()
 			return errors.New("could not create standalone service")
@@ -243,6 +311,12 @@ func (s *CommandServer) ActivateService() error {
 	if prepared.ctx.Err() != nil {
 		_ = s.closeEngine()
 		return errors.New("standalone startup was stopped")
+	}
+	// Preparation/checkConfig performs no host-route inspection. Recheck at
+	// activation so routes installed by another VPN since preparation are kept.
+	if err := s.checkStandaloneRoutes(prepared.routes); err != nil {
+		_ = s.closeEngine()
+		return err
 	}
 	if err := prepared.engine.Start(); err != nil || prepared.ctx.Err() != nil || s.isClosed() {
 		_ = s.closeEngine()

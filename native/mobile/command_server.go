@@ -26,6 +26,7 @@ type CommandServer struct {
 	monitor        StandalonePlatformInterface
 	platform       PlatformInterface
 	newEngine      func(context.Context, PlatformInterface, option.Options) (mobileEngine, error)
+	routeTable     func() ([]standaloneRoute, error) // nil selects the read-only native routing table.
 }
 
 // Retained in full so the existing Swift/Kotlin implementations remain source
@@ -118,11 +119,15 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	if err = applyOverrides(&configuration, options); err != nil {
 		return err
 	}
+	var routes standaloneRoutePlan
 	if s.standalone {
 		if err = validateStandaloneOptions(configuration); err != nil {
 			return err
 		}
 		if _, err = standaloneDNSPlan(configuration); err != nil {
+			return err
+		}
+		if routes, err = buildStandaloneRoutePlan(configuration); err != nil {
 			return err
 		}
 	}
@@ -138,9 +143,14 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	}
 	s.cancel = cancel
 	s.state.Unlock()
-	engine, err := s.newEngine(ctx, s.platform, configuration)
+	engine, err := s.createEngine(ctx, s.platform, configuration)
 	if err == nil && engine == nil {
 		err = errors.New("missing mobile engine")
+	}
+	// Inspect after removing our previous routes for an early diagnostic. The
+	// standalone TUN wrapper also enforces add-only routing during actual Start.
+	if err == nil && s.standalone {
+		err = s.checkStandaloneRoutes(routes)
 	}
 	if err == nil {
 		err = engine.Start()

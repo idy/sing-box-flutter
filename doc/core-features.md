@@ -243,9 +243,11 @@ not disable this mobile cache.
 
 The selected mobile core does not forward raw engine diagnostics, which can contain
 credential-bearing URLs. An explicitly requested private log file receives fixed
-lifecycle messages only; stdout/stderr log targets are rejected. This differs from
-standard upstream protocol logging and should be considered when diagnosing a
-connection.
+lifecycle messages only; stdout/stderr log targets are rejected. Log destinations
+must stay beneath the host's private runtime Working directory. Traversal, symlink
+escapes, hard-link aliases and non-regular files are rejected before permissions
+or contents are changed. This differs from standard upstream protocol logging and
+should be considered when diagnosing a connection.
 
 Hot reload does not replace native binaries or the capabilities bundle. After a
 core or pubspec change, rebuild the core and app. Apple core builds invalidate the

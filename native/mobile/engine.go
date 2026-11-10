@@ -93,7 +93,23 @@ func privateLogPath(ctx context.Context, options *option.LogOptions) (string, er
 	if output == "" {
 		output = "mobile.log"
 	}
-	return filemanager.BasePath(ctx, output), nil
+	// Hosts supply their private Working directory through the file manager.
+	// Never fall back to the process working directory for privileged logging.
+	base := filemanager.BasePath(ctx, ".")
+	if !filepath.IsAbs(base) {
+		return "", errors.New("mobile logging requires a private file")
+	}
+	if filepath.IsAbs(output) {
+		var err error
+		output, err = filepath.Rel(base, output)
+		if err != nil {
+			return "", errors.New("mobile logging requires a private file")
+		}
+	}
+	if !filepath.IsLocal(output) || filepath.Clean(output) == "." {
+		return "", errors.New("mobile logging requires a private file")
+	}
+	return filepath.Clean(output), nil
 }
 
 func (e *boxEngine) event(event string) {
@@ -106,18 +122,40 @@ func (e *boxEngine) openLog() error {
 	if e.logPath == "" || e.log != nil {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(e.logPath), 0o700); err != nil {
-		return errors.New("could not open private mobile log")
-	}
-	file, err := os.OpenFile(e.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-	if err == nil {
-		err = file.Chmod(0o600)
-	}
+	failure := errors.New("could not open private mobile log")
+	// Anchor creation and parent resolution to the existing, host-owned runtime
+	// directory. Root prevents symlink/rename races from escaping that tree.
+	root, err := os.OpenRoot(filemanager.BasePath(e.ctx, "."))
 	if err != nil {
-		if file != nil {
-			_ = file.Close()
-		}
-		return errors.New("could not open private mobile log")
+		return failure
+	}
+	defer root.Close()
+	if err = root.MkdirAll(filepath.Dir(e.logPath), 0o700); err != nil {
+		return failure
+	}
+	parent, err := root.OpenFile(filepath.Dir(e.logPath), os.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return failure
+	}
+	defer parent.Close()
+	// Root.OpenFile follows in-tree symlinks, so open the leaf relative to the
+	// pinned parent descriptor to retain O_NOFOLLOW. Nonblocking avoids hanging
+	// on a FIFO before its type can be checked; never acquire a controlling TTY.
+	fd, err := unix.Openat(int(parent.Fd()), filepath.Base(e.logPath), unix.O_CREAT|unix.O_APPEND|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return failure
+	}
+	var stat unix.Stat_t
+	// Check the opened object, not its path, before changing permissions or
+	// writing. A hard link could otherwise alias a file outside runtime storage.
+	if err = unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 {
+		_ = unix.Close(fd)
+		return failure
+	}
+	file := os.NewFile(uintptr(fd), e.logPath)
+	if err = file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return failure
 	}
 	e.log = file
 	return nil

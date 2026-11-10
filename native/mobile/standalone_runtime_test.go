@@ -227,8 +227,8 @@ func TestStandaloneMonitorKeepsNativeNetworkingAndIPv6Callbacks(t *testing.T) {
 	host := &standaloneTestMonitorHost{}
 	server := &CommandServer{monitor: host}
 	platform := service.FromContext[adapter.PlatformInterface](server.baseContext())
-	if platform == nil || platform.UsePlatformInterface() || platform.UsePlatformNetworkInterfaces() || platform.UnderNetworkExtension() || platform.UsePlatformAutoDetectInterfaceControl() || !platform.UsePlatformDefaultInterfaceMonitor() {
-		t.Fatal("monitor adapter replaced native networking or socket control")
+	if platform == nil || !platform.UsePlatformInterface() || platform.UsePlatformNetworkInterfaces() || platform.UnderNetworkExtension() || platform.UsePlatformAutoDetectInterfaceControl() || !platform.UsePlatformDefaultInterfaceMonitor() {
+		t.Fatal("route adapter lost TUN interception or replaced native networking and socket control")
 	}
 	// Match Box.New: monitor construction precedes platform.Initialize.
 	monitor := platform.CreateDefaultInterfaceMonitor(log.NewNOPFactory().Logger()).(*platformDefaultInterfaceMonitor)

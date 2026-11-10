@@ -136,8 +136,15 @@ class SingBoxFlutterArtifacts
       raise "Invalid sing_box_flutter project #{platform == :macos ? 'macOS' : 'Apple'} artifacts. Rebuild the native core for this host before running pod install."
     end
 
+    # CocoaPods serializes this marker with the guard in Local Podspecs and pins
+    # that file's checksum in Manifest.lock. The builder verifies the installed
+    # selection too: an unchanged receipt may have survived a legacy pod install.
+    pod_selection = { 'schema' => 1, 'target' => target, 'fingerprint' => fingerprint,
+                      'pubspec_sha256' => receipt['pubspec_sha256'],
+                      'macos' => receipt['macos'], 'artifact' => artifact }
     @profile_guard = <<-SCRIPT
 set -eu
+# sing_box_flutter pod selection: #{JSON.generate(pod_selection)}
 # Reject a rebuilt or changed profile until CocoaPods resolves its slices again.
 #{Shellwords.escape(recipe_python)} -I #{Shellwords.escape(recipe_checker)} --project-dir #{Shellwords.escape(host_root.to_s)} --target #{target} --installed-artifact #{Shellwords.escape(artifact.fetch('path'))} --installed-sha256 #{Shellwords.escape(artifact_digest)}
 current_fingerprint=$(/usr/bin/plutil -extract fingerprint raw -o - #{Shellwords.escape(receipt_path.to_s)})

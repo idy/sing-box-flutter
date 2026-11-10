@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -337,20 +338,61 @@ def update_receipt(project: Path, capabilities: dict, requested: dict, artifacts
                "pubspec_sha256": current_pubspec,
                "artifacts": {**retained, **artifacts}}
     for target, platform in (("apple", "ios"), ("macos", "macos")):
-        if _pod_selection(previous, target) != _pod_selection(updated, target):
+        selection = _pod_selection(updated, target)
+        if (_pod_selection(previous, target) != selection or
+                (selection is not None and _installed_pod_selection(project, platform) != selection)):
             # Refresh before publishing the new pointer. If refresh fails, the
             # old receipt remains so a retry cannot mistake stale Pods for current.
             invalidate_pods(project, platform)
     write_json(path, updated)
 
 
-def _pod_selection(receipt: dict, target: str) -> tuple | None:
+def _pod_selection(receipt: dict, target: str) -> dict | None:
     artifacts = receipt.get("artifacts")
     entry = artifacts.get(target) if isinstance(artifacts, dict) else None
     if entry is None:
         return None
-    return (receipt.get("fingerprint"), receipt.get("pubspec_sha256"),
-            receipt.get("macos"), entry)
+    return {"schema": 1, "target": target, "fingerprint": receipt.get("fingerprint"),
+            "pubspec_sha256": receipt.get("pubspec_sha256"),
+            "macos": receipt.get("macos"), "artifact": entry}
+
+
+def _installed_pod_selection(project: Path, platform: str) -> dict | None:
+    """Trust a guard marker only when CocoaPods' installed locks pin its podspec."""
+    pods = project / platform / "Pods"
+    manifest = pods / "Manifest.lock"
+    lock = pods.parent / "Podfile.lock"
+    podspec = pods / "Local Podspecs/sing_box_flutter.podspec.json"
+    try:
+        for path in (manifest, lock, podspec):
+            if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(project.resolve()):
+                return None
+        installed_lock = manifest.read_bytes()
+        if installed_lock != lock.read_bytes():
+            return None
+        spec_bytes = podspec.read_bytes()
+        # Read only CocoaPods' generated checksum section, without a YAML dependency.
+        checksums = re.search(r"(?m)^SPEC CHECKSUMS:\n((?:  .*\n)+)", installed_lock.decode())
+        if (checksums is None or
+                re.findall(r"(?m)^  sing_box_flutter: ([0-9a-f]{40})$", checksums[1]) !=
+                [hashlib.sha1(spec_bytes).hexdigest()]):
+            return None
+        spec = json.loads(spec_bytes, object_pairs_hook=_unique_object)
+        shared = next(part for part in spec["subspecs"] if part["name"] == "Shared")
+        phases = shared.get("script_phases", [])
+        if isinstance(phases, dict):
+            phases = [phases]
+        guards = [phase for phase in phases if phase.get("name") == "Validate selected core artifacts"]
+        if (len(guards) != 1 or guards[0].get("always_out_of_date") != "1" or
+                guards[0].get("execution_position") != "before_compile"):
+            return None
+        marker = "# sing_box_flutter pod selection: "
+        selections = [line[len(marker):] for line in guards[0]["script"].splitlines() if line.startswith(marker)]
+        if len(selections) == 1:
+            return json.loads(selections[0], object_pairs_hook=_unique_object)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
+        pass
+    return None
 
 
 def invalidate_pods(project: Path, platform: str = "ios") -> None:

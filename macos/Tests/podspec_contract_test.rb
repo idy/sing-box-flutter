@@ -117,6 +117,7 @@ Dir.mktmpdir('sing box macos pod contract ') do |directory|
   end
 
   selected = configure.call("  core: {}\n", 'implicit')
+  SingBoxFlutterPodspecContract.installed_selection_contract(selected, host: host, source_root: source_root, platform: 'macos')
   raise 'macOS minimum must be 12.0' unless selected.deployment_target(:osx) == '12.0'
   plugin = selected.subspec_by_name('sing_box_flutter/Plugin').consumer(:osx)
   raise 'NE plugin links Go' unless plugin.dependencies.map(&:name).sort == ['FlutterMacOS', 'sing_box_flutter/Shared']

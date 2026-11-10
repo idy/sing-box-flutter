@@ -168,6 +168,19 @@ Dir.mktmpdir('sing box pod contract ') do |directory|
   pubspec.write(original_pubspec)
   receipt = JSON.parse(original_receipt)
   save_receipt.call
+  SingBoxFlutterPodspecContract.installed_selection_contract(selected, host: host, source_root: source_root, platform: 'ios')
+  # Removing the selection lets a legacy pod install replace the selected guard,
+  # while native.json remains untouched. Restoring the original pubspec and
+  # rebuilding identical bytes must still make Flutter run pod install again.
+  pubspec.write("name: fixture\n")
+  legacy = load_spec.call
+  installed_manifest = SingBoxFlutterPodspecContract.install_spec(legacy, host: host, platform: 'ios')
+  legacy_lock = installed_manifest.read
+  pubspec.write(original_pubspec)
+  SingBoxFlutterPodspecContract.refresh_receipt(host: host, source_root: source_root)
+  raise 'Restored selection kept legacy Pods without guards' if installed_manifest.exist?
+  raise 'Legacy dependency lock changed' unless host.join('ios/Podfile.lock').read == legacy_lock
+  raise 'Legacy-return test did not preserve the original receipt' unless JSON.parse(receipt_path.read) == JSON.parse(original_receipt)
   core = selected.subspec_by_name('sing_box_flutter/Core').consumer(:ios)
   raise 'External framework lost or re-copied' unless core.vendored_frameworks.empty? && core.pod_target_xcconfig['FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]'].include?(framework.to_s)
   raise 'Missing fingerprint flag' unless core.pod_target_xcconfig['OTHER_SWIFT_FLAGS'].include?('SINGBOX_SELECTABLE_CORE')

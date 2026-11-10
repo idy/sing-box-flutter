@@ -133,6 +133,17 @@ still choose more-specific domain/scoped resolvers; this is default-resolver
 integration, not a policy that overrides every application's DNS mechanism.
 
 Destination-based `route_address` and `route_exclude_address` are supported.
+Immediately before activation, the backend reads the kernel routing table and
+refuses destinations that would replace an existing route or address subnets
+already attached to another interface. This check also protects native address
+routes when `auto_route` is false. Dynamic `route_address_set` and
+`route_exclude_address_set` are rejected; use explicit static prefixes so the
+check covers the effective route plan. Configuration validation does not inspect
+or modify host routes. Route insertion never deletes and replaces an existing
+route: a conflict appearing during startup aborts the new tunnel. Closing its
+owned interface removes its routes, including after a partial startup failure.
+Changing routes requires a new session; live route updates are rejected.
+
 Darwin does not implement UID/UID-range filters, Android-user or package filters,
 or `strict_route` for this backend; those options are rejected rather than
 silently ignored. Default uplink monitoring supports both IPv4 and IPv6 paths
