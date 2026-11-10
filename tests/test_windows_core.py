@@ -394,7 +394,7 @@ file(WRITE "${CMAKE_BINARY_DIR}/bundled.txt" "${bundle_count}\\n${bundle_path}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         artifact = build_core.host_path(self.host, entry["path"])
         self.assertEqual((self.cmake_build / "bundled.txt").read_text(encoding="utf-8"),
-                         "1\n" + str(artifact / WINDOWS_EXECUTABLE))
+                         "1\n" + (artifact / WINDOWS_EXECUTABLE).as_posix())
         result = self.verify_installed()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         (artifact / WINDOWS_EXECUTABLE).write_bytes(b"tampered after configuration")
@@ -493,8 +493,11 @@ class WindowsDependencyOrder(WindowsFixture):
         builder = source / "cmd/internal/build_libbox/main.go"
         registry.parent.mkdir(parents=True)
         builder.parent.mkdir(parents=True)
-        registry.write_text("package include\nfunc EndpointRegistry() {\n\tregisterTailscaleEndpoint(registry)\n}\n")
-        builder.write_text('package main\nfunc init() { sharedTags = append(sharedTags, "with_gvisor") }\n')
+        # Match the pinned upstream Go sources, independent of host text defaults.
+        registry.write_text("package include\nfunc EndpointRegistry() {\n\tregisterTailscaleEndpoint(registry)\n}\n",
+                            encoding="utf-8", newline="\n")
+        builder.write_text('package main\nfunc init() { sharedTags = append(sharedTags, "with_gvisor") }\n',
+                           encoding="utf-8", newline="\n")
         (source / "go.mod").write_text("module github.com/sagernet/sing-box\n")
         (source / "go.sum").write_text("")
         (source / "LICENSE").write_text("source license\n")

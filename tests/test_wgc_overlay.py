@@ -29,8 +29,11 @@ class OverlayTests(unittest.TestCase):
         builder = source / "cmd/internal/build_libbox/main.go"
         registry.parent.mkdir(parents=True)
         builder.parent.mkdir(parents=True)
-        registry.write_text("package include\nfunc EndpointRegistry() {\n\tregisterTailscaleEndpoint(registry)\n}\n")
-        builder.write_text('package main\nfunc init() { sharedTags = append(sharedTags, "with_gvisor") }\n')
+        # Keep fixtures byte-compatible with the reviewed upstream LF sources.
+        registry.write_text("package include\nfunc EndpointRegistry() {\n\tregisterTailscaleEndpoint(registry)\n}\n",
+                            encoding="utf-8", newline="\n")
+        builder.write_text('package main\nfunc init() { sharedTags = append(sharedTags, "with_gvisor") }\n',
+                           encoding="utf-8", newline="\n")
         (source / "go.mod").write_text("module github.com/sagernet/sing-box\n")
         (source / "go.sum").write_text("original sums\n")
         (root / "native/wgc").mkdir(parents=True)
