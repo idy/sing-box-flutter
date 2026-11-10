@@ -67,11 +67,21 @@ class Core:
             raise
 
 
-def wait_removed(interface: Path):
+def tx_packets(interface: str) -> int | None:
+    # /sys/class/net belongs to the namespace where sysfs was mounted. Proc's
+    # self/net view follows this process, including after unshare --net.
+    for line in Path("/proc/self/net/dev").read_text().splitlines()[2:]:
+        name, _, counters = line.partition(":")
+        if name.strip() == interface:
+            return int(counters.split()[9])
+    return None
+
+
+def wait_removed(interface: str):
     deadline = time.monotonic() + 5
-    while interface.exists() and time.monotonic() < deadline:
+    while tx_packets(interface) is not None and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert not interface.exists(), f"TUN leaked: {interface.name}"
+    assert tx_packets(interface) is None, f"TUN leaked: {interface}"
 
 
 def main():
@@ -93,7 +103,6 @@ def main():
             assert "secret-auth-key" not in json.dumps(invalid)
 
             name = f"sbf{os.getpid()}"
-            interface = Path("/sys/class/net") / name
             config = {
                 "dns": {"servers": [{"type": "udp", "tag": "dns-direct", "server": "1.1.1.1"}],
                         "final": "dns-direct"},
@@ -109,32 +118,34 @@ def main():
             if not args.tun:
                 denied = core.request("start", config)
                 assert denied["error"]["code"] == "permission_denied", denied
-                assert not interface.exists()
+                assert tx_packets(name) is None
                 print("Linux native validation and unprivileged permission checks passed")
                 return
 
             core.ok("start", config)
-            assert interface.exists(), "connected without a TUN"
+            assert tx_packets(name) is not None, "connected without a TUN"
             assert core.ok("getStatus")["state"] == "connected"
             assert [e["state"] for e in core.events][-2:] == ["connecting", "connected"]
             # A datagram to a reserved test address must enter the TUN. The direct
             # outbound need not receive a reply, so this requires no public server.
-            counter = interface / "statistics" / "tx_packets"
-            before = int(counter.read_text())
+            before = tx_packets(name)
+            assert before is not None, "TUN disappeared before packet probe"
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
                 probe.sendto(b"sing-box-flutter-smoke", ("198.18.0.1", 38473))
             deadline = time.monotonic() + 5
-            while int(counter.read_text()) == before and time.monotonic() < deadline:
+            after = tx_packets(name)
+            while after == before and time.monotonic() < deadline:
                 time.sleep(0.05)
-            assert int(counter.read_text()) > before, "traffic did not enter the TUN"
+                after = tx_packets(name)
+            assert after is not None and after > before, "traffic did not enter the TUN"
             core.ok("stop")
-            wait_removed(interface)
+            wait_removed(name)
             assert core.ok("getStatus")["state"] == "disconnected"
             # Parent EOF must also remove the live interface and routing state.
             core.ok("start", config)
-            assert interface.exists()
+            assert tx_packets(name) is not None
             core.close()
-            wait_removed(interface)
+            wait_removed(name)
             print("Linux TUN startup, packet capture, stop and parent-exit cleanup passed")
         finally:
             core.close()
