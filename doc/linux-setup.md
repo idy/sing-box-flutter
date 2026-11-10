@@ -99,11 +99,30 @@ Each IPC request must fit within 16 MiB including its JSON envelope, UTF-8 encod
 and trailing newline. A larger request fails locally with a sanitized
 `PlatformException` (`request_too_large`) and leaves an active connection running.
 
-State is stored under `$XDG_DATA_HOME/<app-executable>/sing_box_flutter` when
+State is stored under `$XDG_DATA_HOME/<installation-id>/sing_box_flutter` when
 `XDG_DATA_HOME` is an absolute path. An unset, empty or relative value uses
-`$HOME/.local/share/<app-executable>/sing_box_flutter`. If `HOME` is also unset,
-empty or relative, the system temporary directory replaces it. State paths never
-resolve relative to the application's working directory.
+`$HOME/.local/share/<installation-id>/sing_box_flutter`. The installation ID is the
+full SHA-256 digest of `Platform.resolvedExecutable`, the canonical host executable
+path. It stays stable across launches at the same path and separates installations
+with identical executable names. Moving an installation changes its state location;
+old basename-only state directories are not reused.
+
+If `HOME` is also unset, empty or relative, the backend securely creates a fresh
+private directory in the system temporary directory. It reuses that directory for
+helper restarts within the same backend, but a new engine/backend gets a new one.
+This fallback does not provide persistence across application launches and may be
+removed by the operating system's temporary-file cleanup. Set a valid `HOME` or
+`XDG_DATA_HOME` when persistent caches or other state are required. State paths
+never resolve relative to the application's working directory, and environment
+variables such as `USER` and `UID` do not establish ownership.
+
+Before opening state, the helper creates missing directories with mode `0700` and
+checks ownership against its real process UID. Existing state and `tmp` directories
+must belong to that UID and have no group or other permissions. Symlinks, foreign
+owners and unsafe permissions are rejected; the helper never repairs them with
+`chmod`. Ancestors may be ordinary user-owned or root-owned directories, but must
+not be writable by other users, except for root-owned sticky directories such as
+`/tmp`. Use actual directory paths rather than symlinks for state storage.
 
 A minimal direct-routing configuration is:
 

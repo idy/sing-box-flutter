@@ -71,7 +71,13 @@ GTK 3 development headers.
 The build records architecture and validates the ELF executable, source identity
 and artifact hashes. CMake verifies the host receipt and bundles the executable
 and capabilities manifest under `lib/sing_box_flutter/`. It does not silently build
-a missing core. Give TUN capabilities only to the installed helper, then launch
+a missing core. When Clash API is selected, a checked, reversible source overlay
+binds its external-UI HTTP download to the service context and registers listener
+cleanup before startup. This preserves prompt cancellation without changing the
+pinned upstream revision; the overlay is covered by the build-tool fingerprint
+and restored after compilation, including on failure.
+
+Give TUN capabilities only to the installed helper, then launch
 the UI as an ordinary user. See [Linux setup](linux-setup.md) for commands,
 permissions and the process lifecycle.
 

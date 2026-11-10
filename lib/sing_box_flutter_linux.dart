@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -9,7 +10,10 @@ import 'package:path/path.dart' as p;
 import 'sing_box_flutter_platform_interface.dart';
 import 'src/events.dart';
 
-/// Resolves Linux state storage without using relative environment paths.
+/// Resolves Linux state storage using the canonical host executable identity.
+///
+/// With no valid data home, allocates a private directory for this backend. This
+/// fallback survives helper restarts but does not persist across engine launches.
 @visibleForTesting
 String linuxDataDirectory({
   required Map<String, String> environment,
@@ -21,19 +25,29 @@ String linuxDataDirectory({
   final String dataHome;
   if (xdgDataHome != null && p.posix.isAbsolute(xdgDataHome)) {
     dataHome = xdgDataHome;
+  } else if (home != null && p.posix.isAbsolute(home)) {
+    dataHome = p.posix.join(home, '.local', 'share');
   } else {
-    final fallbackHome =
-        home != null && p.posix.isAbsolute(home) ? home : temporaryDirectory;
-    if (!p.posix.isAbsolute(fallbackHome)) {
+    if (!p.posix.isAbsolute(temporaryDirectory)) {
       throw ArgumentError('The fallback state directory must be absolute.');
     }
-    dataHome = p.posix.join(fallbackHome, '.local', 'share');
+    try {
+      // createTemp uses mkdtemp (0700) on Linux. Never reuse a predictable name
+      // or rely on environment variables such as USER/UID for ownership.
+      return Directory(temporaryDirectory)
+          .createTempSync('sing-box-flutter-')
+          .resolveSymbolicLinksSync();
+    } on FileSystemException {
+      throw PlatformException(
+        code: 'state_directory',
+        message: 'Could not create a private Linux state directory.',
+      );
+    }
   }
-  return p.posix.join(
-    dataHome,
-    p.posix.basename(executable),
-    'sing_box_flutter',
-  );
+  // Platform.resolvedExecutable is canonical and remains stable across launches.
+  // A full digest also avoids path-length limits for long executable basenames.
+  final installation = sha256.convert(utf8.encode(executable)).toString();
+  return p.posix.join(dataHome, installation, 'sing_box_flutter');
 }
 
 /// Linux backend using a bundled, source-built sing-box child process.

@@ -84,6 +84,29 @@ def wait_removed(interface: str):
     assert tx_packets(interface) is None, f"TUN leaked: {interface}"
 
 
+def routing_state() -> dict[str, list[str]]:
+    """Use namespace-aware netlink tools, preserving duplicate rules/routes."""
+    result = {}
+    for family in ("-4", "-6"):
+        for kind, arguments in (("rules", ["rule", "show"]),
+                                ("routes", ["route", "show", "table", "all"])):
+            entries = json.loads(subprocess.check_output(
+                ["ip", "-json", family, *arguments], text=True))
+            result[f"{family}:{kind}"] = sorted(json.dumps(entry, sort_keys=True) for entry in entries)
+    return result
+
+
+def wait_routing_restored(expected: dict[str, list[str]]):
+    deadline = time.monotonic() + 5
+    while True:
+        current = routing_state()
+        if current == expected:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Policy routing leaked: before={expected!r}, after={current!r}")
+        time.sleep(0.05)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--helper", required=True)
@@ -122,6 +145,7 @@ def main():
                 print("Linux native validation and unprivileged permission checks passed")
                 return
 
+            baseline_routing = routing_state()
             core.ok("start", config)
             assert tx_packets(name) is not None, "connected without a TUN"
             assert core.ok("getStatus")["state"] == "connected"
@@ -140,12 +164,14 @@ def main():
             assert after is not None and after > before, "traffic did not enter the TUN"
             core.ok("stop")
             wait_removed(name)
+            wait_routing_restored(baseline_routing)
             assert core.ok("getStatus")["state"] == "disconnected"
             # Parent EOF must also remove the live interface and routing state.
             core.ok("start", config)
             assert tx_packets(name) is not None
             core.close()
             wait_removed(name)
+            wait_routing_restored(baseline_routing)
             print("Linux TUN startup, packet capture, stop and parent-exit cleanup passed")
         finally:
             core.close()

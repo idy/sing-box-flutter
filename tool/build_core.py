@@ -209,6 +209,46 @@ def linux_overlay(source: Path, expected_sources: dict[str, str], root: Path = R
         shutil.rmtree(directory)
 
 
+@contextlib.contextmanager
+def linux_clash_overlay(source: Path):
+    """Make the pinned external-UI download honour Linux service cancellation."""
+    patches = {
+        "experimental/clashapi/server_resources.go": (
+            ("\tresponse, err := httpClient.Get(downloadURL)",
+             "\trequest, err := http.NewRequestWithContext(s.ctx, http.MethodGet, downloadURL, nil)\n"
+             "\tif err != nil {\n\t\treturn err\n\t}\n"
+             "\tresponse, err := httpClient.Do(request)"),
+            ("\tif err != nil {\n\t\tremoveAllInDirectory(s.ctx, s.externalUI)",
+             "\tif err != nil && s.ctx.Err() == nil {\n\t\tremoveAllInDirectory(s.ctx, s.externalUI)"),
+        ),
+        "experimental/clashapi/server.go": (
+            ("\t\ts.checkAndDownloadExternalUI()\n\t\tvar (",
+             "\t\tscope.Add(s.httpServer.Close)\n\t\ts.checkAndDownloadExternalUI()\n"
+             "\t\tif err := scope.Context().Err(); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tvar ("),
+            ("\t\tscope.Add(s.httpServer.Close)\n\t\ts.logger.Info(", "\t\ts.logger.Info("),
+        ),
+    }
+    originals = {}
+    replacements = {}
+    for name, changes in patches.items():
+        path = source / name
+        original = path.read_bytes()
+        content = original.decode()
+        for old, new in changes:
+            if content.count(old) != 1:
+                raise BuildError("Pinned Clash cancellation source differs from the reviewed input")
+            content = content.replace(old, new, 1)
+        originals[path] = original
+        replacements[path] = content.encode()
+    try:
+        for path, content in replacements.items():
+            path.write_bytes(content)
+        yield
+    finally:
+        for path, original in originals.items():
+            path.write_bytes(original)
+
+
 def linker_flags(fingerprint: str, pins: dict) -> str:
     return ("-s -w -buildid= -checklinkname=0 "
             f"-X github.com/sagernet/sing-box/constant.Version={pins['sing_box_version']} "
@@ -602,6 +642,8 @@ def main(argv: list[str] | None = None) -> int:
                             # Compile directly: the official mobile builder enables
                             # unrelated protocols. Linux uses the same selected libbox.
                             if target == "linux":
+                                if "clash_api" in effective["features"]["api"]:
+                                    stack.enter_context(linux_clash_overlay(source))
                                 package = stack.enter_context(linux_overlay(source, identity["linux_sources"]))
                                 tailscale = prepare_dependencies(go, env, source, pins,
                                     packages=["./experimental/libbox", package], tags=effective["tags"])

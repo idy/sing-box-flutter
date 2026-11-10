@@ -15,7 +15,7 @@ import shutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
 from build_core import (RECEIPT, canonical_hash, host_path, invalidate_pods, load_host_build_request,
-                        linux_architecture, linux_command, linux_overlay, linux_sources,
+                        linux_architecture, linux_clash_overlay, linux_command, linux_overlay, linux_sources,
                         mobile_overlay, mobile_sources, publish_artifact, update_receipt, validate_artifact)
 from native_common import BuildError
 from native_fixtures import linux_executable
@@ -494,6 +494,55 @@ class HostArtifacts(unittest.TestCase):
 
     def test_fingerprint_is_order_independent(self):
         self.assertEqual(canonical_hash({"a": 1, "b": 2}), canonical_hash({"b": 2, "a": 1}))
+
+
+class LinuxClashOverlay(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.source = Path(self.directory.name)
+        directory = self.source / "experimental/clashapi"
+        directory.mkdir(parents=True)
+        self.resources = directory / "server_resources.go"
+        self.server = directory / "server.go"
+        self.original_resources = (
+            "\tresponse, err := httpClient.Get(downloadURL)\n"
+            "\tif err != nil {\n\t\tremoveAllInDirectory(s.ctx, s.externalUI)\n\t}\n")
+        self.original_server = ("\t\ts.checkAndDownloadExternalUI()\n\t\tvar (\n"
+                                "\t\tscope.Add(s.httpServer.Close)\n\t\ts.logger.Info(\"restful\")\n")
+        self.resources.write_text(self.original_resources)
+        self.server.write_text(self.original_server)
+
+    def test_cancels_download_and_restores_source_on_all_exits(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                try:
+                    with linux_clash_overlay(self.source):
+                        resources = self.resources.read_text()
+                        self.assertIn("http.NewRequestWithContext(s.ctx, http.MethodGet", resources)
+                        self.assertIn("httpClient.Do(request)", resources)
+                        self.assertNotIn("httpClient.Get(downloadURL)", resources)
+                        self.assertIn("err != nil && s.ctx.Err() == nil", resources)
+                        server = self.server.read_text()
+                        self.assertIn("scope.Context().Err()", server)
+                        self.assertEqual(server.count("scope.Add(s.httpServer.Close)"), 1)
+                        self.assertLess(server.index("scope.Add(s.httpServer.Close)"),
+                                        server.index("s.checkAndDownloadExternalUI()"))
+                        if fail:
+                            raise RuntimeError("interrupted")
+                except RuntimeError:
+                    self.assertTrue(fail)
+                self.assertEqual(self.resources.read_text(), self.original_resources)
+                self.assertEqual(self.server.read_text(), self.original_server)
+
+    def test_unreviewed_input_does_not_partially_patch_the_checkout(self):
+        changed = self.original_server.replace("checkAndDownloadExternalUI", "changedUpstream")
+        self.server.write_text(changed)
+        with self.assertRaisesRegex(BuildError, "Pinned Clash cancellation source differs"):
+            with linux_clash_overlay(self.source):
+                self.fail("changed upstream input must not compile")
+        self.assertEqual(self.resources.read_text(), self.original_resources)
+        self.assertEqual(self.server.read_text(), changed)
 
 
 class LinuxArtifacts(unittest.TestCase):

@@ -146,14 +146,12 @@ void main() {
   });
 
   test('an absolute XDG data home takes precedence over HOME', () {
-    expect(
-      linuxDataDirectory(
-        environment: {'XDG_DATA_HOME': '/data/app', 'HOME': 'relative/home'},
-        executable: '/opt/my_app/bin/my_app',
-        temporaryDirectory: '/tmp',
-      ),
-      '/data/app/my_app/sing_box_flutter',
+    final directory = linuxDataDirectory(
+      environment: {'XDG_DATA_HOME': '/data/app', 'HOME': 'relative/home'},
+      executable: '/opt/my_app/bin/my_app',
+      temporaryDirectory: '/tmp',
     );
+    expect(directory, matches(r'^/data/app/[a-f0-9]{64}/sing_box_flutter$'));
   });
 
   test('empty and relative XDG data homes use the XDG default', () {
@@ -174,26 +172,59 @@ void main() {
           executable: '/opt/my_app/bin/my_app',
           temporaryDirectory: '/tmp',
         ),
-        '/home/alice/.local/share/my_app/sing_box_flutter',
+        matches(r'^/home/alice/\.local/share/[a-f0-9]{64}/sing_box_flutter$'),
         reason: 'XDG_DATA_HOME=$xdgDataHome',
       );
     }
   });
 
-  test('invalid HOME uses an absolute temporary fallback', () {
+  test('canonical installation paths separate equal executable names',
+      () async {
+    final first = File('${bundle.path}/vendor-a/vpn');
+    final second = File('${bundle.path}/vendor-b/vpn');
+    for (final file in [first, second]) {
+      await file.parent.create(recursive: true);
+      await file.writeAsString('executable fixture');
+    }
+    final alias = await Link('${bundle.path}/vpn-alias').create(first.path);
+    final dataHome = Directory('${bundle.path}/user-data');
+    await dataHome.create();
+    String directory(String executable) => linuxDataDirectory(
+          environment: {'XDG_DATA_HOME': dataHome.path},
+          executable: executable,
+          temporaryDirectory: bundle.path,
+        );
+    final firstDirectory = directory(await first.resolveSymbolicLinks());
+    expect(
+        firstDirectory, isNot(directory(await second.resolveSymbolicLinks())));
+    expect(firstDirectory, directory(await first.resolveSymbolicLinks()));
+    expect(firstDirectory, directory(await alias.resolveSymbolicLinks()));
+    expect(firstDirectory, startsWith('${dataHome.path}/'));
+    expect(await dataHome.list().isEmpty, isTrue);
+  });
+
+  test('invalid HOME creates a fresh private temporary fallback', () async {
+    final directories = <String>{};
     for (final home in [null, '', 'alice', './alice', '../alice', '~']) {
-      expect(
-        linuxDataDirectory(
-          environment: {
-            'XDG_DATA_HOME': 'relative/data',
-            if (home != null) 'HOME': home,
-          },
-          executable: '/opt/my_app/bin/my_app',
-          temporaryDirectory: '/tmp',
-        ),
-        '/tmp/.local/share/my_app/sing_box_flutter',
-        reason: 'HOME=$home',
+      final directory = linuxDataDirectory(
+        environment: {
+          'XDG_DATA_HOME': 'relative/data',
+          if (home != null) 'HOME': home,
+          'UID': '0',
+          'USER': 'another-user',
+        },
+        executable: '/opt/my_app/bin/my_app',
+        temporaryDirectory: bundle.path,
       );
+      expect(
+          directory,
+          startsWith(
+              '${await bundle.resolveSymbolicLinks()}/sing-box-flutter-'));
+      expect(directories.add(directory), isTrue, reason: 'HOME=$home');
+      expect(await Directory(directory).exists(), isTrue);
+      if (!Platform.isWindows) {
+        expect((await Directory(directory).stat()).mode & 0x3f, 0);
+      }
     }
     expect(
       () => linuxDataDirectory(
@@ -203,6 +234,72 @@ void main() {
       ),
       throwsArgumentError,
     );
+  });
+
+  test('fallback ignores precreated predictable paths and symlinks', () async {
+    final target = await Directory('${bundle.path}/other-user').create();
+    final marker =
+        await File('${target.path}/marker').writeAsString('unchanged');
+    final predictable = Directory('${bundle.path}/.local/share/my_app');
+    await predictable.create(recursive: true);
+    await Link('${predictable.path}/sing_box_flutter').create(target.path);
+    final directory = linuxDataDirectory(
+      environment: {'HOME': '', 'XDG_DATA_HOME': ''},
+      executable: '/opt/my_app/bin/my_app',
+      temporaryDirectory: bundle.path,
+    );
+    expect(directory, isNot('${predictable.path}/sing_box_flutter'));
+    expect(directory, startsWith('${await bundle.resolveSymbolicLinks()}/'));
+    expect(await Directory(directory).list().isEmpty, isTrue);
+    expect(await marker.readAsString(), 'unchanged');
+    expect(await target.list().length, 1);
+  });
+
+  test('temporary fallback failures report sanitized errors', () async {
+    final invalidTemp = await File('${bundle.path}/private-path-secret')
+        .writeAsString('not a directory');
+    expect(
+      () => linuxDataDirectory(
+        environment: {},
+        executable: '/opt/my_app/bin/my_app',
+        temporaryDirectory: invalidTemp.path,
+      ),
+      throwsA(isA<PlatformException>()
+          .having((error) => error.code, 'code', 'state_directory')
+          .having((error) => error.toString(), 'message',
+              isNot(contains('private-path-secret')))),
+    );
+  });
+
+  test('a backend reuses its private fallback after helper replacement',
+      () async {
+    final dataDirectory = linuxDataDirectory(
+      environment: {},
+      executable: '/opt/my_app/bin/my_app',
+      temporaryDirectory: bundle.path,
+    );
+    final launches = <List<String>>[];
+    plugin = LinuxSingBoxFlutter.forTesting(
+      bundleDirectory: bundle.path,
+      dataDirectory: dataDirectory,
+      startProcess: (_, args) async {
+        launches.add(args);
+        return child;
+      },
+    );
+    await plugin.initialize(notificationTitle: 'Test');
+    final failure = plugin.events.firstWhere(
+      (event) => event is VpnStatus && event.state == VpnConnectionState.error,
+    );
+    child.exit();
+    await failure;
+    child = FakeCoreProcess();
+    await plugin.initialize(notificationTitle: 'Test');
+    expect(launches, [
+      ['--data-dir', dataDirectory],
+      ['--data-dir', dataDirectory],
+    ]);
+    expect(await Directory(dataDirectory).exists(), isTrue);
   });
 
   test('handshake verifies the bundled core before initialization', () async {
