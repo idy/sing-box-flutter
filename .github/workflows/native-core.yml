@@ -1,24 +1,9 @@
 name: Native core
 
 on:
+  # Always publish Native CI gate, including for documentation-only PRs.
+  # The changes job keeps expensive native builds conditional on their inputs.
   pull_request:
-    paths:
-      - native-core.json
-      - native/**
-      - ios/**
-      # The selectable-core CLI, plugin API, Gradle integration and example host
-      # are all built and exercised by this workflow's native jobs.
-      - android/**
-      - bin/**
-      - lib/**
-      - pubspec.yaml
-      - example/**
-      - THIRD_PARTY_NOTICES.md
-      - LICENSE
-      - tool/**
-      - tests/**
-      - .github/workflows/native-core.yml
-      - .github/scripts/publish_native_release.py
   workflow_dispatch:
     inputs:
       target:
@@ -38,7 +23,44 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      native: ${{ steps.inputs.outputs.native }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Identify native build inputs
+        id: inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          import re
+          import subprocess
+          if os.environ['EVENT_NAME'] == 'workflow_dispatch':
+              required = True
+          else:
+              revisions = [os.environ['BASE_SHA'], os.environ['HEAD_SHA']]
+              if any(re.fullmatch(r'[0-9a-f]{40}', sha) is None for sha in revisions):
+                  raise SystemExit('Missing pull request comparison revisions')
+              # Do not hide the native side of renames into another directory.
+              changed = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', '-z', *revisions, '--'])
+              prefixes = (b'native/', b'ios/', b'android/', b'bin/', b'lib/', b'example/', b'tool/', b'tests/')
+              files = {b'native-core.json', b'pubspec.yaml', b'THIRD_PARTY_NOTICES.md', b'LICENSE',
+                       b'.github/workflows/native-core.yml', b'.github/scripts/publish_native_release.py'}
+              required = any(path.startswith(prefixes) or path in files for path in changed.split(b'\0') if path)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('native=' + str(required).lower() + '\n')
+          PY
+
   validate:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -250,3 +272,34 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           path: .build/release/*
+
+  gate:
+    name: Native CI gate
+    if: always() && github.event_name == 'pull_request'
+    needs: [changes, validate, build, release-inputs]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful native validation when needed
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          NATIVE_REQUIRED: ${{ needs.changes.outputs.native }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RELEASE_RESULT: ${{ needs.release-inputs.result }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          if os.environ['CHANGES_RESULT'] != 'success':
+              raise SystemExit('Native input detection did not succeed')
+          results = [os.environ[name] for name in ('VALIDATE_RESULT', 'BUILD_RESULT', 'RELEASE_RESULT')]
+          if os.environ['NATIVE_REQUIRED'] == 'true':
+              if any(result != 'success' for result in results):
+                  raise SystemExit('Native validation, both platform builds and release-input checks must pass')
+              print('Native CI gate passed: all native checks succeeded')
+          elif os.environ['NATIVE_REQUIRED'] == 'false':
+              if any(result != 'skipped' for result in results):
+                  raise SystemExit('Unexpected native job results for a non-native change')
+              print('Native CI gate passed: no native build inputs changed')
+          else:
+              raise SystemExit('Native input detection returned no decision')
+          PY
