@@ -36,6 +36,12 @@ the live main revision and skips an artifact built from any superseded commit.
 Every main push starts a successor build, so even an unrelated main change cannot
 leave the preceding website update permanently skipped.
 
+For the initial release before the source workflow reaches main, a verified
+static build can be published to the `gh-pages` branch with a CNAME file and Pages
+configured to serve that branch. This does not require relaxing main's CI gates.
+Once the source PR merges, the guarded production job switches Pages back to
+Actions publishing immediately before deploying the current main artifact.
+
 Before the first deployment:
 
 1. Enable GitHub Pages for `idy/sing-box-flutter` using GitHub Actions as its source.

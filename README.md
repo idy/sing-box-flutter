@@ -1,5 +1,7 @@
 # sing_box_flutter
 
+[Project website](https://sing-box-flutter.idy.dev/) · [Feature guide](doc/core-features.md)
+
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
 as a native VPN on Android and iOS. Select the compiled protocols in your host
 `pubspec.yaml` and build them from source with the pinned **Tailscale Go** compiler.

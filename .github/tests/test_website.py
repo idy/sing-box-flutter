@@ -160,7 +160,8 @@ class DeploymentFreshness(unittest.TestCase):
         deploy = workflow.split("  deploy:\n", 1)[1]
         body = deploy.split("python3 -I - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
         self.body = textwrap.dedent(body)
-        self.assertEqual(deploy.count("if: steps.revision.outputs.current == 'true'"), 2)
+        self.assertEqual(deploy.count("if: steps.revision.outputs.current == 'true'"), 3)
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/pages" --method PUT -f build_type=workflow', deploy)
         self.assertLess(deploy.index("id: revision"), deploy.index("uses: actions/configure-pages"))
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

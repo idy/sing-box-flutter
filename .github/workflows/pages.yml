@@ -100,6 +100,11 @@ jobs:
               output.write('current=' + str(deploy).lower() + '\n')
           print('Deploying current main revision' if deploy else 'Skipping superseded website build')
           PY
+      - name: Enable Actions publishing after the initial static release
+        if: steps.revision.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/pages" --method PUT -f build_type=workflow
       - uses: actions/configure-pages@v5
         if: steps.revision.outputs.current == 'true'
       - name: Deploy website
