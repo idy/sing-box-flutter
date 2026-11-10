@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -33,7 +35,7 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
         raise ValueError("CMake File API belongs to another build directory")
     source = Path(model["paths"]["source"])
     configurations = model["configurations"]
-    selected = next((item for item in configurations if item["name"] == configuration), None)
+    selected = next((item for item in configurations if item["name"].casefold() == configuration.casefold()), None)
     if selected is None and len(configurations) == 1 and not configurations[0]["name"]:
         selected = configurations[0]
     if selected is None:
@@ -41,12 +43,14 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
     core = (Path(settings["core_dir"]) / HELPER).resolve()
     effective_prefix = settings["fallback_prefix"] if "$<" in prefix else prefix
     destinations: list[Path] = []
+    core_digest = None
     for directory in selected["directories"]:
         if "jsonFile" not in directory:
             raise ValueError("CMake File API directory installers are unavailable")
         details = read_reply(reply, directory["jsonFile"])
         for installer in details.get("installers", []):
-            if installer.get("type") != "file":
+            kind = installer.get("type")
+            if kind not in ("file", "directory"):
                 continue
             if component and installer.get("component", "Unspecified") != component:
                 continue
@@ -59,13 +63,35 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
                 origin_path = Path(origin)
                 if not origin_path.is_absolute():
                     origin_path = source / origin_path
-                if origin_path.resolve() != core:
-                    continue
-                if isinstance(item, dict) and item.get("to", HELPER) != HELPER:
-                    continue
+                origin_path = origin_path.resolve()
                 destination = Path(installer["destination"])
                 if not destination.is_absolute():
                     destination = Path(effective_prefix) / destination
+                if kind == "file":
+                    if origin_path != core:
+                        continue
+                    if isinstance(item, dict) and item.get("to", HELPER) != HELPER:
+                        continue
+                else:
+                    try:
+                        relative_core = core.relative_to(origin_path)
+                    except ValueError:
+                        continue
+                    # A trailing-slash directory rule has an explicit `to: .`;
+                    # a plain source string retains the source directory name.
+                    target_name = item.get("to", origin_path.name) if isinstance(item, dict) else origin_path.name
+                    destination /= Path(target_name) / relative_core.parent
+                    # Directory filters may exclude the helper. Only accompany
+                    # an actual copy of the verified binary, including DESTDIR.
+                    installed = Path(os.environ.get("DESTDIR", "") + destination.resolve().as_posix()) / HELPER
+                    if not installed.is_file():
+                        continue
+                    if core_digest is None:
+                        with core.open("rb") as stream:
+                            core_digest = hashlib.file_digest(stream, "sha256").digest()
+                    with installed.open("rb") as stream:
+                        if hashlib.file_digest(stream, "sha256").digest() != core_digest:
+                            continue
                 destination = destination.resolve()
                 if destination not in destinations:
                     destinations.append(destination)
