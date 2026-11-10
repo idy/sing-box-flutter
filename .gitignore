@@ -8,6 +8,9 @@
 .build/
 .buildlog/
 
+# Local Claude project configuration.
+/.claude/
+
 # Local design review evidence, not website assets.
 .impeccable/review/
 **/.kotlin/

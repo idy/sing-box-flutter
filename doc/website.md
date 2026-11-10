@@ -19,9 +19,15 @@ of the build machine's locale. The default profile is also embedded in the page
 for readers without JavaScript. The Manrope Latin variable
 font is served locally under the SIL Open Font License retained in `site/assets/`.
 
-The `project-page` entry in `.claude/launch.json` serves the built directory on
-localhost port 4175. Rebuild after editing the HTML, CSS, JavaScript or profiles.
-Website and design working files are excluded from the pub.dev archive.
+Serve the built directory from the repository root:
+
+```bash
+PORT=4175 node .github/scripts/serve_site.mjs
+```
+
+The preview listens on localhost port 4175. Rebuild after editing the HTML, CSS,
+JavaScript or profiles. Local Claude configuration under `.claude/` is ignored
+by Git. Website and design working files are excluded from the pub.dev archive.
 
 ## Deployment
 
