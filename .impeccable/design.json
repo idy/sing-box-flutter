@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-10T03:13:19.572524+00:00",
+  "title": "Design System: sing_box_flutter website",
+  "extensions": {
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Hero heading; responsive overrides are documented in Layout."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Commands, configuration and inline code only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "hero-recipe",
+        "value": "0 20px 48px -22px #1e36576b",
+        "purpose": "Diffuse elevation for the hero recipe only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "primary-background",
+        "value": "background .18s ease-out",
+        "purpose": "Primary action hover; disabled for reduced motion."
+      },
+      {
+        "name": "anchor-scroll",
+        "value": "smooth",
+        "purpose": "Document anchors; switches to auto for reduced motion."
+      },
+      {
+        "name": "copy-feedback",
+        "value": "1800ms",
+        "purpose": "Duration of successful copy label feedback."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "wide-min",
+        "value": "1600px"
+      },
+      {
+        "name": "compact-max",
+        "value": "1100px"
+      },
+      {
+        "name": "stacked-max",
+        "value": "760px"
+      },
+      {
+        "name": "narrow-max",
+        "value": "390px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Blue navigation action leading to build instructions.",
+      "html": "<a class=\"ds-primary\" href=\"#quickstart\">Build your core <svg class=\"ds-arrow\" viewBox=\"0 0 20 20\" aria-hidden=\"true\"><path d=\"M3 10h13m-5-5 5 5-5 5\"/></svg></a>",
+      "css": ".ds-primary{display:inline-flex;align-items:center;justify-content:center;gap:26px;min-height:48px;padding:10px 18px;font-size:14px;font-weight:700;text-decoration:none;border-radius:7px;transition:background .18s ease-out}.ds-primary{background:var(--blue, #2454e6);color:#fff}.ds-primary:hover{background:var(--blue-dark, #173ab0);color:#fff}.ds-arrow{display:inline-block;vertical-align:middle;flex-shrink:0;width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5}.ds-primary{font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}.ds-primary:focus-visible{outline:3px solid #ed9c22;outline-offset:5px}@media(prefers-reduced-motion:reduce){.ds-primary{transition:none}}"
+    },
+    {
+      "name": "Copy control",
+      "kind": "button",
+      "refersTo": "copy-button",
+      "description": "Compact outlined control used inside dark code panels.",
+      "html": "<div class=\"ds-dark\"><button type=\"button\" class=\"ds-copy\" aria-label=\"Copy feature selection\">Copy YAML</button></div>",
+      "css": ".ds-copy{border:1px solid #465876;background:transparent;color:#c5d6f5;border-radius:5px;padding:5px 9px;min-height:32px;font-size:12px;white-space:nowrap}.ds-copy:hover{background:#2b3d5b;color:#fff}.ds-dark{background:var(--code, #111e37);padding:22px}.ds-copy{font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer}.ds-copy:focus-visible{outline:3px solid #ed9c22;outline-offset:5px}.ds-copy:disabled{cursor:wait}"
+    },
+    {
+      "name": "Profile tabs",
+      "kind": "nav",
+      "refersTo": "profile-tab",
+      "description": "Profile selection with an underline and explicit selected state; preview is static.",
+      "html": "<div class=\"ds-tabs\" role=\"tablist\" aria-label=\"Example core profile\"><button role=\"tab\" aria-selected=\"true\" aria-controls=\"ds-profile-panel\" id=\"ds-minimal\">WGC minimal</button><button role=\"tab\" aria-selected=\"false\" tabindex=\"-1\">+ Tailscale</button><button role=\"tab\" aria-selected=\"false\" tabindex=\"-1\">Full mobile</button></div><div class=\"ds-tabpanel\" id=\"ds-profile-panel\" role=\"tabpanel\" aria-labelledby=\"ds-minimal\" tabindex=\"0\">TUN, direct, WGC and basic DNS.</div>",
+      "css": ".ds-tabs{padding:0 18px;display:flex;gap:17px;border-bottom:1px solid #2b3953;overflow:auto}.ds-tabs button{background:none;border:0;border-bottom:2px solid transparent;padding:15px 0 12px;min-height:44px;color:#9fb1cf;white-space:nowrap;font-size:13px;font-weight:650}.ds-tabs button:hover{color:#fff}.ds-tabs button[aria-selected=true]{color:#fff;border-bottom-color:#84a7ff}.ds-tabs,.ds-tabpanel{background:var(--code, #111e37);font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}.ds-tabpanel{padding:22px;color:var(--code-ink, #dce6f7);font-size:12px}.ds-tabs button{cursor:pointer}.ds-tabs button:focus-visible,.ds-tabpanel:focus-visible{outline:3px solid #ed9c22;outline-offset:5px}"
+    },
+    {
+      "name": "Code container",
+      "kind": "card",
+      "refersTo": "code-block",
+      "description": "Unshadowed instruction panel with internally scrolling source.",
+      "html": "<div class=\"ds-code\"><pre><code>dart run sing_box_flutter build --target android</code></pre></div>",
+      "css": ".ds-code{background:var(--code, #111e37);border-radius:12px;color:var(--code-ink, #dce6f7);min-width:0;align-self:start}.ds-code pre{margin:0;font-size:14px;line-height:1.9;tab-size:2;overflow:auto;scrollbar-width:thin;scrollbar-color:#62728d var(--code, #111e37)}.ds-code pre{padding:20px 22px;font-size:13px;line-height:1.9}.ds-code pre{font-family:var(--mono, ui-monospace,SFMono-Regular,Menlo,Consolas,monospace)}"
+    },
+    {
+      "name": "Measurement badge",
+      "kind": "chip",
+      "refersTo": "measurement-badge",
+      "description": "Supplemental numeric reduction beside a measured result.",
+      "html": "<span class=\"ds-value\">21.83 <span class=\"ds-badge\">−64%</span></span>",
+      "css": ".ds-value{color:#173fbe;font-weight:800}.ds-badge{display:inline-block;font-size:12px;background:#d7e2ff;border-radius:4px;padding:3px 5px;vertical-align:middle;margin-left:6px;font-weight:700}.ds-value{font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:20px}"
+    },
+    {
+      "name": "Main navigation",
+      "kind": "nav",
+      "description": "Open text navigation with reduced mobile density.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Main navigation\"><a href=\"#why\">Why this core</a><a href=\"#quickstart\">Quick start</a><a href=\"https://github.com/idy/sing-box-flutter\">GitHub</a></nav>",
+      "css": ".ds-nav{display:flex;align-items:center;gap:30px;font-size:14px;font-weight:700}.ds-nav a{text-decoration:none}.ds-nav a:hover{color:var(--blue, #2454e6)}.ds-nav{font-family:Manrope,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--ink, #17243d)}.ds-nav a:focus-visible{outline:3px solid #ed9c22;outline-offset:5px}@media(max-width:760px){.ds-nav{gap:16px;font-size:13px}.ds-nav a:first-child{display:none}}@media(max-width:390px){.ds-nav{gap:12px;font-size:12px}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The readable build recipe",
+    "overview": "This website extends the approved `doc/images/overview.svg` blue/slate identity in Read mode. Cool white space, strong left-aligned headings and working code examples make a calm developer document. The metaphor describes the finished surface rather than a new identity.\n\nOpen comparisons and ruled instruction rows carry the reading flow. Dark code panels contain the technical material; inline SVG supplies the brand and directional marks. The shipped site uses no raster art.",
+    "keyCharacteristics": [
+      "Blue actions and slate reading text.",
+      "Open ruled sections with dark technical panels.",
+      "Self-hosted Manrope with monospace reserved for code.",
+      "Visible content and restrained state feedback."
+    ],
+    "rules": [
+      {
+        "name": "The Blue Action Rule",
+        "body": "Use blue for the principal action and meaningful emphasis; keep explanatory prose in slate.",
+        "section": "colors"
+      },
+      {
+        "name": "The Reading and Code Rule",
+        "body": "Keep prose in Manrope and executable or configuration text in monospace.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Reading Rule",
+        "body": "Use open rules and tonal separation for reading sections; reserve the shipped ambient shadow for the hero recipe.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do carry the approved blue/slate identity through readable prose, meaningful blue emphasis and dark code panels.",
+      "Do preserve keyboard focus, tab semantics, reduced-motion behavior and readable default HTML.",
+      "Do use open rules and shared column alignment to organize comparisons and instructions."
+    ],
+    "donts": [
+      "Don't replace the self-hosted reading face with a system display face or use monospace for prose.",
+      "Don't introduce raster decoration into this SVG-and-code website.",
+      "Don't let long code widen the page; keep scrolling inside technical panels."
+    ]
+  }
+}
