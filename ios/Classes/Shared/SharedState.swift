@@ -8,10 +8,18 @@ final class TunnelStorage {
     private var configurationURL: URL { root.appendingPathComponent("configuration.json") }
     private var statusURL: URL { root.appendingPathComponent("status.json") }
 
-    init(appGroup: String) throws {
-        guard appGroup.hasPrefix("group."),
-              let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) else {
-            throw TunnelFailure(code: "app_group_unavailable", message: "The App Group container is unavailable. Check both targets' entitlements and signing.")
+    init(appGroup: String, containerURL: (String) -> URL? = {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+    }) throws {
+        let unavailable = TunnelFailure(code: "app_group_unavailable", message: "The App Group container is unavailable. Check both targets' entitlements and signing.")
+        #if os(iOS)
+        guard appGroup.hasPrefix("group.") else { throw unavailable }
+        #endif
+        // macOS also accepts Team-ID-prefixed groups. Its container API can
+        // return a guessed URL without entitlement access; directory/file I/O
+        // below must still succeed before initialization is accepted.
+        guard !appGroup.isEmpty, let container = containerURL(appGroup) else {
+            throw unavailable
         }
         self.appGroup = appGroup
         root = container.appendingPathComponent("SingBoxFlutter", isDirectory: true)
@@ -62,14 +70,19 @@ final class TunnelStorage {
     }
 
     private func createDirectory(_ url: URL) throws {
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [
-            .posixPermissions: 0o700,
-            .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
-        ])
+        var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+        #if os(iOS)
+        attributes[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
+        #endif
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: attributes)
     }
 
     private func write<T: Encodable>(_ value: T, to url: URL) throws {
-        try JSONEncoder().encode(value).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        var options: Data.WritingOptions = [.atomic]
+        #if os(iOS)
+        options.insert(.completeFileProtectionUntilFirstUserAuthentication)
+        #endif
+        try JSONEncoder().encode(value).write(to: url, options: options)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }

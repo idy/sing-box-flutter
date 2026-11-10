@@ -77,8 +77,16 @@ val configuredHost = if (hostPubspec.isFile) {
         if (!settings.containsKey("sing_box_flutter")) false else {
             val config = settings["sing_box_flutter"] as? Map<*, *>
                 ?: throw GradleException("sing_box_flutter must be a mapping")
-            if (config.keys.any { it != "core" }) throw GradleException("Unknown sing_box_flutter setting")
-            config.containsKey("core")
+            if (config.keys.any { it != "core" && it != "macos" }) throw GradleException("Unknown sing_box_flutter setting")
+            if (config.containsKey("macos")) {
+                val macos = config["macos"] as? Map<*, *>
+                    ?: throw GradleException("sing_box_flutter.macos must be a mapping")
+                if (macos.keys.any { it != "mode" } ||
+                    (if (macos.containsKey("mode")) macos["mode"] else "ne") !in listOf("ne", "user_tun")) {
+                    throw GradleException("sing_box_flutter.macos.mode must be ne or user_tun")
+                }
+            }
+            config.containsKey("core") || config.containsKey("macos")
         }
     } catch (error: Exception) {
         throw GradleException("Invalid host core configuration. $buildCoreHint", error)

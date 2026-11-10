@@ -12,15 +12,17 @@ Future<void> main(List<String> arguments) async {
 Build from source (0.3.0):
   dart run sing_box_flutter build --target android
   dart run sing_box_flutter build --target apple
+  dart run sing_box_flutter build --target macos
 
 Add sing_box_flutter.core to your host pubspec.yaml to select features.
+Select macOS with sing_box_flutter.macos.mode: ne (default) or user_tun.
 Run build from that app; the pinned Tailscale Go toolchain bootstraps automatically.
 Use --config <pubspec path> or --project-dir <host root> to select another host.
 Requires Python 3.11+ and Git, plus JDK 17/Android SDK/NDK for Android or
 macOS/Xcode for Apple. No global Go or separate runtime Go installation is needed.
 0.3.0 releases contain source/build scripts, with no precompiled native SDK assets.
 
-Legacy standard core (hosts without sing_box_flutter.core):
+Legacy standard core (hosts without sing_box_flutter.core or .macos):
   dart run sing_box_flutter install --target android --release v0.2.0
   dart run sing_box_flutter install --target apple --release v0.2.0
 

@@ -128,9 +128,17 @@ identical compiler output across different Xcode versions.
 Apple builds require macOS, Xcode command-line selection, and iPhoneOS plus
 simulator SDKs. Check with `xcode-select -p`, `xcrun --sdk iphoneos
 --show-sdk-version`, and `xcrun --sdk iphonesimulator --show-sdk-version`. The minimum
-iOS deployment target is 15.0. Builds are restricted to iOS/simulator; macOS and
-tvOS frameworks are not built for this Flutter plugin. The host also needs
-CocoaPods and its own signed PacketTunnel target; see [iOS setup](ios-setup.md).
+iOS deployment target is 15.0. `--target apple` builds iOS/simulator slices. The
+host also needs CocoaPods and its own signed PacketTunnel target; see
+[iOS setup](ios-setup.md).
+
+`--target macos` uses the macOS SDK and produces a universal arm64/x86_64
+XCFramework with a macOS 12.0 deployment target. Select the backend using
+`sing_box_flutter.macos.mode: ne` or `user_tun` in the host pubspec. macOS uses its
+own `artifacts.macos` receipt entry, and both Apple targets refresh their respective
+CocoaPods sandbox manifests after a successful build. The backend participates
+in the recipe fingerprint. See [macOS setup](macos-setup.md) for signing, extension
+embedding, sandbox and administrator requirements. tvOS is not supported.
 
 Android builds require a licensed SDK in `ANDROID_HOME` (or `ANDROID_SDK_ROOT`),
 installed platforms/build-tools, NDK `28.0.13004108`, and **OpenJDK 17** selected with
@@ -163,8 +171,8 @@ and rerun. Do not replace it with a stock Go installation.
 
 ## Legacy standard-core build and install
 
-Hosts without a `sing_box_flutter.core` block retain the historical standard
-build/install path. This compatibility path does not provide 0.3.0 SDK downloads
+Hosts without either `sing_box_flutter.core` or `sing_box_flutter.macos` retain the
+historical Android/iOS standard build/install path. This compatibility path does not provide 0.3.0 SDK downloads
 and cannot satisfy a custom host selection.
 
 ### Build the standard core from source

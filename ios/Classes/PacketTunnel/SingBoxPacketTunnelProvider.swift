@@ -55,7 +55,7 @@ open class SingBoxPacketTunnelProvider: NEPacketTunnelProvider {
                 try server.startOrReloadService(saved.config, options: LibboxOverrideOptions())
                 // A routing-only / proxy-only config must not masquerade as a packet tunnel.
                 guard platform.hasTunnel else {
-                    throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound on iOS.")
+                    throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound in the Network Extension backend.")
                 }
                 self.setStatus("connected")
                 self.transitioning = false

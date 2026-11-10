@@ -4,8 +4,10 @@ package libbox
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -18,6 +20,9 @@ type CommandServer struct {
 	stopGeneration uint64
 	cancel         context.CancelFunc
 	engine         mobileEngine
+	prepared       *preparedStandaloneService
+	standalone     bool
+	monitor        StandalonePlatformInterface
 	platform       PlatformInterface
 	newEngine      func(context.Context, PlatformInterface, option.Options) (mobileEngine, error)
 }
@@ -57,6 +62,31 @@ func NewCommandServer(handler CommandServerHandler, platform PlatformInterface) 
 	return &CommandServer{platform: platform, newEngine: newBoxEngine}, nil
 }
 
+// NewStandaloneCommandServer uses native macOS utun networking without a Network
+// Extension or host platform callbacks. Service startup requires the host to have
+// the permissions needed by sing-tun; construction does not open a tunnel.
+func NewStandaloneCommandServer() (*CommandServer, error) {
+	if runtime.GOOS != "darwin" || C.IsIos {
+		return nil, errors.New("standalone core requires macOS")
+	}
+	return &CommandServer{standalone: true, newEngine: newBoxEngine}, nil
+}
+
+// NewStandaloneCommandServerWithMonitor keeps native networking while accepting
+// an IPv6-aware host path monitor. The unmonitored constructor remains useful
+// for non-VPN standalone services and lifecycle smoke tests.
+func NewStandaloneCommandServerWithMonitor(monitor StandalonePlatformInterface) (*CommandServer, error) {
+	if monitor == nil {
+		return nil, errors.New("standalone interface monitor is required")
+	}
+	server, err := NewStandaloneCommandServer()
+	if err != nil {
+		return nil, err
+	}
+	server.monitor = monitor
+	return server, nil
+}
+
 // Start is optional and idempotent. It never opens a command listener.
 func (s *CommandServer) Start() error {
 	s.state.Lock()
@@ -79,13 +109,21 @@ func (s *CommandServer) StartOrReloadService(config string, options *OverrideOpt
 	s.state.Unlock()
 	// Decode before stopping a healthy instance. Registries must be exactly the
 	// generated selection both here and in CheckConfig; never import include.
-	ctx := mobileBaseContext(s.platform)
+	ctx := s.baseContext()
 	configuration, err := parseConfig(ctx, config)
 	if err != nil {
 		return errors.New("invalid mobile configuration")
 	}
 	if err = applyOverrides(&configuration, options); err != nil {
 		return err
+	}
+	if s.standalone {
+		if err = validateStandaloneOptions(configuration); err != nil {
+			return err
+		}
+		if _, err = standaloneDNSPlan(configuration); err != nil {
+			return err
+		}
 	}
 	if err = s.closeEngine(); err != nil {
 		return errors.New("could not stop mobile service")
@@ -193,16 +231,20 @@ func (s *CommandServer) Close() {
 
 func (s *CommandServer) closeEngine() error {
 	s.state.Lock()
-	engine, cancel := s.engine, s.cancel
-	s.engine, s.cancel = nil, nil
+	engine, prepared, cancel := s.engine, s.prepared, s.cancel
+	s.engine, s.prepared, s.cancel = nil, nil, nil
 	s.state.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	var closeErr error
 	if engine != nil {
-		return engine.Close()
+		closeErr = engine.Close()
 	}
-	return nil
+	if prepared != nil && prepared.engine != nil {
+		closeErr = errors.Join(closeErr, prepared.engine.Close())
+	}
+	return closeErr
 }
 
 func (s *CommandServer) isClosed() bool {

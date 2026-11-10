@@ -101,6 +101,21 @@ void main() {
     });
   }
 
+  test('profile switches preserve the macOS backend', () {
+    for (final mode in ['ne', 'user_tun']) {
+      var text = host.replaceFirst('sing_box_flutter:\n  core:',
+          'sing_box_flutter:\n  macos:\n    mode: $mode\n  core:');
+      for (final name in coreProfiles.keys) {
+        final profile = File('core-profiles/$name.yaml').readAsStringSync();
+        text = applyCoreProfile(text, profile);
+        expect(loadYaml(text)['sing_box_flutter']['macos']['mode'], mode);
+        expect(loadYaml(text)['sing_box_flutter']['core'],
+            loadYaml(profile)['sing_box_flutter']['core']);
+        expect(applyCoreProfile(text, profile), text);
+      }
+    }
+  });
+
   test('profiles can be switched repeatedly without accumulating blocks', () {
     var text = host;
     for (final name in ['singbox-full', 'wgc-tailscale', 'wgc-minimal']) {

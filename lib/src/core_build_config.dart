@@ -59,6 +59,21 @@ Map<String, List<String>> parseCoreSelection(Object? value) {
   return result;
 }
 
+/// Validates a present macOS backend block; an empty mapping defaults to NE.
+/// Callers handle an omitted block separately so omission remains distinguishable.
+String parseMacosSelection(Object? value) {
+  if (value is! Map || value.keys.any((key) => key != 'mode')) {
+    throw const FormatException(
+        'sing_box_flutter.macos must be a mapping containing only mode');
+  }
+  final mode = value.containsKey('mode') ? value['mode'] : 'ne';
+  if (mode != 'ne' && mode != 'user_tun') {
+    throw const FormatException(
+        'sing_box_flutter.macos.mode must be ne or user_tun');
+  }
+  return mode as String;
+}
+
 /// Finds the nearest host manifest, including when called in a child directory.
 File? findHostPubspec(Directory directory) {
   var current = directory.absolute;
@@ -73,28 +88,32 @@ File? findHostPubspec(Directory directory) {
 
 /// Features and source identity captured from one immutable pubspec read.
 final class CoreBuildSnapshot {
-  CoreBuildSnapshot._(
-      this.pubspec, this.pubspecSha256, Map<String, List<String>> features)
+  CoreBuildSnapshot._(this.pubspec, this.pubspecSha256,
+      Map<String, List<String>> features, this.macosMode)
       : features = Map.unmodifiable(features.map(
             (key, values) => MapEntry(key, List<String>.unmodifiable(values))));
 
   final File pubspec;
   final String pubspecSha256;
   final Map<String, List<String>> features;
+
+  /// Build-time macOS backend; null preserves an omitted macOS configuration.
+  final String? macosMode;
 }
 
 /// Parse and hash the exact same bytes, before any subprocess can run.
-/// A missing core block preserves legacy full install/build behavior.
+/// Omitting both core and macos preserves legacy full install/build behavior.
 CoreBuildSnapshot? readCoreBuildSnapshot(File pubspec) {
   final canonical = File(pubspec.resolveSymbolicLinksSync());
   final bytes = canonical.readAsBytesSync();
   final selection = _parseCorePubspec(utf8.decode(bytes));
   if (selection == null) return null;
-  return CoreBuildSnapshot._(
-      canonical, sha256.convert(bytes).toString(), selection);
+  return CoreBuildSnapshot._(canonical, sha256.convert(bytes).toString(),
+      selection.features, selection.macosMode);
 }
 
-Map<String, List<String>>? _parseCorePubspec(String source) {
+({Map<String, List<String>> features, String? macosMode})? _parseCorePubspec(
+    String source) {
   final Object? document;
   try {
     document = loadYaml(source);
@@ -110,12 +129,18 @@ Map<String, List<String>>? _parseCorePubspec(String source) {
     throw const FormatException('sing_box_flutter must be a mapping');
   }
   for (final key in plugin.keys) {
-    if (key != 'core') {
+    if (key != 'core' && key != 'macos') {
       throw FormatException('Unknown sing_box_flutter key: $key');
     }
   }
-  if (!plugin.containsKey('core')) return null;
-  return parseCoreSelection(plugin['core']);
+  final macosMode =
+      plugin.containsKey('macos') ? parseMacosSelection(plugin['macos']) : null;
+  if (!plugin.containsKey('core') && macosMode == null) return null;
+  return (
+    features:
+        parseCoreSelection(plugin.containsKey('core') ? plugin['core'] : {}),
+    macosMode: macosMode,
+  );
 }
 
 /// Write a private, complete build request that another invocation cannot replace.
@@ -133,6 +158,8 @@ File writeCoreBuildRequest(CoreBuildSnapshot snapshot) {
                   'sha256': snapshot.pubspecSha256,
                 },
                 'features': snapshot.features,
+                if (snapshot.macosMode != null)
+                  'macos': {'mode': snapshot.macosMode},
               })}\n',
           flush: true);
   } catch (_) {

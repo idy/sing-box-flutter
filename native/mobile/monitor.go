@@ -27,6 +27,8 @@ var (
 
 type platformDefaultInterfaceMonitor struct {
 	*platformInterfaceWrapper
+	host              DefaultInterfaceMonitorHost
+	registerInterface func(string)
 	logger            logger.Logger
 	updates           updateQueue
 	callbacks         list.List[tun.DefaultInterfaceUpdateCallback]
@@ -34,6 +36,13 @@ type platformDefaultInterfaceMonitor struct {
 	defaultDNSServers []string
 	dnsWatcher        *dnsinfo.Watcher
 	closed            bool
+}
+
+func (m *platformDefaultInterfaceMonitor) monitorHost() DefaultInterfaceMonitorHost {
+	if m.host != nil {
+		return m.host
+	}
+	return m.iif
 }
 
 func (m *platformDefaultInterfaceMonitor) Start() error {
@@ -44,13 +53,13 @@ func (m *platformDefaultInterfaceMonitor) Start() error {
 		}
 		m.dnsWatcher = dnsWatcher
 	}
-	err := m.iif.StartDefaultInterfaceMonitor(m)
+	err := m.monitorHost().StartDefaultInterfaceMonitor(m)
 	if err != nil {
 		if m.dnsWatcher != nil {
 			_ = m.dnsWatcher.Close()
 			m.dnsWatcher = nil
 		}
-		_ = m.iif.CloseDefaultInterfaceMonitor(m)
+		_ = m.monitorHost().CloseDefaultInterfaceMonitor(m)
 		return err
 	}
 	return nil
@@ -64,7 +73,7 @@ func (m *platformDefaultInterfaceMonitor) Close() error {
 	}
 	m.closed = true
 	m.defaultInterfaceAccess.Unlock()
-	err := m.iif.CloseDefaultInterfaceMonitor(m)
+	err := m.monitorHost().CloseDefaultInterfaceMonitor(m)
 	if m.dnsWatcher != nil {
 		err = E.Errors(err, m.dnsWatcher.Close())
 		m.dnsWatcher = nil
@@ -231,8 +240,17 @@ func (m *platformDefaultInterfaceMonitor) readDNSServers(interfaceIndex int) []s
 
 func (m *platformDefaultInterfaceMonitor) RegisterMyInterface(interfaceName string) {
 	m.defaultInterfaceAccess.Lock()
-	defer m.defaultInterfaceAccess.Unlock()
+	if m.closed || slices.Contains(m.myInterfaces, interfaceName) {
+		m.defaultInterfaceAccess.Unlock()
+		return
+	}
 	m.myInterfaces = append(m.myInterfaces, interfaceName)
+	m.defaultInterfaceAccess.Unlock()
+	// Hosts may enqueue a refreshed path. Never invoke them while holding the
+	// interface mutex: their listener can re-enter the monitor asynchronously.
+	if m.registerInterface != nil {
+		m.registerInterface(interfaceName)
+	}
 }
 
 func (m *platformDefaultInterfaceMonitor) MyInterfaces() []string {

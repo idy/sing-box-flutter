@@ -153,6 +153,39 @@ void main() {
     expect(features.first, features.last);
   });
 
+  test('macOS mode uses default core and is captured in private requests', () {
+    final pubspec = File('${fixture.path}/pubspec.yaml');
+    for (final mode in ['ne', 'user_tun']) {
+      pubspec
+          .writeAsStringSync('sing_box_flutter:\n  macos:\n    mode: $mode\n');
+      final snapshot = readCoreBuildSnapshot(pubspec)!;
+      expect(snapshot.macosMode, mode);
+      expect(snapshot.features['inbounds'], ['tun']);
+      final request = writeCoreBuildRequest(snapshot);
+      expect(jsonDecode(request.readAsStringSync())['macos'], {'mode': mode});
+    }
+    pubspec.writeAsStringSync('sing_box_flutter:\n  macos: {}\n');
+    expect(readCoreBuildSnapshot(pubspec)!.macosMode, 'ne');
+    pubspec.writeAsStringSync('sing_box_flutter:\n  core: {}\n');
+    expect(readCoreBuildSnapshot(pubspec)!.macosMode, isNull);
+  });
+
+  test('macOS mode rejects null, runtime lists, typos and duplicate YAML', () {
+    final pubspec = File('${fixture.path}/pubspec.yaml');
+    for (final source in [
+      'macos: null',
+      'macos: [ne, user_tun]',
+      'macos: {mode: tun}',
+      'macos: {mode: null}',
+      'macos: {mode: true}',
+      'macos: {mode: ne, helper: true}',
+      'macos: {mode: ne, mode: user_tun}',
+    ]) {
+      pubspec.writeAsStringSync('sing_box_flutter:\n  $source\n');
+      expect(() => readCoreBuildSnapshot(pubspec), throwsFormatException);
+    }
+  });
+
   test('nearest parent pubspec wins over package ancestors', () {
     File('${fixture.path}/pubspec.yaml').writeAsStringSync('name: ancestor');
     final host = Directory('${fixture.path}/host')..createSync();

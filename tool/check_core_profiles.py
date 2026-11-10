@@ -32,7 +32,7 @@ PROFILES = {
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", choices=("apple", "android"), default="apple")
+    parser.add_argument("--target", choices=("apple", "android", "macos"), default="apple")
     parser.add_argument("--race", action="store_true", help="Enable Go's host race detector")
     args = parser.parse_args()
     try:

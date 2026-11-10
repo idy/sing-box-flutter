@@ -1,7 +1,7 @@
 # sing_box_flutter
 
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
-as a native VPN on Android and iOS. Select the compiled protocols in your host
+as a native VPN on Android, iOS and macOS. Select the compiled protocols in your host
 `pubspec.yaml` and build them from source with the pinned **Tailscale Go** compiler.
 
 ![Overview: a minimal WGC core is 62–64% smaller than the standard libbox build, the iOS app process has no Go runtime, and three steps build it from the host pubspec.yaml](doc/images/overview.svg)
@@ -20,6 +20,8 @@ Kotlin and JDK 17; the checked-in example and CI use the same Flutter toolchain.
 | --- | --- | --- |
 | Android | Foreground `VpnService`, socket protection, network monitoring | Android 7 / API 24 |
 | iOS | `NEPacketTunnelProvider` in a separately signed host extension | iOS 15 |
+| macOS (NE) | `NEPacketTunnelProvider` in a separately signed host extension | macOS 12 |
+| macOS (user TUN) | Native `utun`, core-managed routes and DNS, unsandboxed administrator process | macOS 12 |
 
 Flutter controls the service through method channels and receives typed connection
 events. Packet processing stays in the native service. Closing the UI or cancelling
@@ -133,6 +135,36 @@ Follow [the complete iOS setup guide](doc/ios-setup.md) before running the app.
 A physical device is required to test VPN traffic; the simulator can validate
 compilation and the UI only.
 
+### macOS host setup
+
+Select one backend in the host `pubspec.yaml`, alongside `core`:
+
+```yaml
+sing_box_flutter:
+  macos:
+    mode: ne # or user_tun
+  core:
+    inbounds: [tun]
+    outbounds: [direct]
+    endpoints: [wgc]
+    dns: [udp, tcp, fakeip]
+```
+
+```bash
+dart run sing_box_flutter build --target macos
+```
+
+`ne` (the default) uses a separately signed Packet Tunnel extension and App Group,
+keeping Go out of the Flutter app process. `user_tun` links the core in the host
+process and lets sing-box create `utun`, routes and DNS directly. It requires an
+unsandboxed process already running with administrator privileges; this plugin
+does not install a privileged helper or elevate the Flutter app.
+
+The selection controls CocoaPods source/link dependencies at build time. Rebuild
+the core and rerun `pod install` after changing it. Both modes expose the same Dart
+API. Follow [the macOS setup guide](doc/macos-setup.md) for host targets,
+entitlements, permissions and validation.
+
 ## Dart API
 
 ```dart
@@ -141,7 +173,7 @@ import 'package:sing_box_flutter/sing_box_flutter.dart';
 final vpn = SingBoxFlutter();
 
 await vpn.initialize(
-  // Required on iOS; omit on Android.
+  // Required on iOS and macOS NE; omit on Android and macOS user_tun.
   appGroup: 'group.com.example.app',
   providerBundleIdentifier: 'com.example.app.PacketTunnel',
   notificationTitle: 'Example VPN',

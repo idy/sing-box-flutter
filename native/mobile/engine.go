@@ -26,29 +26,30 @@ type boxEngine struct {
 	ctx       context.Context
 	pause     pause.Manager
 	log       *os.File
+	logPath   string
 	closeOnce sync.Once
 	closeErr  error
 }
 
 func newBoxEngine(ctx context.Context, platform PlatformInterface, options option.Options) (mobileEngine, error) {
 	ctx = pause.WithDefaultManager(ctx)
-	ctx = service.ContextWith[adapter.PlatformInterface](ctx, &platformInterfaceWrapper{iif: platform})
+	// Standalone macOS keeps native utun networking. Its optional monitor-only
+	// adapter is already in ctx; the host applies the effective Go DNS plan.
+	// A full mobile wrapper with a nil host would override native networking.
+	if platform != nil {
+		ctx = service.ContextWith[adapter.PlatformInterface](ctx, &platformInterfaceWrapper{iif: platform})
+	}
 	path, err := privateLogPath(ctx, options.Log)
 	if err != nil {
 		return nil, err
 	}
-	engine := &boxEngine{ctx: ctx, pause: service.FromContext[pause.Manager](ctx)}
-	if path != "" {
-		if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return nil, errors.New("could not open private mobile log")
-		}
-		engine.log, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-		if err == nil {
-			err = engine.log.Chmod(0o600)
-		}
-		if err != nil {
+	engine := &boxEngine{ctx: ctx, pause: service.FromContext[pause.Manager](ctx), logPath: path}
+	// Preparing validates constructors without runtime storage side effects.
+	// Activation reports log access failures as startup failures, not config errors.
+	if prepared, _ := ctx.Value(standalonePreparationKey{}).(bool); !prepared {
+		if err = engine.openLog(); err != nil {
 			_ = engine.Close()
-			return nil, errors.New("could not open private mobile log")
+			return nil, err
 		}
 	}
 	// Upstream protocol logs may contain credential-bearing URLs. An explicit
@@ -101,7 +102,31 @@ func (e *boxEngine) event(event string) {
 	}
 }
 
+func (e *boxEngine) openLog() error {
+	if e.logPath == "" || e.log != nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(e.logPath), 0o700); err != nil {
+		return errors.New("could not open private mobile log")
+	}
+	file, err := os.OpenFile(e.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err == nil {
+		err = file.Chmod(0o600)
+	}
+	if err != nil {
+		if file != nil {
+			_ = file.Close()
+		}
+		return errors.New("could not open private mobile log")
+	}
+	e.log = file
+	return nil
+}
+
 func (e *boxEngine) Start() error {
+	if err := e.openLog(); err != nil {
+		return err
+	}
 	err := e.box.Start()
 	if err != nil {
 		e.event("start failed")

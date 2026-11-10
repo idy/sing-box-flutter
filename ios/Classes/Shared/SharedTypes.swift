@@ -12,7 +12,7 @@ struct TunnelFailure: LocalizedError {
     static let busy = TunnelFailure(code: "busy", message: "Stop the current tunnel before starting or changing its configuration.")
     static let storage = TunnelFailure(code: "storage_error", message: "The App Group configuration or state could not be accessed.")
     static let coreMismatch = TunnelFailure(code: "core_mismatch", message: "The bundled core metadata does not match the installed core. Rebuild the app and extension with the same native artifact.")
-    static let unsupported = TunnelFailure(code: "unsupported", message: "This feature is not supported by the iOS backend.")
+    static let unsupported = TunnelFailure(code: "unsupported", message: "This feature is not supported by this Apple backend.")
 }
 
 struct TunnelStatus: Codable {
