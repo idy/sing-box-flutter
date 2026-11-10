@@ -268,17 +268,25 @@ func (d *directoryHandles) openChild(parent windows.Handle, name string, create 
 }
 
 func (d *directoryHandles) open(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
-	return d.openObject(parent, name, create, descriptor, true, false)
+	return d.openObject(parent, name, create, descriptor, true, false, false)
+}
+
+// Full SACL protection is a root invariant, separate from its label ACE.
+func (d *directoryHandles) openPrivateRoot(parent windows.Handle, name string, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
+	if parent == 0 || !safeDirectoryComponent(name) || descriptor == nil {
+		return 0, errDirectories
+	}
+	return d.openObject(parent, name, true, descriptor, true, false, true)
 }
 
 func (d *directoryHandles) openFile(parent windows.Handle, name string, create, write bool, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
 	if parent == 0 || !safeDirectoryComponent(name) {
 		return 0, errDirectories
 	}
-	return d.openObject(parent, name, create, descriptor, false, write)
+	return d.openObject(parent, name, create, descriptor, false, write, false)
 }
 
-func (d *directoryHandles) openObject(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR, directory, write bool) (windows.Handle, error) {
+func (d *directoryHandles) openObject(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR, directory, write, readSACL bool) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -308,6 +316,9 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 	if descriptor != nil {
 		access |= windows.READ_CONTROL
 	}
+	if readSACL {
+		access |= windows.ACCESS_SYSTEM_SECURITY
+	}
 	if write {
 		share = 0 // Exclusive, handle-relative ownership lease.
 	}
@@ -332,17 +343,19 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 			fileAttributes, share, disposition,
 			options|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	}
-	if create && descriptor != nil {
-		err = withCreationSecurity(open)
-	} else {
-		err = open()
+	openWithAccess := func() error {
+		if attributes.SecurityDescriptor != nil || readSACL {
+			return withStorageSecurityPrivilege(open)
+		}
+		return open()
 	}
+	err = openWithAccess()
 	if create && err == windows.STATUS_OBJECT_NAME_COLLISION {
 		// Atomic creation did not win. Open the existing object without any
-		// creation security descriptor and verify it; never repair its policy.
+		// creation descriptor; only root SACL reads still need the privilege.
 		disposition = windows.FILE_OPEN
 		attributes.SecurityDescriptor = nil
-		err = open()
+		err = openWithAccess()
 	}
 	if err != nil {
 		if handle != 0 && handle != windows.InvalidHandle {

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"path/filepath"
 	"unsafe"
@@ -25,12 +26,19 @@ func initializePlatformStorage(path, base string) (io.Closer, error) {
 }
 
 func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Closer, err error) {
+	stage := "authorization"
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("Windows storage %s: %w", stage, err)
+		}
+	}()
 	// Authorization precedes every filesystem operation, including creation
 	// of the ordinary host parent. A first Medium launch cannot poison v1 state.
 	descriptor, err := privateDirectorySecurityForToken(token)
 	if err != nil {
 		return nil, err
 	}
+	stage = "hierarchy open"
 	directories, err := openDirectoryHierarchy(base)
 	if err != nil {
 		return nil, err
@@ -42,19 +50,23 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 	}()
 	// The host's existing security policy is never changed. Only missing
 	// host storage is created, with ordinary inherited security.
+	stage = "host open"
 	host, err := directories.openChild(directories.last(), filepath.Base(filepath.Dir(path)), true, nil)
 	if err != nil {
 		return nil, err
 	}
-	working, err := directories.openChild(host, filepath.Base(path), true, descriptor)
+	stage = "private root open"
+	working, err := directories.openPrivateRoot(host, filepath.Base(path), descriptor)
 	if err != nil {
 		return nil, err
 	}
+	stage = "private root policy"
 	if err = verifyPrivateRoot(working); err != nil {
 		return nil, err
 	}
 	// FILE_CREATE supplies the full private policy atomically for new objects.
 	// A collision is opened without mutation and must already match policy.
+	stage = "lease open"
 	lock, err := directories.openFile(working, "core.lock", true, true, descriptor)
 	if err != nil {
 		return nil, err
@@ -63,6 +75,7 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 	if err != nil {
 		return nil, err
 	}
+	stage = "managed directory open"
 	known := make(map[uint64]windows.Handle)
 	for _, name := range []string{"cache", "tmp"} {
 		child, err := directories.openChild(working, name, true, descriptor)
@@ -75,6 +88,7 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 		}
 		known[id] = child
 	}
+	stage = "descendant validation"
 	remaining := 16384
 	var walk func(windows.Handle, int) error
 	walk = func(parent windows.Handle, depth int) error {
@@ -146,13 +160,19 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 }
 
 func verifyPrivateRoot(handle windows.Handle) error {
-	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION)
+	// A label-only projection is not the complete SACL and cannot establish
+	// its protection state. The root handle was opened with ACCESS_SYSTEM_SECURITY.
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.SACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
 	control, _, err := descriptor.Control()
-	if err != nil || control&(windows.SE_DACL_PROTECTED|windows.SE_SACL_PROTECTED) != windows.SE_DACL_PROTECTED|windows.SE_SACL_PROTECTED {
-		return errDirectories
+	if err != nil {
+		return err
+	}
+	if control&(windows.SE_DACL_PROTECTED|windows.SE_SACL_PROTECTED) != windows.SE_DACL_PROTECTED|windows.SE_SACL_PROTECTED {
+		return fmt.Errorf("private root protection flags 0x%04x: %w", control, errDirectories)
 	}
 	label, _, err := descriptor.SACL()
 	if err != nil || label == nil || label.AceCount != 1 {

@@ -11,11 +11,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// A protected SACL supplied at creation needs SeSecurityPrivilege. Enable only
-// that already-held privilege on a duplicate of the effective caller token.
-// Neither the process token nor an outer thread impersonation is changed.
-func withCreationSecurity(create func() error) error {
-	token, err := creationSecurityToken()
+// Protected SACL creation and opening a root for full SACL reads require
+// SeSecurityPrivilege. Enable only that already-held privilege on a duplicate
+// of the effective caller token; never change process or outer thread authority.
+func withStorageSecurityPrivilege(operation func() error) error {
+	token, err := storageSecurityToken()
 	if err != nil {
 		return err
 	}
@@ -39,12 +39,12 @@ func withCreationSecurity(create func() error) error {
 			}
 			result <- operationErr
 		}()
-		operationErr = create()
+		operationErr = operation()
 	}()
 	return <-result
 }
 
-func creationSecurityToken() (windows.Token, error) {
+func storageSecurityToken() (windows.Token, error) {
 	// Capture the effective caller before crossing to another goroutine. Only
 	// ERROR_NO_TOKEN permits falling back to the process token.
 	runtime.LockOSThread()

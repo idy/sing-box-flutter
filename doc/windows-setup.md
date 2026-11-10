@@ -74,9 +74,10 @@ Secure storage initialization also requires elevation and fails before creating
 managed state when the helper is not elevated. `requestPermission()` checks the
 helper's inherited process token; `start()` also enforces elevation. These methods
 do not relaunch the app or prompt for UAC. The elevated token must already hold
-`SeSecurityPrivilege` for atomic protected-SACL creation. The helper enables this
-right only on a temporary thread token during creation; it does not grant missing
-rights or modify the process token or machine security policy.
+`SeSecurityPrivilege` for atomic protected-SACL creation and opening the root for
+full SACL inspection. The helper enables this right only on a temporary thread
+token around those opens; it does not grant missing rights or modify the process
+token or machine security policy.
 
 Either launch the built host with **Run as administrator**, or add the following
 to the host's `windows/runner/runner.exe.manifest`:

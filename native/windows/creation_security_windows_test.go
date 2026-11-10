@@ -73,7 +73,7 @@ func TestCreationSecurityPreservesCallerAndProcessOnSuccessAndFailure(t *testing
 	sentinel := errors.New("creation failed")
 	for _, want := range []error{nil, sentinel} {
 		called := false
-		err := withCreationSecurity(func() error {
+		err := withStorageSecurityPrivilege(func() error {
 			called = true
 			enabled, err := tokenPrivilegeEnabled(windows.GetCurrentThreadToken(), luid)
 			if err != nil || !enabled {
@@ -100,7 +100,7 @@ func TestCreationSecurityPreservesCallerAndProcessOnSuccessAndFailure(t *testing
 		t.Fatal(err)
 	}
 	called := false
-	err = withCreationSecurity(func() error {
+	err = withStorageSecurityPrivilege(func() error {
 		called = true
 		return nil
 	})
@@ -119,7 +119,7 @@ func TestCreationSecurityDoesNotSubstituteProcessForMediumCaller(t *testing.T) {
 	withMediumIntegrity(t, func() {
 		before := creationTokenID(t, windows.GetCurrentThreadToken())
 		called := false
-		err := withCreationSecurity(func() error {
+		err := withStorageSecurityPrivilege(func() error {
 			called = true
 			return nil
 		})
