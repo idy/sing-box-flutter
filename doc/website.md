@@ -26,11 +26,15 @@ Website and design working files are excluded from the pub.dev archive.
 ## Deployment
 
 `.github/workflows/pages.yml` validates builds for relevant pull requests. It can
-deploy only the default `main` branch to the `github-pages` environment, on a
-relevant push or an explicit workflow dispatch. A case-sensitive runtime check
+deploy only the default `main` branch to the `github-pages` environment, on every
+main push or an explicit workflow dispatch. A case-sensitive runtime check
 allows production only for the exact `refs/heads/main`; preview branches, including
 case variants such as `Main`, cannot deploy. Only eligible deployment jobs enter
 the production concurrency group, and they do not cancel an in-progress deployment.
+The group retains all pending jobs. After taking the deployment lock, a job reads
+the live main revision and skips an artifact built from any superseded commit.
+Every main push starts a successor build, so even an unrelated main change cannot
+leave the preceding website update permanently skipped.
 
 Before the first deployment:
 

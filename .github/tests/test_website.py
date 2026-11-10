@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -116,7 +117,9 @@ class DeploymentEligibility(unittest.TestCase):
         self.assertNotIn("\nconcurrency:", workflow)
         deploy = workflow.split("  deploy:\n", 1)[1]
         self.assertIn("if: needs.build.outputs.production == 'true'", deploy)
-        self.assertIn("    concurrency:\n      group: project-website-production\n      cancel-in-progress: false", deploy)
+        self.assertIn("      group: project-website-production\n", deploy)
+        self.assertIn("      queue: max\n", deploy)
+        self.assertIn("      cancel-in-progress: false\n", deploy)
         self.assertIn("if: steps.production.outputs.eligible == 'true'", workflow)
         body = workflow.split("python3 -I - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
         body = textwrap.dedent(body)
@@ -146,8 +149,54 @@ class DeploymentEligibility(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
         triggers = workflow.split("permissions:", 1)[0]
         push, pull_request = triggers.split("  pull_request:\n", 1)
-        for event in [push, pull_request]:
-            self.assertIn("      - .github/workflows/native-core.yml\n", event)
+        self.assertIn("    branches: [main]\n", push)
+        self.assertNotIn("    paths:", push)
+        self.assertIn("      - .github/workflows/native-core.yml\n", pull_request)
+
+
+class DeploymentFreshness(unittest.TestCase):
+    def setUp(self):
+        workflow = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
+        deploy = workflow.split("  deploy:\n", 1)[1]
+        body = deploy.split("python3 -I - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+        self.body = textwrap.dedent(body)
+        self.assertEqual(deploy.count("if: steps.revision.outputs.current == 'true'"), 2)
+        self.assertLess(deploy.index("id: revision"), deploy.index("uses: actions/configure-pages"))
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.output = Path(self.directory.name) / "output"
+        self.environment = {"PAGES_BUILT_SHA": "a" * 40, "GH_TOKEN": "test-token",
+                            "GITHUB_API_URL": "https://api.github.test", "GITHUB_REPOSITORY": "idy/sing-box-flutter",
+                            "GITHUB_OUTPUT": str(self.output)}
+
+    def run_guard(self, built, current):
+        self.output.write_text("", encoding="utf-8")
+        response = io.BytesIO(json.dumps({"object": {"sha": current}}).encode("utf-8"))
+        with mock.patch.dict(os.environ, dict(self.environment, PAGES_BUILT_SHA=built)), \
+                mock.patch("urllib.request.urlopen", return_value=response) as lookup, \
+                contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(self.body, "pages-revision-guard", "exec"), {})
+        self.assertEqual(lookup.call_args.args[0].full_url,
+                         "https://api.github.test/repos/idy/sing-box-flutter/git/ref/heads/main")
+        return self.output.read_text(encoding="utf-8")
+
+    def test_newer_build_then_late_older_build_cannot_roll_back(self):
+        newest = "b" * 40
+        self.assertEqual(self.run_guard(newest, newest), "current=true\n")
+        self.assertEqual(self.run_guard("a" * 40, newest), "current=false\n")
+
+    def test_invalid_revision_fails_closed(self):
+        with self.assertRaises(SystemExit):
+            self.run_guard("a" * 40, "invalid-api-result")
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "")
+
+    def test_failed_lookup_does_not_authorize_deployment(self):
+        self.output.write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, self.environment), \
+                mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            with self.assertRaises(OSError):
+                exec(compile(self.body, "pages-revision-guard", "exec"), {})
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "")
 
 
 class NativeCIIsolation(unittest.TestCase):

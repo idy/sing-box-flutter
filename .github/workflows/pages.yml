@@ -1,15 +1,9 @@
 name: Project website
 
 on:
+  # Every new main revision gets a successor build, even for non-website edits.
   push:
     branches: [main]
-    paths:
-      - site/**
-      - example/core-profiles/*.yaml
-      - tool/build_site.py
-      - .github/workflows/pages.yml
-      - .github/tests/test_website.py
-      - .github/workflows/native-core.yml
   pull_request:
     paths:
       - site/**
@@ -69,15 +63,46 @@ jobs:
     runs-on: ubuntu-24.04
     concurrency:
       group: project-website-production
+      # Keep the latest revision queued even if an older build finishes later.
+      queue: max
       cancel-in-progress: false
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Check the built revision is still current
+        id: revision
+        env:
+          PAGES_BUILT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I - <<'PY'
+          import json
+          import os
+          import re
+          from urllib.request import Request, urlopen
+          # This runs after acquiring the production deployment lock.
+          url = (os.environ['GITHUB_API_URL'] + '/repos/' +
+                 os.environ['GITHUB_REPOSITORY'] + '/git/ref/heads/main')
+          request = Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                                         'Accept': 'application/vnd.github+json', 'Cache-Control': 'no-cache'})
+          with urlopen(request, timeout=30) as response:
+              current = json.load(response).get('object', {}).get('sha')
+          built = os.environ['PAGES_BUILT_SHA']
+          if any(not isinstance(sha, str) or re.fullmatch(r'[0-9a-f]{40}', sha) is None for sha in (current, built)):
+              raise SystemExit('Could not verify the current main revision')
+          deploy = current == built
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('current=' + str(deploy).lower() + '\n')
+          print('Deploying current main revision' if deploy else 'Skipping superseded website build')
+          PY
       - uses: actions/configure-pages@v5
+        if: steps.revision.outputs.current == 'true'
       - name: Deploy website
         id: deployment
+        if: steps.revision.outputs.current == 'true'
         uses: actions/deploy-pages@v4
