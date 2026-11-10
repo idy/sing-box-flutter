@@ -32,6 +32,9 @@ class WindowsCoreClient {
     }));
   }
 
+  /// Maximum UTF-8 frame size, including the newline consumed by Go's scanner.
+  static const maxRequestBytes = 8 << 20;
+
   final Process _process;
   final void Function(SingBoxEvent) _onEvent;
   final void Function() _onFailure;
@@ -46,14 +49,22 @@ class WindowsCoreClient {
       [Map<String, Object?>? arguments]) async {
     if (_closed) throw _unavailable();
     final id = ++_nextId;
+    final request = jsonEncode({
+      'id': id,
+      'method': method,
+      'arguments': arguments ?? <String, Object?>{},
+    });
+    final frame = utf8.encode('$request\n');
+    if (frame.length > maxRequestBytes) {
+      throw PlatformException(
+        code: 'request_too_large',
+        message: 'Windows VPN requests must fit within 8 MiB.',
+      );
+    }
     final result = Completer<Object?>();
     _pending[id] = result;
     try {
-      _process.stdin.writeln(jsonEncode({
-        'id': id,
-        'method': method,
-        'arguments': arguments ?? <String, Object?>{},
-      }));
+      _process.stdin.add(frame);
     } catch (_) {
       _fail();
     }

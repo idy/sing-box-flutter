@@ -28,7 +28,10 @@ class _CoreProcess implements Process {
   final requests = <Map<String, dynamic>>[];
   void Function(Map<String, dynamic>)? onRequest;
   String state = 'disconnected';
+  bool initialized = false;
   bool killed = false;
+  bool _outputObserved = false;
+  bool _errorsObserved = false;
 
   void send(Object value) => _output.add(utf8.encode('${jsonEncode(value)}\n'));
 
@@ -36,6 +39,14 @@ class _CoreProcess implements Process {
       send({'id': request['id'], 'result': result});
 
   void respondNormally(Map<String, dynamic> request) {
+    if (request['method'] == 'initialize') initialized = true;
+    if (!initialized && request['method'] != 'getVersion') {
+      send({
+        'id': request['id'],
+        'error': {'code': 'not_initialized', 'message': 'Initialize first.'},
+      });
+      return;
+    }
     respond(
         request,
         switch (request['method']) {
@@ -53,6 +64,17 @@ class _CoreProcess implements Process {
   }
 
   Future<void> exit() async {
+    if (!_outputObserved && !_errorsObserved) await stdin.close();
+    // An unlaunched fake still needs consumers for single-subscription close
+    // futures; cancelled streams have already been observed and need no drain.
+    if (!_outputObserved) {
+      _outputObserved = true;
+      unawaited(_output.stream.drain<void>());
+    }
+    if (!_errorsObserved) {
+      _errorsObserved = true;
+      unawaited(_errors.stream.drain<void>());
+    }
     if (!_exit.isCompleted) _exit.complete(0);
     await _output.close();
     await _errors.close();
@@ -61,9 +83,17 @@ class _CoreProcess implements Process {
   @override
   late final IOSink stdin;
   @override
-  Stream<List<int>> get stdout => _output.stream;
+  Stream<List<int>> get stdout {
+    _outputObserved = true;
+    return _output.stream;
+  }
+
   @override
-  Stream<List<int>> get stderr => _errors.stream;
+  Stream<List<int>> get stderr {
+    _errorsObserved = true;
+    return _errors.stream;
+  }
+
   @override
   Future<int> get exitCode => _exit.future;
   @override
@@ -120,6 +150,8 @@ void main() {
 
   test('subscriptions replay state and cancellation never stops the core',
       () async {
+    process.onRequest = process.respondNormally;
+    await plugin.initialize(notificationTitle: 'Example');
     process.onRequest = (request) {
       if (request['method'] == 'start') {
         process.event('connecting');
@@ -142,11 +174,15 @@ void main() {
     ]);
     await subscription.cancel();
     expect((await plugin.events.first as VpnStatus).isConnected, isTrue);
-    expect(process.requests.map((request) => request['method']), ['start']);
+    expect(process.requests.last['method'], 'start');
+    expect(process.requests.where((request) => request['method'] == 'stop'),
+        isEmpty);
     expect(process.killed, isFalse);
   });
 
   test('helper errors retain stable platform codes', () async {
+    process.onRequest = process.respondNormally;
+    await plugin.initialize(notificationTitle: 'Example');
     process.onRequest = (request) => process.send({
           'id': request['id'],
           'error': {
@@ -249,6 +285,8 @@ void main() {
 
   test('an awaited status snapshot never replaces a newer native event',
       () async {
+    process.onRequest = process.respondNormally;
+    await plugin.initialize(notificationTitle: 'Example');
     process.onRequest = (request) {
       // One OS read can carry both an older RPC response and the newer event.
       final response = jsonEncode({
@@ -263,6 +301,146 @@ void main() {
     expect((await plugin.getStatus()).state, VpnConnectionState.disconnected);
     expect((await plugin.events.first as VpnStatus).state,
         VpnConnectionState.connected);
+  });
+
+  test(
+      'control methods require explicit initialization without launching a helper',
+      () async {
+    for (final operation in <Future<Object?> Function()>[
+      plugin.getStatus,
+      () => plugin.checkConfig('{}'),
+      plugin.requestPermission,
+      () => plugin.start(config: '{}', name: 'test'),
+      plugin.stop,
+    ]) {
+      await expectLater(
+          operation(),
+          throwsA(isA<PlatformException>()
+              .having((error) => error.code, 'code', 'not_initialized')));
+    }
+    expect(launches, isEmpty);
+  });
+
+  test(
+      'status refresh and stop after helper loss never launch an uninitialized core',
+      () async {
+    process.onRequest = process.respondNormally;
+    await plugin.initialize(notificationTitle: 'Example');
+    await process.exit();
+    expect((await plugin.getStatus()).state, VpnConnectionState.error);
+    await expectLater(
+        plugin.start(config: '{}', name: 'test'),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'not_initialized')));
+    await plugin.stop();
+    expect((await plugin.getStatus()).state, VpnConnectionState.disconnected);
+    expect(launches, hasLength(1));
+    expect(process.requests.map((request) => request['method']),
+        ['initialize', 'getStatus']);
+  });
+
+  test(
+      'version-only replacement remains uninitialized until initialize succeeds',
+      () async {
+    process.onRequest = process.respondNormally;
+    await plugin.initialize(notificationTitle: 'Example');
+    await process.exit();
+    final replacement = _CoreProcess();
+    replacement.onRequest = replacement.respondNormally;
+    processes.add(replacement);
+    expect(await plugin.getVersion(), '1.14.4');
+    expect(replacement.initialized, isFalse);
+    expect((await plugin.getStatus()).state, VpnConnectionState.error);
+    await expectLater(
+        plugin.checkConfig('{}'),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'not_initialized')));
+    expect(replacement.requests.map((request) => request['method']),
+        ['getVersion']);
+    await plugin.initialize(notificationTitle: 'Example');
+    expect(replacement.initialized, isTrue);
+    await plugin.checkConfig('{}');
+    expect((await plugin.getStatus()).state, VpnConnectionState.disconnected);
+  });
+
+  test('oversized UTF-8 requests do not disconnect an existing connection',
+      () async {
+    process.onRequest = process.respondNormally;
+    await plugin.initialize(notificationTitle: 'Example');
+    final connected = plugin.events.cast<VpnStatus>().firstWhere(
+          (status) => status.isConnected,
+        );
+    process.event('connected');
+    await connected;
+    final config = jsonEncode({
+      'outbounds': [
+        {'type': 'direct', 'tag': 'direct'}
+      ],
+      'route': {
+        'rules': [
+          {
+            'domain_suffix': ['中' * (WindowsCoreClient.maxRequestBytes ~/ 2)],
+            'action': 'route',
+            'outbound': 'direct'
+          },
+        ],
+        'final': 'direct',
+      },
+    });
+    expect(config.length, lessThan(WindowsCoreClient.maxRequestBytes));
+    final sent = process.requests.length;
+    await expectLater(
+        plugin.checkConfig(config),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'request_too_large')));
+    expect(process.requests, hasLength(sent));
+    expect((await plugin.getStatus()).isConnected, isTrue);
+    expect(await plugin.getVersion(), '1.14.4');
+    expect(launches, hasLength(1));
+    expect(process._exit.isCompleted, isFalse);
+  });
+
+  test('request limit includes the newline and leaves the transport usable',
+      () async {
+    var failures = 0;
+    process.onRequest = (request) => process.respond(request, null);
+    final client = WindowsCoreClient(process,
+        onEvent: (_) {}, onFailure: () => failures++);
+    final overhead = utf8
+        .encode('${jsonEncode({
+              'id': 1,
+              'method': 'checkConfig',
+              'arguments': {'config': ''},
+            })}\n')
+        .length;
+    final payload = 'x' * (WindowsCoreClient.maxRequestBytes - overhead);
+    await client.invoke('checkConfig', {'config': payload});
+    await expectLater(
+        client.invoke('checkConfig', {'config': '${payload}x'}),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'request_too_large')));
+    await client.invoke('getVersion');
+    expect(process.requests.map((request) => request['method']),
+        ['checkConfig', 'getVersion']);
+    expect(failures, 0);
+  });
+
+  test(
+      'application storage separates installations and normalizes Windows aliases',
+      () {
+    final first =
+        SingBoxFlutterWindows.applicationStorageName(r'C:\Apps\One\client.exe');
+    final second =
+        SingBoxFlutterWindows.applicationStorageName(r'C:\Apps\Two\client.exe');
+    expect(first, isNot(second));
+    expect(
+        first,
+        SingBoxFlutterWindows.applicationStorageName(
+            r'c:/apps/one/./CLIENT.exe'));
+    expect(first, matches(RegExp(r'^client-[a-f0-9]{64}$')));
+    final bounded = SingBoxFlutterWindows.applicationStorageName(
+        'C:\\Apps\\${'a' * 200}.exe');
+    expect(bounded.length, lessThanOrEqualTo(89));
   });
 
   test('repeated initialization preserves the native connected state',

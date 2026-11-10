@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+
+import 'package:crypto/crypto.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -34,12 +37,31 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
     SingBoxFlutterPlatform.instance = _instance;
   }
 
+  /// Derives a stable per-installation name without relying on the basename.
+  @visibleForTesting
+  static String applicationStorageName(String executable) {
+    final paths = p.Context(style: p.Style.windows);
+    if (!paths.isAbsolute(executable)) {
+      throw ArgumentError('The application executable path must be absolute.');
+    }
+    final normalized = paths.normalize(executable).toLowerCase();
+    final basename = paths
+        .basenameWithoutExtension(normalized)
+        .replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
+    final prefix = basename.isEmpty
+        ? 'app'
+        : basename.substring(0, basename.length > 24 ? 24 : basename.length);
+    final identity = sha256.convert(utf8.encode(normalized));
+    return '$prefix-$identity';
+  }
+
   Future<Process> Function(String executable)? _launcher;
   String? _workingPath;
   String? _executable;
   Future<WindowsCoreClient>? _client;
   Future<int>? _retirement;
   int _generation = 0;
+  int? _initializedGeneration;
   int _statusRevision = 0;
   VpnStatus _status = const VpnStatus(state: VpnConnectionState.disconnected);
   final _updates = StreamController<SingBoxEvent>.broadcast();
@@ -58,6 +80,32 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
     }
   }
 
+  bool get _isInitialized =>
+      _client != null && _initializedGeneration == _generation;
+
+  static PlatformException _notInitialized() => PlatformException(
+        code: 'not_initialized',
+        message: 'Initialize Windows VPN integration before using this method. '
+            'Initialize again if the native core exited.',
+      );
+
+  Future<WindowsCoreClient> _initializedCore() async {
+    if (!_isInitialized) throw _notInitialized();
+    return _client!;
+  }
+
+  Future<void> _awaitRetirement() async {
+    try {
+      await _retirement?.timeout(const Duration(seconds: 60));
+    } on TimeoutException {
+      throw PlatformException(
+        code: 'core_stopping',
+        message: 'The previous Windows VPN core is still shutting down. '
+            'Try again after it exits.',
+      );
+    }
+  }
+
   Future<WindowsCoreClient> _launch(int generation) async {
     if (_launcher == null && !Platform.isWindows) {
       throw UnsupportedError('The Windows VPN backend requires Windows.');
@@ -65,21 +113,15 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
     final executable = _executable ??
         p.join(p.dirname(Platform.resolvedExecutable),
             'sing_box_flutter_core.exe');
+    // A broken transport can precede native route cleanup and lease release.
+    // Keep single-flight launch ownership while waiting for actual termination.
+    await _awaitRetirement();
+    _retirement = null;
     final Process process;
     try {
-      // A broken transport can precede native route cleanup and lease release.
-      // Keep single-flight launch ownership while waiting for actual termination.
-      await _retirement?.timeout(const Duration(seconds: 60));
-      _retirement = null;
       process = await (_launcher?.call(executable) ??
           Process.start(executable, const [],
               workingDirectory: p.dirname(executable)));
-    } on TimeoutException {
-      throw PlatformException(
-        code: 'core_stopping',
-        message: 'The previous Windows VPN core is still shutting down. '
-            'Try initialization again after it exits.',
-      );
     } catch (_) {
       throw PlatformException(
         code: 'core_unavailable',
@@ -125,9 +167,9 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
     return status;
   }
 
-  Future<Object?> _invoke(String method,
+  Future<Object?> _invokeInitialized(String method,
           [Map<String, Object?>? arguments]) async =>
-      (await _core()).invoke(method, arguments);
+      (await _initializedCore()).invoke(method, arguments);
 
   @override
   Future<void> initialize({
@@ -146,7 +188,7 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
       }
       workingPath = p.join(
           local,
-          p.basenameWithoutExtension(Platform.resolvedExecutable),
+          applicationStorageName(Platform.resolvedExecutable),
           'sing_box_flutter');
     }
     final pending = _core();
@@ -154,11 +196,18 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
     final core = await pending;
     await core.invoke('initialize', {'workingPath': workingPath});
     await _readStatus(core, generation, notify: true);
+    if (_generation != generation || _client == null) {
+      throw PlatformException(
+        code: 'core_unavailable',
+        message: 'The Windows VPN core exited during initialization.',
+      );
+    }
+    _initializedGeneration = generation;
   }
 
   @override
   Future<String> getVersion() async {
-    final result = await _invoke('getVersion');
+    final result = await (await _core()).invoke('getVersion');
     if (result is! String || result.isEmpty) {
       throw StateError('The native sing-box version was not returned.');
     }
@@ -167,28 +216,47 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
 
   @override
   Future<void> checkConfig(String config) async {
-    await _invoke('checkConfig', {'config': config});
+    await _invokeInitialized('checkConfig', {'config': config});
   }
 
   @override
   Future<bool> requestPermission() async =>
-      await _invoke('requestPermission') == true;
+      await _invokeInitialized('requestPermission') == true;
 
   @override
   Future<void> start({required String config, required String name}) async {
-    await _invoke('start', {'config': config, 'name': name});
+    await _invokeInitialized('start', {'config': config, 'name': name});
   }
 
   @override
   Future<void> stop() async {
-    await _invoke('stop');
+    if (!_isInitialized) {
+      if (_initializedGeneration == null) throw _notInitialized();
+      final generation = _generation;
+      await _awaitRetirement();
+      if (!_isInitialized) {
+        if (_generation == generation) {
+          _emit(const VpnStatus(state: VpnConnectionState.disconnected));
+        }
+        return;
+      }
+    }
+    await _invokeInitialized('stop');
   }
 
   @override
   Future<VpnStatus> getStatus() async {
-    final pending = _core();
+    if (!_isInitialized) {
+      if (_initializedGeneration == null) throw _notInitialized();
+      return _status;
+    }
     final generation = _generation;
-    return _readStatus(await pending, generation);
+    try {
+      return await _readStatus(await _initializedCore(), generation);
+    } on PlatformException {
+      if (!_isInitialized) return _status;
+      rethrow;
+    }
   }
 
   @override

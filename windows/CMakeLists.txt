@@ -88,4 +88,8 @@ install(FILES "${CORE_PARENT}/core-capabilities.json"
   "${CORE_PARENT}/native-build.json"
   DESTINATION "sing_box_flutter" COMPONENT Runtime)
 install(DIRECTORY "${CORE_PARENT}/Legal/"
+  DESTINATION "sing_box_flutter/Legal" COMPONENT Runtime
+  PATTERN "LICENSE.wintun" EXCLUDE)
+# Install the exact license bytes covered by the bundle receipt and build guard.
+install(FILES "${CORE_DIR}/LICENSE.wintun"
   DESTINATION "sing_box_flutter/Legal" COMPONENT Runtime)

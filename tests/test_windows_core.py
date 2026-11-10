@@ -402,6 +402,27 @@ file(WRITE "${CMAKE_BINARY_DIR}/bundled.txt" "${bundle_count}\\n${bundle_path}")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("changed after", result.stdout + result.stderr)
 
+    def test_install_uses_verified_license_when_cached_legal_copy_is_modified(self):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        expected = (artifact / "LICENSE.wintun").read_bytes()
+        legal = artifact.parent / "Legal"
+        legal.mkdir()
+        (legal / "LICENSE.wintun").write_bytes(b"unverified cached legal copy\n")
+        (legal / "NOTICE").write_text("other required notice\n", encoding="utf-8")
+        result = self.configure()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.verify_installed()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installed = self.root / "installed bundle"
+        result = subprocess.run(["cmake", "--install", str(self.cmake_build), "--component", "Runtime",
+                                 "--prefix", str(installed)], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((installed / "sing_box_flutter/Legal/LICENSE.wintun").read_bytes(), expected)
+        self.assertEqual((installed / "sing_box_flutter/Legal/NOTICE").read_text(encoding="utf-8"),
+                         "other required notice\n")
+        self.assertNotEqual((legal / "LICENSE.wintun").read_bytes(), expected)
+
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         script = self.plugin / "tool/core_recipe.py"
         script.write_text('''import sys
@@ -638,6 +659,14 @@ class WindowsChangeGate(unittest.TestCase):
                          "example/windows/runner/main.cpp", "example/lib/应用.dart", ".github/workflows/check.yml"):
                 with self.subTest(event=event, name=name):
                     self.assertTrue(self.gate([name], event))
+
+    def test_unclassified_inputs_build_instead_of_being_treated_as_docs(self):
+        for event in ("pull_request", "push"):
+            for name in (".gitattributes", ".gitignore", ".pubignore", "LICENSE",
+                         "THIRD_PARTY_NOTICES.md", "future/build.json", "example/tool/codegen.dart",
+                         ".github/workflows/new-check.yml"):
+                with self.subTest(event=event, name=name):
+                    self.assertTrue(self.gate(["README.md", name], event))
 
     def test_dispatch_missing_history_and_invalid_event_data_fail_closed(self):
         self.assertTrue(needs_windows_build("workflow_dispatch", {}))

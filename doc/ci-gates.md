@@ -12,8 +12,9 @@ GitHub Actions checks before merge:
 The `windows` job in Check always reports its test result. Its costly native
 build and example packaging steps run when relevant package, helper, tooling,
 Windows runner or workflow inputs change, and on manual dispatch. A full-history
-checkout validates the PR base/head or push before/after commits; unknown diffs
-build conservatively. Documentation-only changes skip those costly steps.
+checkout validates the PR base/head or push before/after commits. Unknown diffs
+and unclassified paths, including checkout and packaging configuration, build
+conservatively. Only explicitly recognized documentation changes skip those costly steps.
 The build verifies sing-tun's embedded Wintun driver and checks the packaged helper,
 capabilities, metadata and exact driver license, with no unused DLL sidecar.
 On the elevated Windows runner, `SING_BOX_FLUTTER_WINTUN_SMOKE=1` also enables a

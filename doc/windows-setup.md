@@ -99,12 +99,18 @@ into the tunnel. The example's direct-routing configuration works on Windows.
 `stack: "gvisor"` is available when the selected core includes TUN.
 
 `initialize()` creates application storage under
-`%LOCALAPPDATA%/<host executable name>/sing_box_flutter`. The Apple identifiers and
-Android notification title are not used on Windows. `checkConfig()` parses against
+`%LOCALAPPDATA%/<short executable name>-<executable path SHA-256>/sing_box_flutter`.
+The identity uses the normalized absolute executable path, so independently
+installed apps with the same basename keep separate locks and persistent state.
+Storage must be on a local volume with persistent ACL support and no reparse-point
+ancestors. Directory creation and private ACL changes use verified, pinned handles.
+The Apple identifiers and Android notification title are not used on Windows. `checkConfig()` parses against
 the selected native registry and validates the engine before connecting.
 Configurations travel through an anonymous process pipe, never command-line
 arguments or a temporary config file. Native protocol diagnostics are suppressed;
-platform errors and status events use fixed messages.
+platform errors and status events use fixed messages. Encoded UTF-8 requests,
+including JSON escaping and newline framing, must fit within 8 MiB. Oversized
+requests return `request_too_large` locally without closing an existing VPN.
 
 `start()` acknowledges an accepted request. Observe the status stream for
 `connecting`, `connected`, or `error`. Cancelling subscriptions and rebuilding a
@@ -112,6 +118,10 @@ widget do not stop the VPN. Call `stop()` to close sing-box, restore routes, and
 release Wintun. The helper closes the core when its control pipe reaches EOF,
 including when the app exits. Unlike the mobile system services, Windows does not
 install a persistent background service: the tunnel belongs to the running app.
+After helper failure, `getStatus()` returns the cached failure and `stop()` waits
+for the old process to finish cleanup without launching another helper. Call
+`initialize()` again before configuration checks, permission requests or starting
+a replacement session. A version lookup alone does not initialize that session.
 
 ## Validation
 

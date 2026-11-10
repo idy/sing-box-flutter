@@ -8,11 +8,9 @@ from pathlib import Path
 import re
 import subprocess
 
-RELEVANT_FILES = {"native-core.json", "pubspec.yaml", "pubspec.lock", "LICENSE",
-                  "THIRD_PARTY_NOTICES.md", ".github/workflows/check.yml",
-                  "example/pubspec.yaml", "example/pubspec.lock"}
-RELEVANT_PREFIXES = ("lib/", "bin/", "tool/", "native/", "windows/", "test/", "tests/",
-                     "example/lib/", "example/windows/", "example/assets/", "example/core-profiles/")
+DOCUMENTATION_FILES = {"README.md", "CHANGELOG.md", "CONTRIBUTING.md",
+                       "CODE_OF_CONDUCT.md", "DESIGN.md", "PRODUCT.md", "example/README.md"}
+DOCUMENTATION_PREFIXES = ("doc/",)
 
 
 def needs_windows_build(event_name: str, event: dict, *, run=subprocess.run) -> bool:
@@ -39,7 +37,9 @@ def needs_windows_build(event_name: str, event: dict, *, run=subprocess.run) -> 
         revisions = [f"{base}...{head}"] if event_name == "pull_request" else [base, head]
         changed = run(["git", "diff", "--no-renames", "--name-only", "-z", *revisions, "--"],
                       check=True, capture_output=True, text=True, encoding="utf-8").stdout
-        return any(name in RELEVANT_FILES or name.startswith(RELEVANT_PREFIXES)
+        # Skip only known documentation. New or unclassified inputs can affect
+        # checkout, generated assets or packaging and must be tested by default.
+        return any(name not in DOCUMENTATION_FILES and not name.startswith(DOCUMENTATION_PREFIXES)
                    for name in changed.split("\0") if name)
     except (KeyError, TypeError, ValueError, OSError, subprocess.SubprocessError):
         return True
