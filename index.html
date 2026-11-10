@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2454e6">
+  <meta name="description" content="A Flutter plugin for Android and iOS VPNs. Choose sing-box features in your app's pubspec.yaml and build a smaller native core with the pinned Tailscale Go toolchain.">
+  <meta property="og:title" content="sing_box_flutter — Your app. Your sing-box.">
+  <meta property="og:description" content="Select your protocols. Compile your core. Keep your Flutter API.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sing-box-flutter.idy.dev/">
+  <link rel="canonical" href="https://sing-box-flutter.idy.dev/">
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+  <title>sing_box_flutter — Your app. Your sing-box.</title>
+</head>
+<body data-core-revision="860152060fdfe954871ac579dcb483123dae81a4">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="#main" aria-label="sing_box_flutter home"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 3h11v11H3zM18 3h11v11H18zM3 18h11v11H3z"/><path class="offset" d="M21 21h8v8h-8z"/></svg><span>sing_box<span class="brand-suffix">_flutter</span></span></a>
+    <nav aria-label="Main navigation">
+      <a href="#why">Why this core</a>
+      <a href="#quickstart">Quick start</a>
+      <a class="github-link" href="https://github.com/idy/sing-box-flutter">GitHub <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">Your app.<br>Your <span>sing-box.</span></h1>
+        <p class="hero-lead">A native VPN core, with only<br class="desktop-break"> the features you choose.</p>
+        <p class="hero-description">Select protocols in your Flutter app’s <code>pubspec.yaml</code>. Compile them with the pinned Tailscale Go toolchain. Ship a smaller core on Android and iOS.</p>
+        <div class="hero-actions"><a class="button primary" href="#quickstart">Build your core <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10h13m-5-5 5 5-5 5"/></svg></a><a class="text-link" href="https://github.com/idy/sing-box-flutter/blob/main/doc/core-features.md">Read the feature guide <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></div>
+        <ul class="platforms" aria-label="Supported platforms"><li>Android 7+</li><li>iOS 15+</li><li>Flutter 3.47.2+</li></ul>
+      </div>
+      <div class="recipe">
+        <div class="recipe-header"><span><span class="file-icon" aria-hidden="true"></span> Your app / pubspec.yaml</span></div>
+        <div class="profile-tabs" role="tablist" aria-label="Example core profile">
+          <button type="button" id="tab-wgc-minimal" role="tab" aria-selected="true" aria-controls="profile-panel" data-profile="wgc-minimal">WGC minimal</button>
+          <button type="button" id="tab-wgc-tailscale" role="tab" aria-selected="false" aria-controls="profile-panel" tabindex="-1" data-profile="wgc-tailscale">+ Tailscale</button>
+          <button type="button" id="tab-singbox-full" role="tab" aria-selected="false" aria-controls="profile-panel" tabindex="-1" data-profile="singbox-full">Full mobile</button>
+        </div>
+        <div id="profile-panel" role="tabpanel" aria-labelledby="tab-wgc-minimal" tabindex="0">
+          <div class="code-topline"><span>Feature selection</span><button type="button" class="copy-button" id="copy-profile" data-copy="profile-code" aria-label="Copy feature selection">Copy YAML</button></div>
+          <pre class="profile-pre"><code id="profile-code">sing_box_flutter:
+  core:
+    inbounds: [tun]
+    outbounds: [direct]
+    endpoints: [wgc]
+    dns: [udp, tcp, fakeip]
+</code></pre>
+        </div>
+        <div class="recipe-note"><p id="profile-description">TUN, direct, WGC and basic DNS. A small place to start.</p><a id="profile-source" href="https://github.com/idy/sing-box-flutter/blob/860152060fdfe954871ac579dcb483123dae81a4/example/core-profiles/wgc-minimal.yaml">View source <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></div>
+        <p class="recipe-error" id="profile-error" hidden>Couldn’t load this profile. <button type="button" id="retry-profile">Try again</button>, or open its source.</p>
+      </div>
+    </section>
+
+    <div class="build-path wrap" aria-label="Build process"><span>Host pubspec.yaml</span><svg viewBox="0 0 32 16" aria-hidden="true"><path d="M0 8h29m-6-6 6 6-6 6"/></svg><span>Selected Go registry</span><svg viewBox="0 0 32 16" aria-hidden="true"><path d="M0 8h29m-6-6 6 6-6 6"/></svg><span>Tailscale Go + gomobile</span><svg viewBox="0 0 32 16" aria-hidden="true"><path d="M0 8h29m-6-6 6 6-6 6"/></svg><span class="output">Your AAR / XCFramework</span></div>
+
+    <section class="why-section" id="why" aria-labelledby="why-title">
+      <div class="wrap why-layout">
+        <div class="section-intro"><h2 id="why-title">Same engine.<br>Less to ship.</h2><p>Keep sing-box’s routing and protocol implementations. Replace the standard libbox SDK’s RPC and profile-management binding with a thin mobile layer and a registry built for your application.</p><a class="text-link" href="https://github.com/idy/sing-box-flutter/blob/main/doc/core-features.md#measured-minimal-wgc-build">How we measured <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></div>
+        <div class="comparison">
+          <table><caption>Minimal WGC vs. cached standard libbox · MiB</caption><thead><tr><th scope="col">Uncompressed binary</th><th scope="col">Standard libbox</th><th scope="col">WGC minimal</th></tr></thead><tbody><tr><th scope="row">iOS Packet Tunnel</th><td>59.94</td><td class="selected-size">21.83 <span>−64%</span></td></tr><tr><th scope="row">Android arm64 .so</th><td>60.58</td><td class="selected-size">22.96 <span>−62%</span></td></tr><tr><th scope="row">iOS arm64 static SDK</th><td>74.11</td><td class="selected-size">26.61</td></tr></tbody></table>
+          <p class="measurement-note">sing-box 1.14.4 · measured November 10, 2026. The cached standard libbox baseline predates WGC; the smaller selected build includes it. These are binary sizes, not app downloads or memory use. The full mobile profile is broader and larger.</p>
+        </div>
+      </div>
+      <dl class="advantages wrap">
+        <div><dt>Choose the constructors</dt><dd>Pick endpoints, outbounds, DNS, TLS and services. The builder resolves required dependencies; shared implementations can still contribute bytes.</dd></div>
+        <div><dt>One Go engine on iOS</dt><dd>The Packet Tunnel extension owns the core. The main app uses Swift preflight and control, without linking another Go engine.</dd></div>
+        <div><dt>Keep each app’s build separate</dt><dd>Fingerprinted artifacts stay in your app’s <code>.dart_tool</code>. Gradle and CocoaPods reject stale or modified cores.</dd></div>
+      </dl>
+    </section>
+
+    <section class="quickstart wrap" id="quickstart" aria-labelledby="quickstart-title">
+      <div class="quickstart-heading"><h2 id="quickstart-title">From selection<br>to connection.</h2><p>Build the core on your development machine.<br>The installed app needs no separate Go installation.</p></div>
+      <ol class="steps">
+        <li><div class="step-copy"><h3>Add the plugin. Pick a profile.</h3><p>Add this source dependency and your chosen <code>sing_box_flutter.core</code> block to the host app’s pubspec. The three profiles above use the repository’s actual YAML files.</p><p class="preview-note">The 0.3.0 package is in preparation. This pinned source revision already supports selectable builds. <a href="https://pub.dev/packages/sing_box_flutter">See published versions</a>.</p></div><div class="code-block"><div class="code-topline"><span>pubspec.yaml</span><button type="button" class="copy-button" data-copy="dependency-code" aria-label="Copy package dependency">Copy</button></div><pre><code id="dependency-code">dependencies:
+  sing_box_flutter:
+    git:
+      url: https://github.com/idy/sing-box-flutter.git
+      ref: 860152060fdfe954871ac579dcb483123dae81a4
+
+# Add the feature selection shown above
+# as a separate top-level block.</code></pre><div class="inline-command"><code>flutter pub get</code></div></div></li>
+        <li><div class="step-copy"><h3>Compile your native core.</h3><p>Run the build command from your app. It downloads and verifies the pinned Tailscale Go compiler and produces the native SDK for your selection.</p><p>Rebuild after changing the pubspec or native inputs. Ordinary Flutter builds do not compile Go automatically.</p></div><div class="code-block"><div class="platform-tabs" role="tablist" aria-label="Build target"><button type="button" id="target-android" role="tab" aria-selected="true" aria-controls="build-panel" data-target="android">Android</button><button type="button" id="target-apple" role="tab" aria-selected="false" aria-controls="build-panel" tabindex="-1" data-target="apple">iOS</button><button type="button" class="copy-button" data-copy="build-command" aria-label="Copy native build command">Copy</button></div><div id="build-panel" role="tabpanel" aria-labelledby="target-android" tabindex="0"><pre><code id="build-command">dart run sing_box_flutter build --target android</code></pre><p class="build-requirements" id="build-requirements">Python 3.11+, Git, JDK 17, Android SDK and NDK 28.0.13004108. Flutter packaging also uses NDK 28.2.13676358.</p></div></div></li>
+        <li><div class="step-copy"><h3>Connect through the Flutter API.</h3><p>Build your app against the generated core. Configure your host’s VPN integration, request permission, then start with your sing-box JSON.</p><p>On iOS, create and sign a Packet Tunnel extension with a matching App Group. App-side preflight checks structure and capabilities; full native validation runs before connecting.</p><a class="text-link" href="https://github.com/idy/sing-box-flutter/blob/main/doc/ios-setup.md">iOS host setup <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></div><div class="code-block"><div class="code-topline"><span>Dart · iOS initialization shown</span><button type="button" class="copy-button" data-copy="dart-code" aria-label="Copy Dart VPN example">Copy</button></div><pre><code id="dart-code">final vpn = SingBoxFlutter();
+await vpn.initialize(
+  appGroup: 'group.com.example.app',
+  providerBundleIdentifier:
+      'com.example.app.PacketTunnel',
+);
+await vpn.checkConfig(configJson);
+if (await vpn.requestPermission()) {
+  await vpn.start(config: configJson);
+}</code></pre><p class="code-footnote">Observe <code>vpn.status</code> for the connection outcome. Omit the App Group and provider options on Android.</p></div></li>
+      </ol>
+    </section>
+
+    <section class="resources wrap" aria-labelledby="resources-title"><div><h2 id="resources-title">Go deeper.</h2><p>The setup, the source and the parts you can select.</p></div><ul><li><a href="https://github.com/idy/sing-box-flutter/blob/main/doc/core-features.md">Feature catalogue <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></li><li><a href="https://github.com/idy/sing-box-flutter/blob/main/doc/native-build.md">Native build guide <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></li><li><a href="https://github.com/idy/sing-box-flutter/tree/main/example">Example application <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></li><li><a href="https://pub.dev/packages/sing_box_flutter">Package on pub.dev <svg class="link-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a></li></ul></section>
+  </main>
+  <footer class="wrap site-footer"><div><a class="footer-brand" href="#main">sing_box_flutter</a><p>An independent project by <a href="https://github.com/idy">idy</a>. Built on sing-box.<br>Not affiliated with SagerNet or Tailscale.</p></div><div class="footer-details"><a href="https://github.com/idy/sing-box-flutter/blob/main/LICENSE">GPL-3.0-or-later</a><p>Native builds and simulator checks are verified.<br>Signed-device VPN forwarding remains unverified.</p></div></footer>
+  <p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>
