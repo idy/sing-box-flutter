@@ -1,4 +1,4 @@
-/// Native sing-box VPN control for Android and iOS.
+/// Native sing-box VPN control for Android, iOS and Windows.
 ///
 /// Install the native libbox artifacts and, on iOS, a Packet Tunnel extension
 /// before using this library. See the package README for host setup.
@@ -46,7 +46,7 @@ class SingBoxFlutter {
 
   /// Checks sing-box JSON without connecting.
   ///
-  /// Android validates it using the native engine. iOS performs structural and
+  /// Android and Windows validate it using the native engine. iOS performs structural and
   /// compiled-capability preflight in the app; the extension performs full engine
   /// validation during startup, so a successful preflight cannot guarantee start.
   /// Invalid JSON is rejected locally without including its contents in errors.
@@ -58,7 +58,8 @@ class SingBoxFlutter {
   /// Requests the operating system's VPN permission.
   ///
   /// Returns false when consent is denied or cancelled. Android requires an
-  /// attached Activity; iOS installs the configured VPN profile.
+  /// attached Activity; iOS installs the configured VPN profile. Windows checks
+  /// whether the application is elevated; it does not launch a UAC prompt.
   Future<bool> requestPermission() =>
       SingBoxFlutterPlatform.instance.requestPermission();
 

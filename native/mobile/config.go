@@ -20,13 +20,7 @@ func parseConfig(ctx context.Context, content string) (option.Options, error) {
 	if err != nil || options == nil {
 		return option.Options{}, errors.New("invalid mobile configuration")
 	}
-	// Check the decoder's effective options: native field matching and repeated
-	// objects can differ from a raw JSON map. Opaque application maps stay opaque.
-	canonical, err := json.MarshalContext(ctx, options)
-	if err != nil {
-		return option.Options{}, errors.New("invalid mobile configuration")
-	}
-	if err = checkSelectedCapabilities(string(canonical)); err != nil {
+	if err = checkSelectedCapabilities(*options); err != nil {
 		return option.Options{}, err
 	}
 	return *options, nil
@@ -77,11 +71,8 @@ func (r *validationEndpointRegistry) Create(ctx context.Context, router adapter.
 	if err != nil {
 		return nil, err
 	}
-	switch kind {
-	case C.TypeOpenConnect, C.TypeOpenVPNClient, C.TypeOpenVPNServer:
-		if err = r.cleanup.Start(kind+"["+tag+"]", endpoint, adapter.StartStateInitialize); err != nil {
-			return nil, err
-		}
+	if err = registerConstructorCleanup(r.cleanup, kind+"["+tag+"]", kind, endpoint); err != nil {
+		return nil, err
 	}
 	return endpoint, nil
 }

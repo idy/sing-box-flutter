@@ -63,7 +63,7 @@ def selection_hash(selection: dict) -> str:
 
 def resolve_features(selection: dict, target: str) -> dict:
     requested = canonicalize(selection)
-    if target not in {"android", "apple", "ios"}:
+    if target not in {"android", "apple", "ios", "windows"}:
         raise FeatureError(f"Unsupported core target: {target}")
     unsupported = {
         "inbounds": {"redirect", "tproxy"},
@@ -71,7 +71,7 @@ def resolve_features(selection: dict, target: str) -> dict:
         "dns": {"resolved"},
         "services": {"resolved", "usbip-server", "usbip-client"},
     }
-    if target in {"apple", "ios"}:
+    if target in {"apple", "ios", "windows"}:
         unsupported["outbounds"].add("naive")
     reasons = {
         "redirect": "Linux transparent interception is unavailable to the mobile VPN host",
@@ -86,7 +86,14 @@ def resolve_features(selection: dict, target: str) -> dict:
     for category, denied in unsupported.items():
         invalid = denied.intersection(requested[category])
         if invalid:
-            detail = "; ".join(f"{name}: {reasons[name]}" for name in sorted(invalid))
+            target_reasons = dict(reasons)
+            if target == "windows":
+                target_reasons.update({
+                    "redirect": "Linux transparent interception is unavailable on Windows",
+                    "tproxy": "Linux transparent interception is unavailable on Windows",
+                    "naive": "the Windows core uses CGO_ENABLED=0; Naive requires Cronet/CGO",
+                })
+            detail = "; ".join(f"{name}: {target_reasons[name]}" for name in sorted(invalid))
             raise FeatureError(f"core.{category} unsupported on {target}: {detail}")
     features = {key: list(value) for key, value in requested.items()}
     dependencies = []
@@ -124,12 +131,15 @@ def resolve_features(selection: dict, target: str) -> dict:
             "dependencies": sorted(dependencies), "selection_hash": selection_hash(requested)}
 
 
-def generate_registry(features: dict, extensions: list[dict] | None = None) -> str:
-    """Emit libbox's context, registering only selected component constructors.
+def generate_registry(features: dict, extensions: list[dict] | None = None, *,
+                      target: str = "android") -> str:
+    """Emit the selected mobile/desktop context and component constructors.
 
     Extension records are validated by wgc_overlay.load_extensions; their package
     imports install WGC transport factories via init, without extra endpoints.
     """
+    if target not in {"android", "apple", "ios", "windows"}:
+        raise FeatureError(f"Unsupported registry target: {target}")
     features = canonicalize(features)
     prefix = "github.com/sagernet/sing-box/"
     imports = {
@@ -137,8 +147,11 @@ def generate_registry(features: dict, extensions: list[dict] | None = None) -> s
         prefix + "adapter/inbound": "inbound", prefix + "adapter/outbound": "outbound",
         prefix + "adapter/endpoint": "endpoint", prefix + "dns": "dns",
         prefix + "adapter/service": "boxservice", prefix + "adapter/certificate": "certificate",
-        "github.com/sagernet/sing/service/filemanager": "filemanager",
     }
+    if target == "windows":
+        imports["github.com/sagernet/sing/service"] = "service"
+    else:
+        imports["github.com/sagernet/sing/service/filemanager"] = "filemanager"
     lines = ["\tinboundRegistry := inbound.NewRegistry()", "\toutboundRegistry := outbound.NewRegistry()",
              "\tendpointRegistry := endpoint.NewRegistry()", "\tdnsRegistry := dns.NewTransportRegistry()",
              "\tserviceRegistry := boxservice.NewRegistry()", "\tcertificateRegistry := certificate.NewRegistry()"]
@@ -204,7 +217,7 @@ def generate_registry(features: dict, extensions: list[dict] | None = None) -> s
     # there is no independent registration API for those capabilities at this pin.
     for extension in extensions or []:
         imports[extension["package"]] = "_"
-    if "local" in features["dns"]:
+    if "local" in features["dns"] and target != "windows":
         imports.update({prefix + "adapter": "adapter", prefix + "constant": "C",
                         prefix + "log": "log", prefix + "option": "option"})
         lines.extend([
@@ -213,12 +226,16 @@ def generate_registry(features: dict, extensions: list[dict] | None = None) -> s
             "\t\t\tdns.RegisterTransport[option.LocalDNSServerOptions](dnsRegistry, C.DNSTypeLocal, func(ctx context.Context, logger log.ContextLogger, tag string, options option.LocalDNSServerOptions) (adapter.DNSTransport, error) {",
             "\t\t\t\treturn newPlatformTransport(ctx, logger, localTransport, tag, options)",
             "\t\t\t})", "\t\t}", "\t}"])
-    lines.extend(["\tctx := filemanager.WithDefault(context.Background(), sWorkingPath, sTempPath, sUserID, sGroupID)",
+    context_line = ("\tctx := service.ContextWithRegistry(parent, service.NewRegistry())" if target == "windows" else
+                    "\tctx := filemanager.WithDefault(context.Background(), sWorkingPath, sTempPath, sUserID, sGroupID)")
+    lines.extend([context_line,
                   "\treturn box.Context(ctx, inboundRegistry, outboundRegistry, endpointRegistry, dnsRegistry, serviceRegistry, certificateRegistry)"])
     import_lines = [f'\t{alias + " " if alias else ""}"{path}"' for path, alias in sorted(imports.items())]
     selected_json = json.dumps(features, sort_keys=True, separators=(",", ":"))
-    return ("// Code generated by sing_box_flutter; DO NOT EDIT.\npackage libbox\n\nimport (\n"
+    package = "main" if target == "windows" else "libbox"
+    parameters = "parent context.Context" if target == "windows" else "platformInterface PlatformInterface"
+    return (f"// Code generated by sing_box_flutter; DO NOT EDIT.\npackage {package}\n\nimport (\n"
             + "\n".join(import_lines) + "\n)\n\n"
             + "const selectedFeaturesJSON = `" + selected_json + "`\n\n"
-            + "func baseContext(platformInterface PlatformInterface) context.Context {\n"
+            + f"func baseContext({parameters}) context.Context {{\n"
             + "\n".join(lines) + "\n}\n")

@@ -55,6 +55,7 @@ func TestCheckConfigClosesConstructorStacks(t *testing.T) {
 	for _, tc := range []struct {
 		kind, endpoint string
 	}{
+		{"wireguard", `{"type":"wireguard","tag":"vpn","address":["10.0.0.2/32"],"private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`},
 		{"openconnect", `{"type":"openconnect","tag":"vpn","server":"https://192.0.2.1"}`},
 		{"openvpn-client", fmt.Sprintf(`{"type":"openvpn-client","tag":"vpn","mode":"static_key","cipher":"AES-256-CBC","server":"192.0.2.1","server_port":1194,"address":["10.8.0.2/24"],"peer_address":"10.8.0.1","static_key":%s}`, keyJSON)},
 		{"openvpn-server", fmt.Sprintf(`{"type":"openvpn-server","tag":"vpn","mode":"static_key","cipher":"AES-256-CBC","network":"tcp","listen":"127.0.0.1","listen_port":1194,"address":["10.8.0.1/24"],"peer_address":"10.8.0.2","static_key":%s}`, keyJSON)},
@@ -71,13 +72,11 @@ func TestCheckConfigClosesConstructorStacks(t *testing.T) {
 				}
 				requireValidationWorkers(t, before)
 			}
-			if !slices.Contains(selected["endpoints"], "openconnect") {
-				return
-			}
-			// The first endpoint must be freed even when box.New returns no box.
-			content := `{"endpoints":[` + tc.endpoint + `,{"type":"openconnect","tag":"invalid","server":"https://["}],"route":{"final":"vpn"}}`
+			// Duplicate tags fail after both constructors allocate their devices,
+			// when box.New returns no box whose Close could free either stack.
+			content := `{"endpoints":[` + tc.endpoint + `,` + tc.endpoint + `],"route":{"final":"vpn"}}`
 			if err := CheckConfig(content); err == nil {
-				t.Fatal("later constructor unexpectedly succeeded")
+				t.Fatal("duplicate endpoint tags unexpectedly succeeded")
 			}
 			requireValidationWorkers(t, before)
 		})

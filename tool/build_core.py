@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Build a host-selected mobile core without installing into the shared pub cache."""
+"""Build a host-selected native core without installing into the shared pub cache."""
 from __future__ import annotations
 
 import argparse
 import contextlib
+from functools import partial
 import hashlib
 import json
 import os
@@ -18,12 +19,22 @@ from build_libbox import (bootstrap_go, check_sdks, install_mobile, resolved_tai
                           retain_wgc_license, run, source_checkout)
 from core_features import _unique_object, canonicalize, generate_registry, resolve_features
 from native_common import (BuildError, ROOT, artifact_hashes, build_directory, legal_files,
-                           load_pins, pin_identity, project_lock, sha256, write_json)
+                           file_lock, load_pins, pin_identity, project_lock, selected_sources, sha256, write_json)
+from windows_core import (WINDOWS_ARCHES, build_windows_bundle, load_wintun_lock,
+                          prepare_windows_dependencies, resolve_windows_test_graphs,
+                          validate_windows_bundle, verify_embedded_wintun, windows_sources)
 from wgc_overlay import load_extensions, wgc_overlay
 
 ANDROID_TARGETS = {"armeabi-v7a": "android/arm", "arm64-v8a": "android/arm64",
                    "x86": "android/386", "x86_64": "android/amd64"}
 RECEIPT = Path(".dart_tool/sing_box_flutter/native.json")
+WINDOWS_RECEIPT = Path(".dart_tool/sing_box_flutter/windows.json")
+
+
+def receipt_for_target(target: str) -> Path:
+    # Windows has a different binding and architecture fingerprint. Its active
+    # bundle must not invalidate the same host's Android/Apple artifact pointer.
+    return WINDOWS_RECEIPT if target == "windows" else RECEIPT
 
 
 def canonical_hash(value: dict) -> str:
@@ -31,34 +42,32 @@ def canonical_hash(value: dict) -> str:
 
 
 def mobile_sources(root: Path = ROOT) -> dict[str, str]:
-    directory = root / "native/mobile"
-    if not directory.is_dir() or directory.is_symlink():
-        raise BuildError("The selectable mobile core source is missing")
-    result = {}
-    for path in sorted(directory.rglob("*")):
-        if path.is_symlink():
-            raise BuildError("Selectable core source must not contain symlinks")
-        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(directory).parts):
-            result[path.relative_to(directory).as_posix()] = sha256(path)
-    if not any(name.endswith(".go") for name in result):
-        raise BuildError("The selectable mobile core contains no Go source")
-    return result
+    return selected_sources(root, "mobile")
 
 
-def build_identity(selection: dict, extensions: list[dict], pins: dict, root: Path = ROOT) -> dict:
-    return {"schema": 1, "pins": pin_identity(pins, root), "selection": selection,
-            "mobile_sources": mobile_sources(root),
-            "tooling": {name: sha256(root / "tool" / name) for name in
-                        ("build_core.py", "core_features.py", "build_libbox.py", "native_common.py",
-                         "wgc_overlay.py", "source_inputs.py", "tailscale-go.json")},
-            "extensions": [{key: value for key, value in entry.items() if key != "path"}
-                           for entry in extensions]}
+def build_identity(selection: dict, extensions: list[dict], pins: dict, root: Path = ROOT, *,
+                   target: str = "android", windows_arch: str = "amd64") -> dict:
+    tooling = ["build_core.py", "core_features.py", "build_libbox.py", "native_common.py",
+               "wgc_overlay.py", "source_inputs.py", "tailscale-go.json"]
+    identity = {"schema": 1, "pins": pin_identity(pins, root), "selection": selection,
+                "extensions": [{key: value for key, value in entry.items() if key != "path"}
+                               for entry in extensions]}
+    if target == "windows":
+        if windows_arch not in WINDOWS_ARCHES:
+            raise BuildError("Windows architecture must be amd64 or arm64")
+        identity.update({"target": "windows", "windows_arch": windows_arch,
+                         "windows_sources": windows_sources(root), "wintun": load_wintun_lock(root)})
+        tooling.extend(["windows_core.py", "wintun.json"])
+    else:
+        identity["mobile_sources"] = mobile_sources(root)
+    identity["tooling"] = {name: sha256(root / "tool" / name) for name in tooling}
+    return identity
 
 
 def load_build_request(path: Path, project: Path) -> tuple[dict, str]:
     """Read the immutable Dart handoff, bound to exactly its parsed host bytes."""
     try:
-        request = json.loads(path.read_text(), object_pairs_hook=_unique_object)
+        request = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
         if (not isinstance(request, dict) or set(request) != {"schema", "pubspec", "features"} or
                 type(request["schema"]) is not int or request["schema"] != 1):
             raise ValueError("invalid request envelope")
@@ -101,14 +110,8 @@ def host_path(project: Path, relative: str) -> Path:
 
 @contextlib.contextmanager
 def host_lock(project: Path):
-    import fcntl
     path = host_path(project, ".dart_tool/sing_box_flutter/build.lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise BuildError("Another native build is using this Flutter host project") from error
+    with file_lock(path, "Another native build is using this Flutter host project"):
         yield
 
 
@@ -135,7 +138,7 @@ def mobile_overlay(source: Path, registry: str, expected_sources: dict[str, str]
             shutil.copyfile(path, destination)
             if sha256(destination) != expected_sources[name]:
                 raise BuildError("Mobile core source changed while capturing the build")
-        (original / "registry_selected.go").write_text(registry)
+        (original / "registry_selected.go").write_text(registry, encoding="utf-8")
         yield
     finally:
         if moved:
@@ -150,7 +153,8 @@ def bind_command(env: dict, output: Path, target: str, tags: list[str],
     linker = ("-s -w -buildid= -checklinkname=0 "
               f"-X github.com/sagernet/sing-box/constant.Version={pins['sing_box_version']} "
               f"-X github.com/sagernet/sing-box/experimental/libbox.coreFingerprint={fingerprint}")
-    command: list[str | Path] = [Path(env["GOBIN"]) / "gomobile", "bind", "-v", "-o", output]
+    command: list[str | Path] = [Path(env["GOBIN"]) / ("gomobile.exe" if os.name == "nt" else "gomobile"),
+                               "bind", "-v", "-o", output]
     if target == "android":
         command += ["-target", ",".join(ANDROID_TARGETS[name] for name in android_abis),
                     "-androidapi", "24", "-javapkg=io.nekohasekai", "-libname=box"]
@@ -175,6 +179,8 @@ def validate_artifact(path: Path, target: str) -> None:
                     raise BuildError("The selected core AAR has no native library")
         except (OSError, zipfile.BadZipFile) as error:
             raise BuildError("The selected core did not produce a valid AAR") from error
+    elif target == "windows":
+        validate_windows_bundle(path)
     elif not (path / "Info.plist").is_file():
         raise BuildError("The selected core did not produce a valid XCFramework")
 
@@ -233,7 +239,7 @@ def repair_provenance(final: Path, stage: Path, metadata: dict) -> None:
     """Reuse identical binary bytes, never provenance that no longer describes them."""
     current = final / "native-build.json"
     try:
-        existing = json.loads(current.read_text())
+        existing = json.loads(current.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         existing = None
     if (current.is_symlink() or not isinstance(existing, dict) or
@@ -259,12 +265,18 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
     validate_artifact(output, target)
     hashes = artifact_hashes(output)
     metadata = {**metadata, "artifact_sha256": hashes}
-    content = canonical_hash(hashes)
-    relative = Path(".dart_tool/sing_box_flutter/builds") / capabilities["fingerprint"] / target / content
+    if target == "windows":
+        # One full digest binds both the recipe and per-file contents while keeping
+        # ordinary Windows executable paths below the traditional MAX_PATH limit.
+        content = canonical_hash({"recipe": capabilities["fingerprint"], "artifact": hashes})
+        relative = Path(".dart_tool/sing_box_flutter/builds/windows") / content
+    else:
+        content = canonical_hash(hashes)
+        relative = Path(".dart_tool/sing_box_flutter/builds") / capabilities["fingerprint"] / target / content
     final = host_path(project, relative.as_posix())
     final.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=final.parent))
-    name = "libbox.aar" if target == "android" else "Libbox.xcframework"
+    name = {"android": "libbox.aar", "apple": "Libbox.xcframework", "windows": "WindowsCore"}[target]
     try:
         # Stage small provenance/notice inputs even on a cache hit. Keep the first
         # provenance while it still describes these bytes; repair corrupt metadata
@@ -276,7 +288,7 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, destination)
         if final.exists():
-            if artifact_hashes(final / name) != hashes or json.loads((final / "core-capabilities.json").read_text()) != capabilities:
+            if artifact_hashes(final / name) != hashes or json.loads((final / "core-capabilities.json").read_text(encoding="utf-8")) != capabilities:
                 raise BuildError("An existing content-addressed artifact was modified")
             if target == "android":
                 asset = host_path(project, (relative / "assets/sing_box_flutter/core-capabilities.json").as_posix())
@@ -303,12 +315,12 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
 
 
 def update_receipt(project: Path, capabilities: dict, requested: dict, artifacts: dict,
-                   expected_pubspec_sha256: str | None = None) -> None:
+                   expected_pubspec_sha256: str | None = None, *, receipt_path: Path = RECEIPT) -> None:
     current_pubspec = sha256(project / "pubspec.yaml")
     if expected_pubspec_sha256 is not None and current_pubspec != expected_pubspec_sha256:
         raise BuildError("Host pubspec changed during the native build; select the profile and rebuild")
-    path = host_path(project, RECEIPT.as_posix())
-    previous = json.loads(path.read_text()) if path.exists() else {}
+    path = host_path(project, receipt_path.as_posix())
+    previous = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     retained = previous.get("artifacts", {}) if previous.get("fingerprint") == capabilities["fingerprint"] else {}
     if not isinstance(retained, dict):
         raise BuildError("Malformed existing native core receipt")
@@ -337,11 +349,66 @@ def invalidate_pods(project: Path) -> None:
     manifest.unlink()
 
 
+def build_selected_windows(project: Path, source: Path, go: Path, env: dict, toolchain: dict,
+                           pins: dict, effective: dict, identity: dict, fingerprint: str,
+                           extensions: list[dict], cache: Path) -> tuple[dict, dict]:
+    from windows_core import windows_overlay
+    arch = identity["windows_arch"]
+    capabilities = {"schema": 1, "version": pins["sing_box_version"], "fingerprint": fingerprint,
+                    "features": effective["features"], "windows_arch": arch}
+    stage = Path(tempfile.mkdtemp(prefix="selectable-windows-", dir=cache))
+    output = stage / "WindowsCore"
+    selected_registry = generate_registry(effective["features"], extensions, target="windows")
+    windows_env = {**env, "GOOS": "windows", "GOARCH": arch, "CGO_ENABLED": "0"}
+    try:
+        with windows_overlay(source, selected_registry, identity["windows_sources"]):
+            with contextlib.ExitStack() as stack:
+                wgc = None
+                wgc_license = None
+                tailscale = None
+                if "wgc" in effective["features"]["endpoints"]:
+                    # Resolve only the selected host/target graphs inside WGC's
+                    # checksum guards and module verification, before any execution.
+                    resolver = partial(resolve_windows_test_graphs, arch=arch, tags=effective["tags"])
+                    wgc = stack.enter_context(wgc_overlay(source, go, windows_env, run, extensions,
+                                                          resolve_dependencies=resolver))
+                    wgc_license = retain_wgc_license(go, windows_env, source, cache, pins)
+                else:
+                    windows_env = prepare_windows_dependencies(go, env, source, arch, effective["tags"], run)
+                if "with_tailscale" in effective["tags"]:
+                    tailscale = resolved_tailscale_dependency(go, windows_env, source, pins)
+                wintun = verify_embedded_wintun(go, windows_env, source, arch, identity["wintun"], run)
+                # Exercise the real selected engine graph on the build host;
+                # cross-compiled Windows executables cannot run on macOS/Linux.
+                host_env = {key: value for key, value in env.items() if key not in ("GOOS", "GOARCH")}
+                run([go, "test", "-ldflags=-checklinkname=0", "-tags", ",".join(effective["tags"]),
+                     "./cmd/flutter_windows"], cwd=source, env={**host_env, "CGO_ENABLED": "0"})
+                build_windows_bundle(go, windows_env, source, output, arch, effective["tags"],
+                                     pins, identity["wintun"], run)
+                metadata = {"schema": 1, "mode": "selectable-core", "target": "windows",
+                            "identity": identity, "fingerprint": fingerprint,
+                            "features": effective["features"], "tags": effective["tags"],
+                            "toolchain": toolchain, "windows_arch": arch, "cgo_enabled": False,
+                            "wintun": wintun, "tailscale_dependency": tailscale, "wgc": wgc,
+                            "registry_sha256": hashlib.sha256(selected_registry.encode()).hexdigest()}
+                notices = {**legal_files(wgc_license=wgc_license),
+                           "LICENSE.sing-box": source / "LICENSE", "LICENSE.wintun": output / "LICENSE.wintun"}
+                if "NOTICE" in identity["windows_sources"]:
+                    notices["NOTICE.windows-core"] = ROOT / "native/windows/NOTICE"
+                entry = publish_artifact(project, output, "windows", capabilities, metadata, notices)
+                return {"windows": entry}, capabilities
+    finally:
+        shutil.rmtree(stage)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--features-file", type=Path, required=True)
     result.add_argument("--project-dir", type=Path, required=True)
-    result.add_argument("--target", choices=("apple", "android", "all"), default="all")
+    result.add_argument("--target", choices=("apple", "android", "windows", "all"), default="all",
+                        help="all retains its Android + Apple meaning; Windows is explicit")
+    result.add_argument("--windows-arch", choices=tuple(WINDOWS_ARCHES), default="amd64",
+                        help="Standalone Windows helper architecture (default: amd64)")
     result.add_argument("--android-abis", default=",".join(ANDROID_TARGETS))
     result.add_argument("--apple-platform", choices=("ios", "ios,iossimulator"), default="ios,iossimulator")
     result.add_argument("--wgc-config", type=Path)
@@ -363,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
             raise BuildError("--project-dir must name the Flutter host project containing pubspec.yaml")
         selection, pubspec_sha256 = load_build_request(args.features_file, project)
         if "tun" not in selection["inbounds"]:
-            raise BuildError("A mobile VPN core must include the tun inbound")
+            raise BuildError("A VPN core must include the tun inbound")
         pins = load_pins()
         extensions = load_extensions(args.wgc_config)
         if extensions and "wgc" not in selection.get("endpoints", []):
@@ -379,15 +446,16 @@ def main(argv: list[str] | None = None) -> int:
             raise BuildError("Bootstrap and cache directories must be separate, non-nested work directories")
         targets = ["android", "apple"] if args.target == "all" else [args.target]
         resolved = {target: resolve_features(selection, target) for target in targets}
-        identity = build_identity(selection, extensions, pins)
+        identity = build_identity(selection, extensions, pins, target=targets[0], windows_arch=args.windows_arch)
         fingerprint = canonical_hash(identity)
-        registry = generate_registry(next(iter(resolved.values()))["features"], extensions)
+        registry = generate_registry(next(iter(resolved.values()))["features"], extensions, target=targets[0])
         if args.dry_run:
             print(json.dumps({"mode": "selectable-core", "version": pins["sing_box_version"],
                               "fingerprint": fingerprint, "selection": selection, "resolved": resolved,
                               "registry_sha256": hashlib.sha256(registry.encode()).hexdigest(),
-                              "receipt": RECEIPT.as_posix(), "android_abis": android_abis,
-                              "apple_platform": args.apple_platform, "shared_pub_cache_artifacts": False}, indent=2))
+                              "receipt": receipt_for_target(targets[0]).as_posix(), "android_abis": android_abis,
+                              "apple_platform": args.apple_platform, "windows_arch": args.windows_arch,
+                              "shared_pub_cache_artifacts": False}, indent=2))
             return 0
         # The work lock protects its verified toolchain/source; the host lock
         # also protects per-project receipts across different pub-cache versions.
@@ -403,6 +471,17 @@ def main(argv: list[str] | None = None) -> int:
                 if key in sdk_env:
                     env[key] = sdk_env[key]
             source = source_checkout(pins, bootstrap)
+            if targets == ["windows"]:
+                if args.bootstrap_only:
+                    print("Verified selectable Windows-core compiler is ready.")
+                    return 0
+                artifacts, capabilities = build_selected_windows(project, source, go, env, toolchain, pins,
+                                                                 resolved["windows"], identity, fingerprint,
+                                                                 extensions, cache)
+                update_receipt(project, capabilities, selection, artifacts, pubspec_sha256,
+                               receipt_path=WINDOWS_RECEIPT)
+                print(f"Selectable Windows core built. Receipt: {project / WINDOWS_RECEIPT}")
+                return 0
             mobile, tailscale = install_mobile(go, env, source, pins)
             if args.bootstrap_only:
                 print("Verified selectable-core compiler and mobile tools are ready.")

@@ -41,6 +41,20 @@ dart run sing_box_flutter build --target android
 dart run sing_box_flutter build --target apple
 ```
 
+```sh
+dart run sing_box_flutter build --target windows --windows-arch amd64
+```
+
+Windows builds a standalone selected core with `CGO_ENABLED=0`. The pinned
+sing-tun module embeds the official Wintun DLL; the builder verifies its selected
+module identity and embedded architecture-specific hash before compiling. The
+package-owned official license is retained with the app, with no sidecar driver
+or recurring Wintun ZIP download. Use `--windows-arch arm64` for ARM64 hosts.
+Go core builds run on Windows, macOS and Linux; Flutter Windows packaging requires Windows.
+The Windows target requires a host feature selection. See
+[Windows setup](windows-setup.md) for prerequisites, elevation and packaging.
+`--target all` continues to select Android and Apple only.
+
 The selectable builder generates a small `native/mobile` binding package and only
 the requested constructor registry, then invokes verified gomobile directly. It
 does not use the upstream builder's fixed feature list or its RPC/profile-management
@@ -73,7 +87,7 @@ from `native-core.json`:
 | Upstream mobile module | `github.com/sagernet/gomobile v0.1.12` |
 
 `tool/tailscale-go.json` pins the official release archive SHA-256 for each supported
-macOS/Linux arm64/amd64 host. These digests came from GitHub's asset `digest` values
+macOS/Linux/Windows arm64/amd64 host. These digests came from GitHub's asset `digest` values
 for Tailscale's `build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb` release, with the
 source API URL recorded in the lock. The archive checksum is validated on every
 invocation, then the toolchain is extracted again before any downloaded executable

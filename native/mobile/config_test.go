@@ -46,8 +46,8 @@ func TestParseConfigAcceptsNativeCommentSyntax(t *testing.T) {
 	if !slices.Contains(compiledCapabilities(t)["outbounds"], "direct") {
 		t.Skip("requires direct selected")
 	}
-	// Comment text survives re-encoding inside protocol entries; the capability
-	// gate must still read it like the engine does.
+	// The native decoder owns comment/trailing-comma syntax; the capability
+	// gate reads only the resulting option values.
 	content := "{\"outbounds\":[{\"type\":\"direct\", /* c */ \"tag\":\"d\"},], // c\n\"route\":{\"final\":\"d\"},}"
 	if _, err := parseConfig(mobileBaseContext(nil), content); err != nil {
 		t.Fatalf("commented configuration rejected: %v", err)
@@ -61,10 +61,7 @@ func TestParseConfigRejectsEffectiveMixedCaseTransport(t *testing.T) {
 	}
 	ctx := mobileBaseContext(nil)
 	content := `{"outbounds":[{"type":"vmess","tag":"proxy","server":"192.0.2.1","server_port":443,"uuid":"11111111-1111-4111-8111-111111111111","security":"auto","Transport":{"type":"ws","path":"/private-path"}}]}`
-	// Establish that decoding succeeds and the old raw gate misses the feature.
-	if err := checkSelectedCapabilities(content); err != nil {
-		t.Fatal(err)
-	}
+	// The gate must use the same mixed-case field resolved by native decoding.
 	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(content))
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +69,9 @@ func TestParseConfigRejectsEffectiveMixedCaseTransport(t *testing.T) {
 	transport := options.Outbounds[0].Options.(*option.VMessOutboundOptions).Transport
 	if transport == nil || transport.Type != "ws" {
 		t.Fatal("native decoder did not resolve the mixed-case transport")
+	}
+	if err = checkSelectedCapabilities(options); err == nil {
+		t.Fatal("typed gate accepted the effective unselected transport")
 	}
 	if _, err = parseConfig(ctx, content); err == nil || strings.Contains(err.Error(), "private-path") {
 		t.Fatalf("production parser accepted unselected effective transport: %v", err)
@@ -84,15 +84,15 @@ func TestParseConfigRejectsEffectiveRepeatedECH(t *testing.T) {
 	}
 	ctx := mobileBaseContext(nil)
 	content := `{"http_clients":[{"tag":"test","version":1,"tls":{"ech":{"enabled":true},"ech":{}}}],"route":{"final":"fixture"}}`
-	if err := checkSelectedCapabilities(content); err != nil {
-		t.Fatal(err)
-	}
 	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(content))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if options.HTTPClients[0].TLS == nil || options.HTTPClients[0].TLS.ECH == nil || !options.HTTPClients[0].TLS.ECH.Enabled {
 		t.Fatal("native decoder did not merge the repeated ECH object")
+	}
+	if err = checkSelectedCapabilities(options); err == nil {
+		t.Fatal("typed gate accepted the effective unselected ECH")
 	}
 	if _, err = parseConfig(ctx, content); err == nil {
 		t.Fatal("production parser accepted unselected effective ECH")

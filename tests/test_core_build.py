@@ -126,6 +126,21 @@ class HostArtifacts(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "snapshot"):
             load_build_request(path, self.host)
 
+    def test_request_utf8_non_ascii_path_matches_captured_host_bytes(self):
+        from native_common import sha256
+        host = self.root / "应用 项目"
+        host.mkdir()
+        pubspec = host / "pubspec.yaml"
+        pubspec.write_text("name: host\n# 中文配置\n", encoding="utf-8")
+        document = {"schema": 1, "pubspec": {"path": str(pubspec.resolve()), "sha256": sha256(pubspec)},
+                    "features": {"endpoints": ["wgc"]}}
+        request = host / "请求.json"
+        request.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        self.assertIn("应用 项目".encode("utf-8"), request.read_bytes())
+        features, captured = load_build_request(request, host)
+        self.assertEqual(features["endpoints"], ["wgc"])
+        self.assertEqual(captured, sha256(pubspec))
+
     def test_request_rejects_unbound_or_alternate_manifest(self):
         from native_common import sha256
         path, document = self.request()

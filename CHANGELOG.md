@@ -1,3 +1,12 @@
+## Unreleased
+
+- Add Windows x64/ARM64 support with an app-owned native sing-box process and
+  official Wintun adapter, retaining the public Dart VPN API.
+- Verify selected Windows dependency graphs and sing-tun's embedded Wintun driver
+  before execution; bundle the helper and official license through Flutter CMake
+  with architecture and integrity guards.
+- Add a Windows example runner, elevation setup guide, and Windows packaging CI.
+
 ## 0.3.0
 
 - Select compiled protocols, endpoints, DNS transports, TLS features, APIs and

@@ -1,0 +1,2 @@
+# Preserve the exact upstream prebuilt-binary license checksum on every host.
+/native/windows/LICENSE.wintun -text whitespace=cr-at-eol

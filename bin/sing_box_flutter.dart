@@ -12,6 +12,11 @@ Future<void> main(List<String> arguments) async {
 Build from source (0.3.0):
   dart run sing_box_flutter build --target android
   dart run sing_box_flutter build --target apple
+  dart run sing_box_flutter build --target windows --windows-arch amd64
+
+Windows supports amd64 and arm64, using native Windows or macOS/Linux cross builds.
+The helper embeds the pinned signed Wintun driver and retains its official license.
+--target all continues to mean Android + Apple.
 
 Add sing_box_flutter.core to your host pubspec.yaml to select features.
 Run build from that app; the pinned Tailscale Go toolchain bootstraps automatically.
@@ -55,11 +60,19 @@ Pass --help after a subcommand for its options.''');
     final invocation = resolveHostArguments(arguments.skip(1).toList(),
         callerDirectory: Directory.current, environment: Platform.environment);
     forwarded = invocation.arguments;
+    final windows = requestedCoreTarget(forwarded) == 'windows';
+    if (windows && arguments.first == 'build') script = 'build_core.py';
     // Help must work even if the host selection is incomplete or unsupported.
     if (!forwarded.contains('--help') && !forwarded.contains('-h')) {
       final snapshot = invocation.pubspec == null
           ? null
           : readCoreBuildSnapshot(invocation.pubspec!);
+      if (windows && snapshot == null) {
+        throw const FormatException(
+            'Windows requires a host sing_box_flutter.core selection. '
+            'Add sing_box_flutter: {core: {}} to your pubspec.yaml, then '
+            'run dart run sing_box_flutter build --target windows.');
+      }
       if (snapshot != null) {
         if (arguments.first == 'install') {
           throw const FormatException(
@@ -97,7 +110,7 @@ Pass --help after a subcommand for its options.''');
     }
     final process = await Process.start(
       python,
-      [executable.path, ...forwarded],
+      ['-X', 'utf8', executable.path, ...forwarded],
       workingDirectory: root.path,
       mode: ProcessStartMode.inheritStdio,
     );
@@ -116,6 +129,19 @@ Pass --help after a subcommand for its options.''');
       request.parent.deleteSync(recursive: true);
     }
   }
+}
+
+/// Matches argparse's final --target value, including its equals form.
+String? requestedCoreTarget(List<String> arguments) {
+  String? target;
+  for (var index = 0; index < arguments.length; index++) {
+    if (arguments[index].startsWith('--target=')) {
+      target = arguments[index].substring('--target='.length);
+    } else if (arguments[index] == '--target' && index + 1 < arguments.length) {
+      target = arguments[++index];
+    }
+  }
+  return target;
 }
 
 /// Resolves CLI-owned host selectors while preserving legacy tool arguments.
@@ -257,6 +283,8 @@ Future<String?> _findPython() async {
     try {
       final result = await Process.run(candidate, [
         '-I',
+        '-X',
+        'utf8',
         '-c',
         'import sys; sys.exit(sys.version_info < (3, 11))',
       ]);

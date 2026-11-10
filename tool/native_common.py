@@ -40,14 +40,14 @@ def valid_release_tag(value: str) -> bool:
 
 
 def load_pins(root: Path = ROOT) -> dict:
-    pins = json.loads((root / "native-core.json").read_text())
+    pins = json.loads((root / "native-core.json").read_text(encoding="utf-8"))
     for key in ("sing_box_revision", "tailscale_go_revision"):
         if not re.fullmatch(r"[0-9a-f]{40}", pins.get(key, "")):
             raise BuildError(f"{key} must be a full lowercase git revision")
     for key in ("sing_box_version", "gomobile_version"):
         if not re.fullmatch(r"v?\d+\.\d+\.\d+", pins.get(key, "")):
             raise BuildError(f"Invalid {key}")
-    lock = json.loads((root / "tool/tailscale-go.json").read_text())
+    lock = json.loads((root / "tool/tailscale-go.json").read_text(encoding="utf-8"))
     if lock["revision"] != pins["tailscale_go_revision"]:
         raise BuildError("Toolchain checksum lock does not match native-core.json")
     if pins.get("android_min_sdk") != 24 or pins.get("ios_min_version") != "15.0":
@@ -77,7 +77,7 @@ def sha256(path: Path) -> str:
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 
@@ -91,16 +91,60 @@ def build_directory(path: str | Path, root: Path = ROOT) -> Path:
 
 
 @contextlib.contextmanager
+def file_lock(path: Path, message: str):
+    """Hold an OS-released nonblocking lock, including native Windows builds."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+            # Windows locks a byte range. Ensure byte zero exists and always lock
+            # that byte, regardless of the append handle's current position.
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise BuildError(message) from error
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise BuildError(message) from error
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
 def project_lock(root: Path = ROOT, base: Path | None = None):
-    import fcntl  # Builds support macOS/Linux, including Android cross builds.
     base = build_directory(root / ".build", root) if base is None else base
-    base.mkdir(parents=True, exist_ok=True)
-    with (base / "native-core.lock").open("w") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise BuildError("Another native build/install is using this project") from exc
+    with file_lock(base / "native-core.lock", "Another native build/install is using this project"):
         yield
+
+
+def selected_sources(root: Path, target: str) -> dict[str, str]:
+    """Capture a package-owned helper tree, rejecting symlinked source inputs."""
+    directory = root / "native" / target
+    if not directory.is_dir() or directory.is_symlink():
+        raise BuildError(f"The selectable {target} core source is missing")
+    result = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise BuildError("Selectable core source must not contain symlinks")
+        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(directory).parts):
+            result[path.relative_to(directory).as_posix()] = sha256(path)
+    if not any(name.endswith(".go") for name in result):
+        raise BuildError(f"The selectable {target} core contains no Go source")
+    return result
 
 
 def download(url: str, directory: Path, expected: str | None = None,
@@ -285,7 +329,7 @@ def validate_metadata(metadata: dict, pins: dict, target: str, *, allow_custom: 
         raise BuildError("Release metadata is missing required mobile features")
     if target == "apple" and "with_low_memory" not in tags:
         raise BuildError("Apple release metadata is missing with_low_memory")
-    profile = json.loads((ROOT / "tool/mobile-profile.json").read_text())
+    profile = json.loads((ROOT / "tool/mobile-profile.json").read_text(encoding="utf-8"))
     provenance = metadata.get("mobile_profile", {})
     if (provenance.get("profile_sha256") != sha256(ROOT / "tool/mobile-profile.json")
             or provenance.get("upstream_builder_sha256") != profile["upstream_builder_sha256"]

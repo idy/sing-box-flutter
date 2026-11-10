@@ -36,15 +36,16 @@ def run(args: list[str | Path], *, cwd: Path = ROOT, env: dict | None = None,
     # Never place a download/extraction directory on Python's import path or cwd.
     print("+ " + shlex.join(str(arg) for arg in args), flush=True)
     result = subprocess.run([str(arg) for arg in args], cwd=cwd, env=env, check=True,
-                            text=True, stdout=subprocess.PIPE if capture else None)
+                            text=True, encoding="utf-8", stdout=subprocess.PIPE if capture else None)
     return result.stdout.strip() if capture else ""
 
 
 def host_key() -> str:
-    machine = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}.get(platform.machine())
+    machine = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64",
+               "amd64": "amd64"}.get(platform.machine().lower())
     system = platform.system().lower()
-    if system not in ("darwin", "linux") or machine is None:
-        raise BuildError("Build host must be macOS/Linux arm64 or amd64")
+    if system not in ("darwin", "linux", "windows") or machine is None:
+        raise BuildError("Build host must be macOS/Linux/Windows arm64 or amd64")
     return f"{system}-{machine}"
 
 
@@ -59,6 +60,7 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
         "GOPATH": str(cache / "gopath"), "GOBIN": str(cache / "gopath/bin"),
         "GOCACHE": str(cache / "go-build"), "GOMODCACHE": str(cache / "go-mod"),
         "GOTMPDIR": str(cache / "tmp"), "TMPDIR": str(cache / "tmp"),
+        "TMP": str(cache / "tmp"), "TEMP": str(cache / "tmp"),
         "TEST_TELEMETRY_DIR": str(cache / "telemetry"),
         "GOPROXY": original.get("GOPROXY", "https://proxy.golang.org,direct"),
         "GOSUMDB": "sum.golang.org",
@@ -75,12 +77,12 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
         (cache / name).mkdir(parents=True, exist_ok=True)
     # The Go command's documented test hook also controls compiler counters.
     # Keep even telemetry's disabled mode file inside the project cache.
-    (cache / "telemetry/mode").write_text("off\n")
+    (cache / "telemetry/mode").write_text("off\n", encoding="utf-8")
     return env
 
 
 def bootstrap_go(pins: dict, bootstrap: Path, cache: Path) -> tuple[Path, dict, dict]:
-    lock = json.loads((ROOT / "tool/tailscale-go.json").read_text())
+    lock = json.loads((ROOT / "tool/tailscale-go.json").read_text(encoding="utf-8"))
     key = host_key()
     digest = lock["sha256"][key]
     url = (f"https://github.com/tailscale/go/releases/download/"
@@ -93,7 +95,7 @@ def bootstrap_go(pins: dict, bootstrap: Path, cache: Path) -> tuple[Path, dict, 
         if sha256(cached_archive) != digest:
             raise BuildError("Cached Tailscale Go archive failed SHA-256 verification; remove it and retry")
         # Older caches have no source receipt; do not invent a browser-download origin.
-        source_url = json.loads(cached_source.read_text()).get("url") if cached_source.exists() else None
+        source_url = json.loads(cached_source.read_text(encoding="utf-8")).get("url") if cached_source.exists() else None
         provenance = {"url": source_url if source_url in (url, asset_url) else None,
                       "sha256": digest, "size": cached_archive.stat().st_size, "cached": True}
     else:
@@ -113,12 +115,13 @@ def bootstrap_go(pins: dict, bootstrap: Path, cache: Path) -> tuple[Path, dict, 
     staging = Path(tempfile.mkdtemp(prefix="toolchain-", dir=bootstrap))
     try:
         safe_extract(cached_archive, staging)
-        candidates = [p.parent.parent for p in staging.rglob("bin/go") if p.is_file()]
+        executable = "go.exe" if key.startswith("windows-") else "go"
+        candidates = [p.parent.parent for p in staging.rglob(f"bin/{executable}") if p.is_file()]
         if len(candidates) != 1:
-            raise BuildError("Tailscale Go archive must contain exactly one bin/go")
+            raise BuildError(f"Tailscale Go archive must contain exactly one bin/{executable}")
         extracted = candidates[0]
         version_file = extracted / "VERSION"
-        if not version_file.is_file() or version_file.read_text().splitlines()[0] != lock["version"]:
+        if not version_file.is_file() or version_file.read_text(encoding="utf-8").splitlines()[0] != lock["version"]:
             raise BuildError("Tailscale Go archive VERSION does not match lock")
         goroot = bootstrap / f"tailscale-go-{key}"
         if goroot.exists() or goroot.is_symlink():
@@ -133,8 +136,8 @@ def bootstrap_go(pins: dict, bootstrap: Path, cache: Path) -> tuple[Path, dict, 
         if staging.exists():
             shutil.rmtree(staging)
     env = go_environment(goroot, cache)
-    go = goroot / "bin/go"
-    if Path(shutil.which("go", path=env["PATH"]) or "").resolve() != go.resolve():
+    go = goroot / "bin" / executable
+    if Path(shutil.which(executable, path=env["PATH"]) or "").resolve() != go.resolve():
         raise BuildError("PATH did not select the verified Tailscale Go binary")
     identity = json.loads(run([go, "env", "-json", "GOROOT", "GOTOOLCHAIN", "GOVERSION"], env=env, capture=True))
     if (Path(identity["GOROOT"]).resolve() != goroot.resolve()
@@ -156,7 +159,7 @@ def source_checkout(pins: dict, bootstrap: Path) -> Path:
     git_env = {k: v for k, v in git_env.items() if not k.startswith("GIT_") or k in
                ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT")}
     def git(*args: str, capture: bool = True) -> str:
-        return run(["git", "-c", "core.hooksPath=/dev/null", "-C", source, *args],
+        return run(["git", "-c", f"core.hooksPath={os.devnull}", "-C", source, *args],
                    env=git_env, capture=capture)
     if source.is_symlink():
         raise BuildError("Core checkout must not be a symlink")
@@ -189,10 +192,10 @@ def source_checkout(pins: dict, bootstrap: Path) -> Path:
     for entry in git("ls-files", "--others", "--ignored", "--exclude-standard").splitlines():
         if not any(entry == name or (name.endswith("/") and entry.startswith(name)) for name in allowed):
             raise BuildError("Cached core checkout contains unexpected ignored files")
-    module = (source / "go.mod").read_text()
+    module = (source / "go.mod").read_text(encoding="utf-8")
     if not re.search(rf"(?m)^\s*{re.escape(GOMOBILE_MODULE)}\s+{re.escape(pins['gomobile_version'])}\s*$", module):
         raise BuildError("Core go.mod gomobile version differs from native-core.json")
-    builder = (source / "cmd/internal/build_libbox/main.go").read_text()
+    builder = (source / "cmd/internal/build_libbox/main.go").read_text(encoding="utf-8")
     # Inspect active code, not obsolete commented-out flags.
     active = "\n".join(line.split("//", 1)[0] for line in builder.splitlines())
     for tag in UPSTREAM_REQUIRED_TAGS:
@@ -228,7 +231,7 @@ def mobile_profile_bytes(original: bytes, profile: dict) -> bytes:
 def mobile_profile(source: Path):
     """A single hashed, reversible edit to the official builder's feature list."""
     profile_path = ROOT / "tool/mobile-profile.json"
-    profile = json.loads(profile_path.read_text())
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
     builder = source / "cmd/internal/build_libbox/main.go"
     original = builder.read_bytes()
     patched = mobile_profile_bytes(original, profile)
@@ -244,7 +247,7 @@ def mobile_profile(source: Path):
 
 
 def upstream_tags(source: Path, target: str) -> list[str]:
-    text = (source / "cmd/internal/build_libbox/main.go").read_text()
+    text = (source / "cmd/internal/build_libbox/main.go").read_text(encoding="utf-8")
     active = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
     tags = []
     groups = ["sharedTags", "darwinTags"] if target == "apple" else ["sharedTags"]
@@ -318,8 +321,8 @@ def resolved_tailscale_dependency(go: Path, env: dict, source: Path, pins: dict)
     tailscale = json.loads(network_run([go, "mod", "download", "-json", "github.com/sagernet/tailscale"],
                                        cwd=source, env=env, capture=True))
     dependency_dir = Path(tailscale["Dir"])
-    current = (dependency_dir / "go.toolchain.rev").read_text().strip()
-    next_revision = (dependency_dir / "go.toolchain.next.rev").read_text().strip()
+    current = (dependency_dir / "go.toolchain.rev").read_text(encoding="utf-8").strip()
+    next_revision = (dependency_dir / "go.toolchain.next.rev").read_text(encoding="utf-8").strip()
     verify_dependency_toolchain(pins["tailscale_go_revision"], current, next_revision)
     return {"module": tailscale["Path"], "version": tailscale["Version"],
             "sum": tailscale["Sum"], "go_mod_sum": tailscale["GoModSum"],
@@ -343,7 +346,7 @@ def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict,
                  f"{GOMOBILE_MODULE}/cmd/gobind"], cwd=source, env=env)
     binaries = {}
     for name in ("gomobile", "gobind"):
-        binary = Path(env["GOBIN"]) / name
+        binary = Path(env["GOBIN"]) / (name + (".exe" if os.name == "nt" else ""))
         info = run([go, "version", "-m", binary], env=env, capture=True)
         if (f"\tmod\t{GOMOBILE_MODULE}\t{pins['gomobile_version']}\t" not in info
                 or f"\tpath\t{GOMOBILE_MODULE}/cmd/{name}" not in info):
@@ -371,7 +374,7 @@ def package_target(target: str, pins: dict, cache: Path) -> Path:
     metadata_path = cache / "results" / f"{target}.json"
     if not metadata_path.is_file():
         raise BuildError(f"No verified {target} build metadata; run a build first")
-    metadata = json.loads(metadata_path.read_text())
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     validate_metadata(metadata, pins, target, allow_custom=True)
     artifact = ROOT / ARTIFACTS[target]
     if metadata["artifact_sha256"] != artifact_hashes(artifact):
@@ -497,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
                     write_json(cache / "results" / f"{target}.json", metadata)
             archives = [package_target(target, pins, cache) for target in targets]
             sums = "".join(f"{sha256(path)}  {path.name}\n" for path in archives)
-            (ROOT / ".build/release/SHA256SUMS").write_text(sums)
+            (ROOT / ".build/release/SHA256SUMS").write_text(sums, encoding="utf-8")
             print("Native artifacts and SHA256SUMS are ready in .build/release.")
         return 0
     except (BuildError, OSError, ValueError, KeyError, tarfile.TarError, subprocess.CalledProcessError) as exc:

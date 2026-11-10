@@ -123,6 +123,98 @@ class OverlayTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), original)
             self.assertFalse((source / "include/wgc_flutter.go").exists())
 
+    def test_selected_resolver_scopes_module_updates_and_preserves_extension_guards(self):
+        for selection in ("pinned", "upgraded", "replaced", "changed-sum"):
+            with self.subTest(selection=selection), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source, registry, builder = self.fixture(root)
+                originals = {p: p.read_bytes() for p in (registry, builder, source / "go.mod", source / "go.sum")}
+                entry = {"package": "example.com/transport", "module": "example.com/transport",
+                         "version": "v1.2.3", **EXTENSION_LOCK}
+                dependency = f"example.com/private/dep v1.0.0 {EXTENSION_LOCK['sum']}\n"
+                downloads = self.remote_downloads(root, [entry], dependency)
+                env = {"GOFLAGS": "-mod=readonly -trimpath -buildvcs=false", "GONOSUMDB": "example.com/*"}
+                original_env = dict(env)
+                selected = {"Version": entry["version"], "Sum": entry["sum"], "GoModSum": entry["go_mod_sum"]}
+                if selection == "upgraded":
+                    selected["Version"] = "v1.3.0"
+                elif selection == "replaced":
+                    selected["Replace"] = {"Path": "example.com/other"}
+                elif selection == "changed-sum":
+                    selected["Sum"] = entry["go_mod_sum"]
+
+                def run(args, **kwargs):
+                    self.assertEqual(kwargs["env"], original_env)
+                    if args[1:3] == ["mod", "download"]:
+                        return downloads[args[-1]]
+                    if args[1:3] == ["list", "-m"]:
+                        return json.dumps(selected)
+                    return ""
+
+                runner = mock.Mock(side_effect=run)
+                def resolve(go, resolution_env, selected_source, selected_run):
+                    self.assertEqual(go, Path("go"))
+                    self.assertEqual(selected_source, source)
+                    self.assertIs(selected_run, runner)
+                    self.assertEqual(resolution_env, dict(original_env, GOFLAGS="-mod=mod -trimpath -buildvcs=false"))
+                    self.assertIsNot(resolution_env, env)
+                    sums = (source / "go.sum").read_text()
+                    self.assertIn(dependency, sums)
+                    self.assertIn(f"{entry['module']} {entry['version']} {entry['sum']}\n", sums)
+                    for version, checksum in WGC_LOCK.items():
+                        self.assertIn(f"github.com/idy/wgc {version} {checksum}\n", sums)
+                    (source / "go.mod").write_text("module github.com/sagernet/sing-box\n// selected dependencies\n")
+
+                resolver = mock.Mock(side_effect=resolve)
+                with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                    if selection == "pinned":
+                        with wgc_overlay(source, Path("go"), env, runner, [entry], root,
+                                         resolve_dependencies=resolver) as provenance:
+                            self.assertEqual(runner.call_args_list[-1], mock.call(
+                                [Path("go"), "mod", "verify"], cwd=source, env=original_env))
+                            self.assertEqual(provenance["extensions"], [entry])
+                            self.assertEqual(provenance["go_sum_sha256"], sha256(source / "go.sum"))
+                    else:
+                        with self.assertRaises(BuildError):
+                            with wgc_overlay(source, Path("go"), env, runner, [entry], root,
+                                             resolve_dependencies=resolver):
+                                self.fail("Changed extension reached execution")
+                        self.assertFalse(any(call.args[0][1:3] == ["mod", "verify"] for call in runner.call_args_list))
+                resolver.assert_called_once()
+                self.assertEqual(env, original_env)
+                self.assertFalse(any(call.args[0][1:3] == ["mod", "tidy"] for call in runner.call_args_list))
+                for path, original in originals.items():
+                    self.assertEqual(path.read_bytes(), original)
+                self.assertFalse((source / "include/wgc_flutter.go").exists())
+                self.assertFalse((source / ".wgc-inputs").exists())
+
+    def test_selected_resolution_rejects_unknown_and_changed_trusted_checksums(self):
+        trusted = f"example.com/trusted v1.0.0 {EXTENSION_LOCK['sum']}\n"
+        for change in ("unknown", "changed"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source, registry, builder = self.fixture(root)
+                (source / "go.sum").write_text(trusted)
+                originals = {p: p.read_bytes() for p in (registry, builder, source / "go.mod", source / "go.sum")}
+                runner = mock.Mock(return_value="")
+                def resolve(go, env, source, run):
+                    if change == "unknown":
+                        with (source / "go.sum").open("a") as sums:
+                            sums.write(f"example.com/unknown v1.0.0 {EXTENSION_LOCK['sum']}\n")
+                    else:
+                        (source / "go.sum").write_text(trusted.replace(EXTENSION_LOCK["sum"], EXTENSION_LOCK["go_mod_sum"]))
+                with mock.patch("wgc_overlay.REGISTRY_SHA256", sha256(registry)):
+                    with self.assertRaisesRegex(BuildError, "Unpinned build dependency"):
+                        with wgc_overlay(source, Path("go"), {}, runner, [], root,
+                                         resolve_dependencies=resolve):
+                            self.fail("Untrusted dependency reached execution")
+                self.assertFalse(any(call.args[0][1:3] in (["mod", "tidy"], ["mod", "verify"])
+                                     for call in runner.call_args_list))
+                for path, original in originals.items():
+                    self.assertEqual(path.read_bytes(), original)
+                self.assertFalse((source / "include/wgc_flutter.go").exists())
+                self.assertFalse((source / ".wgc-inputs").exists())
+
     def test_mvs_extension_upgrade_fails_before_compilation_and_restores_inputs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

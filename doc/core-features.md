@@ -1,4 +1,4 @@
-# Selectable mobile core
+# Selectable native core
 
 Version 0.3.0 uses source builds selected by the **host Flutter application's**
 `pubspec.yaml`. Add `sing_box_flutter: ^0.3.0` under `dependencies` and place the
@@ -39,6 +39,15 @@ dart run sing_box_flutter build --target apple
 ```bash
 dart run sing_box_flutter build --target android
 ```
+
+```bash
+dart run sing_box_flutter build --target windows --windows-arch amd64
+```
+
+Windows shares the feature selection and constructor registry, with a native
+Wintun helper instead of the mobile binding. Use `--windows-arch arm64` for ARM64;
+architecture is part of the Windows artifact identity. See
+[Windows setup](windows-setup.md) for packaging and administrator requirements.
 
 Use `--dry-run` to inspect the selection, resolved tags, fingerprint and output
 receipt without downloading Go or compiling. The CLI reads the canonical host

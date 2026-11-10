@@ -575,7 +575,8 @@ class DownloadTests(unittest.TestCase):
 
 class ToolchainDownloadTests(unittest.TestCase):
     HOSTS = {"darwin-amd64": 470759042, "darwin-arm64": 470759043,
-             "linux-amd64": 470759104, "linux-arm64": 470759044}
+             "linux-amd64": 470759104, "linux-arm64": 470759044,
+             "windows-amd64": 470759045, "windows-arm64": 470759138}
 
     def fixture(self, root, key):
         pins = load_pins()
@@ -584,7 +585,8 @@ class ToolchainDownloadTests(unittest.TestCase):
         self.assertEqual(set(lock["sha256"]), set(self.HOSTS))
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w:gz") as archive:
-            for name, content in (("go/bin/go", b"verified executable"),
+            executable = "go.exe" if key.startswith("windows-") else "go"
+            for name, content in ((f"go/bin/{executable}", b"verified executable"),
                                   ("go/VERSION", (lock["version"] + "\n").encode())):
                 info = tarfile.TarInfo(name)
                 info.size, info.mode = len(content), 0o755
@@ -685,6 +687,18 @@ class ToolchainDownloadTests(unittest.TestCase):
 
 
 class ToolchainTests(unittest.TestCase):
+    def test_subprocess_output_and_commands_use_utf8_in_a_non_ascii_directory(self):
+        from build_libbox import run
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve() / "构建 目录"
+            directory.mkdir()
+            command = [sys.executable, "-I", "-X", "utf8", "-c",
+                       'import os; print("命令输出: " + os.getcwd())']
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                output = run(command, cwd=directory, env={**os.environ, "LC_ALL": "C"}, capture=True)
+            self.assertEqual(output, "命令输出: " + str(directory))
+            self.assertIn("命令输出", printed.getvalue())
+
     def test_environment_always_selects_fork_and_project_caches(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

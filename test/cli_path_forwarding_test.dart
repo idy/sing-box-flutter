@@ -7,8 +7,8 @@ import 'package:path/path.dart' as p;
 
 import '../bin/sing_box_flutter.dart' as cli;
 
-Future<ProcessResult> _runBuild(
-    Directory host, Map<String, String> environment) async {
+Future<ProcessResult> _runBuild(Directory host, Map<String, String> environment,
+    {String target = 'android', List<String> extra = const []}) async {
   final root = Directory.current.absolute;
   final packageConfig = File('${root.path}/.dart_tool/package_config.json');
   final packages =
@@ -27,7 +27,8 @@ Future<ProcessResult> _runBuild(
         '--project-dir',
         host.path,
         '--target',
-        'android',
+        target,
+        ...extra,
       ],
       workingDirectory: host.path,
       environment: environment);
@@ -41,7 +42,7 @@ void main() {
 
   setUp(() {
     fixture = Directory.systemTemp.createTempSync('cli-path-forwarding-');
-    caller = Directory.fromUri(fixture.uri.resolve('caller/'))..createSync();
+    caller = Directory.fromUri(fixture.uri.resolve('应用 caller/'))..createSync();
     home = Directory.fromUri(fixture.uri.resolve('home/'))..createSync();
     environment = {
       'HOME': Platform.isWindows ? 'unused-unix-home' : home.path,
@@ -359,20 +360,22 @@ from pathlib import Path
 import sys
 
 host = Path(os.environ['MOCK_HOST'])
-if sys.argv[1:3] == ['-I', '-c']:
+if sys.argv[1:5] == ['-I', '-X', 'utf8', '-c']:
     requests = list((host / '.dart_tool/sing_box_flutter').glob('request-*/request.json'))
     assert len(requests) == 1
     (host / 'pubspec.yaml').write_text('name: host\nsing_box_flutter:\n  core:\n    endpoints: [wireguard]\n')
     raise SystemExit(0)
 
-assert Path(sys.argv[1]).name == 'build_core.py'
+assert sys.argv[1:3] == ['-X', 'utf8']
+assert Path(sys.argv[3]).name == 'build_core.py'
 request = Path(sys.argv[sys.argv.index('--features-file') + 1])
 project = sys.argv[sys.argv.index('--project-dir') + 1]
 Path(os.environ['MOCK_CAPTURE']).write_text(json.dumps({
     'requestPath': str(request),
-    'request': json.loads(request.read_text()),
+    'request': json.loads(request.read_text(encoding='utf-8')),
     'project': project,
-}))
+    'arguments': sys.argv[4:],
+}, ensure_ascii=False), encoding='utf-8')
 raise SystemExit(int(os.environ['MOCK_TOOL_EXIT']))
 ''');
       Process.runSync('/bin/chmod', ['+x', shim.path]);
@@ -381,7 +384,10 @@ raise SystemExit(int(os.environ['MOCK_TOOL_EXIT']))
         'MOCK_HOST': caller.resolveSymbolicLinksSync(),
         'MOCK_CAPTURE': capture.path,
         'MOCK_TOOL_EXIT': '$toolExit',
-      });
+      }, extra: [
+        '--work-dir',
+        '构建 缓存'
+      ]);
       expect(result.exitCode, toolExit,
           reason: '${result.stdout}\n${result.stderr}');
       final observed = jsonDecode(capture.readAsStringSync()) as Map;
@@ -395,6 +401,12 @@ raise SystemExit(int(os.environ['MOCK_TOOL_EXIT']))
       expect(request['features']['dns'], ['local', 'tcp', 'udp']);
       expect(pubspec.readAsStringSync(), contains('endpoints: [wireguard]'));
       expect(observed['project'], caller.resolveSymbolicLinksSync());
+      expect(
+          observed['arguments'],
+          containsAllInOrder([
+            '--work-dir',
+            p.join(caller.resolveSymbolicLinksSync(), '构建 缓存')
+          ]));
       final requestFile = File(observed['requestPath'] as String);
       expect(requestFile.existsSync(), isFalse);
       expect(requestFile.parent.existsSync(), isFalse);
@@ -423,6 +435,49 @@ raise SystemExit(int(os.environ['MOCK_TOOL_EXIT']))
     expect(Directory('${caller.path}/.dart_tool/sing_box_flutter').listSync(),
         isEmpty);
   }, skip: Platform.isWindows);
+
+  test('selects the final native target and preserves architecture options',
+      () {
+    expect(cli.requestedCoreTarget(['--target=windows']), 'windows');
+    expect(
+        cli.requestedCoreTarget(
+            ['--target', 'windows', '--windows-arch', 'arm64']),
+        'windows');
+    expect(cli.requestedCoreTarget(['--target=windows', '--target', 'android']),
+        'android');
+    expect(cli.requestedCoreTarget([]), isNull);
+  });
+
+  test('Windows CLI uses the selected-core builder and forwards arm64',
+      () async {
+    File('${caller.path}/pubspec.yaml')
+        .writeAsStringSync('name: host\nsing_box_flutter:\n  core: {}\n');
+    final result = await _runBuild(caller, {},
+        target: 'windows', extra: ['--windows-arch', 'arm64', '--dry-run']);
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    final plan = jsonDecode(result.stdout as String) as Map;
+    expect(plan['resolved'].keys, ['windows']);
+    expect(plan['windows_arch'], 'arm64');
+    expect(plan['shared_pub_cache_artifacts'], isFalse);
+    expect(Directory('${caller.path}/.dart_tool/sing_box_flutter').listSync(),
+        isEmpty);
+  });
+
+  test('Windows requires an explicit host feature selection', () async {
+    File('${caller.path}/pubspec.yaml').writeAsStringSync('name: host\n');
+    final result = await _runBuild(caller, {}, target: 'windows');
+    expect(result.exitCode, 64);
+    expect(result.stderr,
+        contains('Windows requires a host sing_box_flutter.core selection'));
+  });
+
+  test('Windows help exposes its architecture without a selection', () async {
+    File('${caller.path}/pubspec.yaml').writeAsStringSync('name: host\n');
+    final result =
+        await _runBuild(caller, {}, target: 'windows', extra: ['--help']);
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    expect(result.stdout, contains('--windows-arch'));
+  });
 
   test('Windows falls back to HOMEDRIVE and HOMEPATH', () {
     expect(

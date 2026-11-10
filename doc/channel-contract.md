@@ -1,6 +1,8 @@
 # Native channel contract
 
-This document is the implementation contract for the initial Android and iOS plugin.
+This document is the implementation contract for the Android, iOS and Windows plugin.
+Windows implements the Dart platform interface with JSON-lines IPC to a bundled
+core process; the method/event semantics below are shared across platforms.
 All public documentation is in English. The package is `sing_box_flutter`, and the
 repository is `idy/sing-box-flutter`. Native core inputs are pinned in
 `native-core.json`. Build all Go code with the pinned **Tailscale Go** toolchain.
@@ -21,10 +23,12 @@ repository is `idy/sing-box-flutter`. Native core inputs are pinned in
   native engine validation. iOS performs app-side structural and compiled-capability
   preflight without linking a second Go engine; full engine validation occurs in the
   extension before startup. Returns null when those checks pass, otherwise a platform
-  error. A successful iOS preflight does not guarantee startup. Never include config
+  error. Windows validates against the selected native engine registry. A successful
+  iOS preflight does not guarantee startup. Never include config
   contents, auth keys, or other credentials in error messages.
 - `requestPermission`: returns a boolean. Handles Android's activity result and
-  the Apple VPN configuration consent. Cancellation returns false.
+  the Apple VPN configuration consent. Cancellation returns false. Windows checks
+  process elevation; a non-elevated host returns false without requesting UAC.
 - `start`: arguments `{config: String, name: String}`. Starts the native VPN service.
   Returns null when the start request is accepted; connection state comes from events.
   Do not report connected until the native core and tunnel have started successfully.
@@ -34,7 +38,9 @@ repository is `idy/sing-box-flutter`. Native core inputs are pinned in
 Initialize must complete before all methods except `getVersion`. Methods must report
 errors rather than silently simulating a connection. The VPN survives Flutter event
 subscription cancellation and UI engine detachment. Native services must serialize
-start/stop transitions and handle OS revocation and network changes.
+start/stop transitions and handle OS revocation and network changes. Windows owns
+the core for the lifetime of the host app, closes it on control-pipe EOF and uses
+the engine's native interface monitoring rather than a persistent OS VPN service.
 
 ## Events
 

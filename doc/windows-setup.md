@@ -1,0 +1,131 @@
+# Windows and Wintun
+
+The Windows backend runs a host-selected sing-box core in a bundled helper
+process. sing-box creates the native TUN interface with the official Wintun DLL;
+Flutter uses the same `SingBoxFlutter` API as Android and iOS. Windows 10 or newer
+is required. Core builds support x64 (`amd64`) and ARM64 (`arm64`); the Flutter
+runner and the core must have matching architectures.
+
+## Build the selected core
+
+Install Flutter 3.47.2+, Python 3.11+, Git, and Visual Studio's **Desktop development
+with C++** workload, including the Windows SDK and CMake. Flutter's Windows
+packaging runs on Windows. The Go core can also be cross-compiled on macOS/Linux.
+
+Add `sing_box_flutter.core` to the host app's pubspec, for example:
+
+```yaml
+sing_box_flutter:
+  core:
+    inbounds: [tun]
+    outbounds: [direct]
+    endpoints: [wgc]
+    dns: [udp, tcp, fakeip]
+```
+
+Run from the Flutter host app:
+
+```bash
+flutter pub get
+```
+
+```bash
+dart run sing_box_flutter build --target windows --windows-arch amd64
+```
+
+```bash
+flutter build windows --release
+```
+
+For an ARM64 host, select `--windows-arch arm64` when building the core and
+`--target-platform windows-arm64` when building Flutter. No system Go installation
+or MinGW compiler is required. The builder downloads and verifies the pinned
+Tailscale Go compiler and selected Go dependencies. The pinned sing-tun module
+embeds the official Wintun 0.14.1 driver for each architecture and loads it through
+its in-memory loader. Before compiling, the builder verifies the selected module
+path, version and checksum, then checks the embedded resource against
+`tool/wintun.json`. It never downloads a separate Wintun ZIP or bundles a sidecar DLL.
+
+Windows requires a host feature selection; the historical mobile `install`
+command cannot provide a Windows core. `--target all` retains its Android + Apple
+meaning, so build Windows explicitly.
+
+Artifacts stay in the host's `.dart_tool/sing_box_flutter/`, with a receipt bound
+to the host pubspec, selected features, native source, compiler pins, Wintun hashes,
+and architecture. The Windows pointer is `windows.json`; mobile cores retain their
+separate `native.json`, so building one platform does not replace the other's
+active artifact. Windows artifacts use
+`builds/windows/<combined-sha256>/WindowsCore`, where the full digest binds the
+recipe fingerprint and all artifact file hashes. Full recipe and file identities
+remain in the receipt and build metadata. CMake validates the path and digest in
+one read-only invocation, then rechecks the configured pair before every build.
+It bundles `sing_box_flutter_core.exe` beside the host executable and installs
+capabilities, build provenance, and notices under `sing_box_flutter/`. The exact
+official driver license is package-owned at `native/windows/LICENSE.wintun` and
+retained under `sing_box_flutter/Legal/LICENSE.wintun` in the app.
+Keep the complete Flutter release directory together when distributing the app.
+Rebuild the core after changing its feature selection or updating the plugin.
+A normal Flutter build reports a missing/stale core instead of downloading one.
+
+## Administrator privileges
+
+Creating a Wintun adapter and changing routes requires an elevated application.
+`requestPermission()` checks the helper's inherited process token and returns
+`false` when it is not elevated. `start()` reports `permission_denied` in that
+case. These methods do not relaunch the app or prompt for UAC.
+
+Either launch the built host with **Run as administrator**, or add the following
+to the host's `windows/runner/runner.exe.manifest`:
+
+```xml
+<trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+  <security>
+    <requestedPrivileges>
+      <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+    </requestedPrivileges>
+  </security>
+</trustInfo>
+```
+
+The checked-in example includes this manifest. Launch its built executable to
+accept the Windows UAC prompt. For `flutter run`, use an elevated terminal so
+Flutter can launch the runner. A plugin cannot change the host's manifest.
+
+## Configuration and lifecycle
+
+Use complete sing-box JSON with a `tun` inbound, `auto_route: true`, and
+`route.auto_detect_interface: true` to avoid routing the outbound connection back
+into the tunnel. The example's direct-routing configuration works on Windows.
+`stack: "gvisor"` is available when the selected core includes TUN.
+
+`initialize()` creates application storage under
+`%LOCALAPPDATA%/<host executable name>/sing_box_flutter`. The Apple identifiers and
+Android notification title are not used on Windows. `checkConfig()` parses against
+the selected native registry and validates the engine before connecting.
+Configurations travel through an anonymous process pipe, never command-line
+arguments or a temporary config file. Native protocol diagnostics are suppressed;
+platform errors and status events use fixed messages.
+
+`start()` acknowledges an accepted request. Observe the status stream for
+`connecting`, `connected`, or `error`. Cancelling subscriptions and rebuilding a
+widget do not stop the VPN. Call `stop()` to close sing-box, restore routes, and
+release Wintun. The helper closes the core when its control pipe reaches EOF,
+including when the app exits. Unlike the mobile system services, Windows does not
+install a persistent background service: the tunnel belongs to the running app.
+
+## Validation
+
+After resolving overlays, the build loads the selected host and Windows test
+dependency graphs with plain `go list -deps -test`, then runs `go mod verify`
+before any tests or compilation. It avoids downloading unused module variants.
+It runs helper protocol/lifecycle tests on the build host and cross-compiles the
+selected Windows core. Windows CI also packages the Flutter example and enables
+`SING_BOX_FLUTTER_WINTUN_SMOKE=1` for a real Wintun adapter lifecycle test. That test
+requires elevation, starts a uniquely named adapter with `auto_route: false`,
+closes the native core, and verifies adapter removal while preserving the runner's
+default routes and DNS policy. Ordinary builds skip this opt-in test.
+These checks do not establish external VPN connectivity. Before shipping,
+test on an elevated Windows machine: adapter creation, DNS, IPv4/IPv6, outbound
+route bypass, Wi-Fi/Ethernet changes, sleep/resume, start failure, explicit stop,
+and app exit cleanup. Do not run real traffic tests in a job that depends on the
+network routes being changed.

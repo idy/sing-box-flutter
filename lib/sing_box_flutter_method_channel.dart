@@ -5,6 +5,7 @@ import 'sing_box_flutter_platform_interface.dart';
 import 'src/events.dart';
 
 /// Uses the native Android or iOS sing-box method and event channels.
+/// Windows registers its own pipe-based implementation of the same platform API.
 class MethodChannelSingBoxFlutter extends SingBoxFlutterPlatform {
   /// Shared control channel.
   @visibleForTesting
