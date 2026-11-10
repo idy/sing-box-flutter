@@ -22,7 +22,7 @@ func TestWintunAdapterLifecycle(t *testing.T) {
 	if !isElevated() {
 		t.Fatal("the Wintun smoke test requires an elevated Windows process")
 	}
-	working := t.TempDir()
+	working := filepath.Join(t.TempDir(), "private")
 	for _, directory := range []string{working, filepath.Join(working, "cache"), filepath.Join(working, "tmp")} {
 		if err := privateDirectory(directory); err != nil {
 			t.Fatalf("could not prepare smoke-test storage: %v", err)

@@ -23,6 +23,7 @@ class SingBoxFlutter {
   /// Android uses [notificationTitle] for its foreground-service notification.
   /// Windows requires a unique, stable [applicationId] shared by all versions of
   /// this application. Its case-sensitive value identifies persistent storage.
+  /// Windows storage initialization requires an elevated application.
   Future<void> initialize({
     String? applicationId,
     String? appGroup,
@@ -43,8 +44,19 @@ class SingBoxFlutter {
     if (notificationTitle.trim().isEmpty) {
       throw ArgumentError('The notification title must not be empty.');
     }
-    return SingBoxFlutterPlatform.instance.initialize(
-      applicationId: applicationId,
+    final platform = SingBoxFlutterPlatform.instance;
+    if (platform is SingBoxFlutterApplicationIdentity) {
+      if (applicationId == null) {
+        throw ArgumentError(
+            'This platform requires a stable applicationId when initializing the VPN.');
+      }
+      return (platform as SingBoxFlutterApplicationIdentity)
+          .initializeForApplication(
+        applicationId: applicationId,
+        notificationTitle: notificationTitle,
+      );
+    }
+    return platform.initialize(
       appGroup: appGroup,
       providerBundleIdentifier: providerBundleIdentifier,
       notificationTitle: notificationTitle,

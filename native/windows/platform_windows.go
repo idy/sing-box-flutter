@@ -46,20 +46,24 @@ func privateDirectory(path string) error {
 		return err
 	}
 	defer directories.close()
-	handle, err := directories.openChild(directories.last(), parts[len(parts)-1], true, descriptor)
-	if err != nil {
-		return err
-	}
-	return setPrivateDirectorySecurity(handle, descriptor)
+	_, err = directories.openChild(directories.last(), parts[len(parts)-1], true, descriptor)
+	return err
 }
 
 func privateDirectorySecurity() (*windows.SECURITY_DESCRIPTOR, error) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	return privateDirectorySecurityForToken(windows.GetCurrentProcessToken())
+}
+
+func privateDirectorySecurityForToken(token windows.Token) (*windows.SECURITY_DESCRIPTOR, error) {
+	if !token.IsElevated() {
+		return nil, errDirectories
+	}
+	user, err := token.GetTokenUser()
 	if err != nil {
 		return nil, err
 	}
 	var size uint32
-	err = windows.GetTokenInformation(windows.GetCurrentProcessToken(), windows.TokenIntegrityLevel, nil, 0, &size)
+	err = windows.GetTokenInformation(token, windows.TokenIntegrityLevel, nil, 0, &size)
 	if err != windows.ERROR_INSUFFICIENT_BUFFER || size < uint32(unsafe.Sizeof(windows.Tokenmandatorylabel{})) {
 		if err != nil {
 			return nil, err
@@ -67,29 +71,83 @@ func privateDirectorySecurity() (*windows.SECURITY_DESCRIPTOR, error) {
 		return nil, errDirectories
 	}
 	buffer := make([]byte, size)
-	if err := windows.GetTokenInformation(windows.GetCurrentProcessToken(), windows.TokenIntegrityLevel, &buffer[0], size, &size); err != nil {
+	if err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, &buffer[0], size, &size); err != nil {
 		return nil, err
 	}
-	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buffer[0])).Label.Sid.String()
+	sid := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buffer[0])).Label.Sid
+	if sid.IdentifierAuthority() != windows.SECURITY_MANDATORY_LABEL_AUTHORITY || sid.SubAuthorityCount() != 1 || sid.SubAuthority(0) < 0x3000 {
+		return nil, errDirectories // Never create Medium state on a first launch.
+	}
+	label := sid.String()
 	// Keep user+SYSTEM full control. An inheritable no-write-up label at the
 	// process integrity level (high for the elevated helper) prevents a lower
 	// integrity process with the same user SID from changing managed state.
 	// This is local to these objects; no token privilege or global policy changes.
-	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")S:(ML;OICI;NW;;;" + label + ")")
+	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")S:P(ML;OICI;NW;;;" + label + ")")
 }
 
-func setPrivateDirectorySecurity(handle windows.Handle, descriptor *windows.SECURITY_DESCRIPTOR) error {
-	dacl, _, err := descriptor.DACL()
+// Existing objects are never upgraded: a previously granted WRITE_OWNER or
+// WRITE_DAC handle survives ACL/label changes and could undo an in-place seal.
+// Only objects created with the required policy can be safely adopted here.
+func verifyPrivateObject(handle windows.Handle, expected *windows.SECURITY_DESCRIPTOR, directory bool) error {
+	actual, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
-	label, _, err := descriptor.SACL()
-	if err != nil {
-		return err
+	dacl, _, err := actual.DACL()
+	if err != nil || dacl == nil {
+		return errDirectories
 	}
-	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION,
-		nil, nil, dacl, label)
+	wantDACL, _, err := expected.DACL()
+	if err != nil || !samePrivateACL(dacl, wantDACL, directory, false) {
+		return errDirectories
+	}
+	label, _, err := actual.SACL()
+	if err != nil || label == nil {
+		return errDirectories
+	}
+	wantLabel, _, err := expected.SACL()
+	if err != nil || !samePrivateACL(label, wantLabel, directory, true) {
+		return errDirectories
+	}
+	return nil
+}
+
+func samePrivateACL(actual, expected *windows.ACL, directory, label bool) bool {
+	if actual == nil || expected == nil || actual.AceCount != expected.AceCount {
+		return false
+	}
+	used := make([]bool, expected.AceCount)
+	for i := uint32(0); i < uint32(actual.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(actual, i, &ace) != nil ||
+			ace.Header.AceFlags & ^uint8(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE|windows.INHERITED_ACE) != 0 ||
+			directory && ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) != windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE {
+			return false
+		}
+		typeExpected := uint8(windows.ACCESS_ALLOWED_ACE_TYPE)
+		if label {
+			typeExpected = 0x11 // SYSTEM_MANDATORY_LABEL_ACE_TYPE
+		}
+		if ace.Header.AceType != typeExpected {
+			return false
+		}
+		matched := false
+		for j := uint32(0); j < uint32(expected.AceCount); j++ {
+			var want *windows.ACCESS_ALLOWED_ACE
+			if windows.GetAce(expected, j, &want) != nil {
+				return false
+			}
+			if !used[j] && ace.Mask == want.Mask && windows.EqualSid((*windows.SID)(unsafe.Pointer(&ace.SidStart)), (*windows.SID)(unsafe.Pointer(&want.SidStart))) {
+				used[j], matched = true, true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 // Accept only clean, drive-absolute paths and literal directory components.
@@ -115,13 +173,9 @@ func secureDirectoryPath(path string) (string, []string, error) {
 	return root, parts, nil
 }
 
-// Retain the entire chain, not just the target, denying write/delete sharing
-// to reject pre-existing mutation handles and prevent rename/reparse swaps.
-// Private targets additionally deny read sharing, preventing SetSecurityInfo
-// from propagating inheritable ACEs to unverified existing descendants.
-// cache and tmp are secured explicitly; new descendants inherit the DACL.
-// https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
-// There is no path-based security write after any component is opened.
+// Retain the entire chain, denying write/delete sharing to prevent
+// rename/reparse swaps. All private policy is supplied at FILE_CREATE;
+// existing objects are verified without any security mutation.
 type directoryHandles struct {
 	handles []windows.Handle
 }
@@ -229,21 +283,34 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 	if err != nil {
 		return 0, err
 	}
+	objectFlags := uint32(windows.OBJ_DONT_REPARSE)
+	if parent == 0 {
+		objectFlags |= windows.OBJ_CASE_INSENSITIVE // Only the volume root.
+	} else {
+		sensitive, err := directoryCaseSensitive(parent)
+		if err != nil {
+			return 0, err
+		}
+		if !sensitive {
+			objectFlags |= windows.OBJ_CASE_INSENSITIVE
+		}
+	}
 	attributes := windows.OBJECT_ATTRIBUTES{
 		RootDirectory: parent, ObjectName: objectName,
-		Attributes:         windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
-		SecurityDescriptor: descriptor,
+		Attributes: objectFlags, SecurityDescriptor: descriptor,
 	}
 	attributes.Length = uint32(unsafe.Sizeof(attributes))
 	access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
 	share := uint32(windows.FILE_SHARE_READ)
 	if descriptor != nil {
-		access |= windows.READ_CONTROL | windows.WRITE_DAC | windows.WRITE_OWNER
-		share = 0 // Suppress automatic ACL propagation to unverified children.
+		access |= windows.READ_CONTROL
+	}
+	if write {
+		share = 0 // Exclusive, handle-relative ownership lease.
 	}
 	disposition := uint32(windows.FILE_OPEN)
 	if create {
-		disposition = windows.FILE_OPEN_IF
+		disposition = windows.FILE_CREATE
 	}
 	options := uint32(windows.FILE_DIRECTORY_FILE)
 	fileAttributes := uint32(windows.FILE_ATTRIBUTE_DIRECTORY)
@@ -257,9 +324,19 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 	}
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(&handle, access, &attributes, &status, nil,
-		fileAttributes, share, disposition,
-		options|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	open := func() error {
+		return windows.NtCreateFile(&handle, access, &attributes, &status, nil,
+			fileAttributes, share, disposition,
+			options|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	}
+	err = open()
+	if create && err == windows.STATUS_OBJECT_NAME_COLLISION {
+		// Atomic creation did not win. Open the existing object without any
+		// creation security descriptor and verify it; never repair its policy.
+		disposition = windows.FILE_OPEN
+		attributes.SecurityDescriptor = nil
+		err = open()
+	}
 	if err != nil {
 		if handle != 0 && handle != windows.InvalidHandle {
 			windows.CloseHandle(handle)
@@ -293,6 +370,28 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 			return 0, errDirectories
 		}
 	}
+	if descriptor != nil {
+		if err := verifyPrivateObject(handle, descriptor, directory); err != nil {
+			windows.CloseHandle(handle)
+			return 0, err
+		}
+	}
 	d.handles = append(d.handles, handle)
 	return handle, nil
+}
+
+func directoryCaseSensitive(handle windows.Handle) (bool, error) {
+	var flags uint32
+	err := windows.GetFileInformationByHandleEx(handle, windows.FileCaseSensitiveInfo,
+		(*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags)))
+	if err == windows.ERROR_INVALID_PARAMETER || err == windows.ERROR_NOT_SUPPORTED || err == windows.ERROR_INVALID_FUNCTION {
+		return false, nil // Older Windows/filesystems cannot enable this flag.
+	}
+	if err != nil {
+		return false, err
+	}
+	if flags & ^uint32(windows.FILE_CS_FLAG_CASE_SENSITIVE_DIR) != 0 {
+		return false, errDirectories
+	}
+	return flags&windows.FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0, nil
 }

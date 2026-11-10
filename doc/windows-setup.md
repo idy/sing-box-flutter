@@ -70,9 +70,10 @@ A normal Flutter build reports a missing/stale core instead of downloading one.
 ## Administrator privileges
 
 Creating a Wintun adapter and changing routes requires an elevated application.
-`requestPermission()` checks the helper's inherited process token and returns
-`false` when it is not elevated. `start()` reports `permission_denied` in that
-case. These methods do not relaunch the app or prompt for UAC.
+Secure storage initialization also requires elevation and fails before creating
+managed state when the helper is not elevated. `requestPermission()` checks the
+helper's inherited process token; `start()` also enforces elevation. These methods
+do not relaunch the app or prompt for UAC.
 
 Either launch the built host with **Run as administrator**, or add the following
 to the host's `windows/runner/runner.exe.manifest`:
@@ -104,17 +105,23 @@ version, including updates that change the executable directory. Independently
 operated applications must use different IDs. Android and iOS ignore this option.
 
 `initialize()` creates application storage under
-`%LOCALAPPDATA%/<short application ID>-<application ID SHA-256>/sing_box_flutter`.
-Executable paths and filename case do not determine the namespace. Changing the
-ID intentionally selects separate empty storage; no ambiguous path-based cache
-is automatically adopted.
+`%LOCALAPPDATA%/v1-<short application ID>-<application ID SHA-256>/sing_box_flutter`.
+The fixed `v1-` prefix identifies the secure storage format and stays constant
+across application updates. Executable paths and filename case do not determine
+the namespace. Changing the ID intentionally selects separate empty storage.
+Earlier unreleased path-based or in-place-sealed storage is left untouched and
+is not automatically adopted.
+
 Storage must be on a local volume with persistent ACL support and no reparse-point
-ancestors. Directory creation, lease acquisition and private ACL changes use
-verified, pinned handles retained until all core/check cleanup completes. Existing
-regular single-link state keeps its contents while receiving private ACLs and
-inheritable no-write-up labels at the helper's integrity level. Reparse points and
-multi-linked state are rejected. Storage previously sealed by an elevated helper
-requires administrator privileges when reopened; normal cache and temporary-file
+ancestors. The helper creates managed objects atomically with private ACLs and
+no-write-up labels, and retains verified directory and lease handles until all
+core/check cleanup completes. Existing objects are verified without rewriting
+their security descriptors: private single-link state with the required integrity
+label keeps its contents across restarts. Unsafe ACLs, insufficient integrity,
+reparse points and multi-linked state cause initialization to fail without
+repairing or adopting those objects. Directory entries are checked by file
+identity, including distinct names in case-sensitive directories. Administrator
+privileges are required to create or reopen storage; normal cache and temporary-file
 features remain enabled.
 The Apple identifiers and Android notification title are not used on Windows. `checkConfig()` parses against
 the selected native registry and validates the engine before connecting.

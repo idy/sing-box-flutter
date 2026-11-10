@@ -209,7 +209,7 @@ func TestSecureDirectoriesRejectReparseWithoutChangingTargetACL(t *testing.T) {
 	}
 }
 
-func TestSecureDirectoryHandlesBlockMutationDuringACLWrite(t *testing.T) {
+func TestSecureDirectoryHandlesBlockMutationDuringVerification(t *testing.T) {
 	base := directoryTestCacheRoot(t)
 	descriptor, err := privateDirectorySecurity()
 	if err != nil {
@@ -233,8 +233,8 @@ func TestSecureDirectoryHandlesBlockMutationDuringACLWrite(t *testing.T) {
 	outside := t.TempDir()
 	before := directoryDACL(t, outside)
 	data := directoryJunctionData(t, outside)
-	// Deterministically attempt mutation while the same verified handles used
-	// for creation and SetSecurityInfo remain open. No timing-dependent swap.
+	// Deterministically attempt mutation while verified creation/storage
+	// handles remain open. No timing-dependent swap.
 	for _, path := range []string{base, hostPath, workingPath} {
 		if err := os.Rename(path, path+"-moved"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 			t.Fatalf("pinned directory rename should fail with sharing violation: %s, %v", path, err)
@@ -252,7 +252,7 @@ func TestSecureDirectoryHandlesBlockMutationDuringACLWrite(t *testing.T) {
 		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 			t.Fatalf("reparse mutation should be blocked by sharing: %s, %v", path, err)
 		}
-		if err := setPrivateDirectorySecurity(working, descriptor); err != nil {
+		if err := verifyPrivateObject(working, descriptor, true); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -283,7 +283,14 @@ func TestSecureDirectoriesRejectExistingMutationHandles(t *testing.T) {
 			working := filepath.Join(host, "sing_box_flutter")
 			paths := map[string]string{"base": base, "host": host, "working": working}
 			path := paths[position]
-			if err := os.MkdirAll(path, 0o700); err != nil {
+			if position == "working" {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := privateDirectory(path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.MkdirAll(path, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			before := directoryDACL(t, path)
@@ -330,11 +337,14 @@ func TestPrivateDirectoryACLAndNoUnverifiedPropagation(t *testing.T) {
 	outside := t.TempDir()
 	createDirectoryJunction(t, filepath.Join(path, "junction"), outside)
 	existingBefore, outsideBefore := directoryDACL(t, existing), directoryDACL(t, outside)
+	rootBefore := directoryDACL(t, path)
 	for range 2 {
-		if err := privateDirectory(path); err != nil {
-			t.Fatal(err)
+		if privateDirectory(path) == nil {
+			t.Fatal("adopted unsafe existing storage")
 		}
-		assertPrivateStorageACL(t, path, true, false)
+		if after := directoryDACL(t, path); after != rootBefore {
+			t.Fatalf("changed rejected existing root: %s -> %s", rootBefore, after)
+		}
 		if after := directoryDACL(t, existing); after != existingBefore {
 			t.Fatalf("ACL write propagated to an unverified child: %s -> %s", existingBefore, after)
 		}
@@ -342,12 +352,25 @@ func TestPrivateDirectoryACLAndNoUnverifiedPropagation(t *testing.T) {
 			t.Fatalf("ACL write followed a descendant junction: %s -> %s", outsideBefore, after)
 		}
 	}
-	// New children must still inherit full control for the user and SYSTEM.
-	child := filepath.Join(path, "new-child")
+	// A fresh private object is protected atomically; inherited native children
+	// can subsequently be verified without any security-descriptor rewriting.
+	fresh := filepath.Join(base, "fresh")
+	if err := privateDirectory(fresh); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivateStorageACL(t, fresh, true, false)
+	child := filepath.Join(fresh, "new-child")
 	if err := os.Mkdir(child, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	assertPrivateStorageACL(t, child, false, true)
+	childBefore := directoryDACL(t, child)
+	if err := privateDirectory(child); err != nil {
+		t.Fatal(err)
+	}
+	if after := directoryDACL(t, child); after != childBefore {
+		t.Fatal("rewrote safe inherited policy")
+	}
 	moved := path + "-moved"
 	if err := os.Rename(path, moved); err != nil {
 		t.Fatalf("privateDirectory retained a handle after success: %v", err)

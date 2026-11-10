@@ -18,6 +18,9 @@ func directoryTestCacheRoot(t *testing.T) string {
 	}
 	switch runtime.GOOS {
 	case "windows":
+		if !isElevated() {
+			t.Skip("secure Windows storage requires an elevated test process")
+		}
 		t.Setenv("LOCALAPPDATA", root)
 	case "darwin":
 		t.Setenv("HOME", root)

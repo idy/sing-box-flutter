@@ -445,9 +445,9 @@ void main() {
         first, SingBoxFlutterWindows.applicationStorageName('dev.example.Vpn'));
     expect(first,
         isNot(SingBoxFlutterWindows.applicationStorageName('dev.example.vpn')));
-    expect(first, matches(RegExp(r'^dev_example_Vpn-[a-f0-9]{64}$')));
+    expect(first, matches(RegExp(r'^v1-dev_example_Vpn-[a-f0-9]{64}$')));
     expect(SingBoxFlutterWindows.applicationStorageName('a' * 128).length,
-        lessThanOrEqualTo(89));
+        lessThanOrEqualTo(92));
     for (final invalid in ['', ' app', 'app ', 'app/id', 'a' * 129]) {
       expect(() => SingBoxFlutterWindows.applicationStorageName(invalid),
           throwsArgumentError);

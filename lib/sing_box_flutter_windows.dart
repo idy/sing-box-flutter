@@ -16,7 +16,8 @@ import 'src/windows_core_client.dart';
 ///
 /// The application must run elevated to create a Wintun adapter. The tunnel is
 /// owned by the application process; cancelling a subscription does not stop it.
-class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
+class SingBoxFlutterWindows extends SingBoxFlutterPlatform
+    implements SingBoxFlutterApplicationIdentity {
   /// Creates the Windows platform implementation.
   SingBoxFlutterWindows();
 
@@ -51,7 +52,9 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
     final prefix =
         readable.substring(0, readable.length > 24 ? 24 : readable.length);
     final identity = sha256.convert(utf8.encode(applicationId));
-    return '$prefix-$identity';
+    // This storage format only reopens objects protected at creation. Keep its
+    // namespace separate from earlier, unreleased in-place-sealed storage.
+    return 'v1-$prefix-$identity';
   }
 
   Future<Process> Function(String executable)? _launcher;
@@ -170,6 +173,16 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
   Future<Object?> _invokeInitialized(String method,
           [Map<String, Object?>? arguments]) async =>
       (await _initializedCore()).invoke(method, arguments);
+
+  @override
+  Future<void> initializeForApplication({
+    required String applicationId,
+    required String notificationTitle,
+  }) =>
+      initialize(
+        applicationId: applicationId,
+        notificationTitle: notificationTitle,
+      );
 
   @override
   Future<void> initialize({

@@ -25,7 +25,6 @@ class MethodChannelSingBoxFlutter extends SingBoxFlutterPlatform {
 
   @override
   Future<void> initialize({
-    String? applicationId,
     String? appGroup,
     String? providerBundleIdentifier,
     required String notificationTitle,

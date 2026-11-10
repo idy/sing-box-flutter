@@ -17,28 +17,15 @@ import (
 func TestStorageLeasePinsHierarchyAndPersistedStateUntilClose(t *testing.T) {
 	base := directoryTestCacheRoot(t)
 	working := filepath.Join(base, " Leading Host", "sing_box_flutter")
+	if err := initializeDirectories(working); err != nil {
+		t.Fatal(err)
+	}
 	nested := filepath.Join(working, "cache", "persisted")
 	if err := os.MkdirAll(nested, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	state := filepath.Join(nested, "state.bin")
 	if err := os.WriteFile(state, []byte("persisted state"), 0o666); err != nil {
-		t.Fatal(err)
-	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		t.Fatal(err)
-	}
-	broad, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;" + user.User.Sid.String() + ")(A;;GRGW;;;BU)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	acl, _, err := broad.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := windows.SetNamedSecurityInfo(state, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
 		t.Fatal(err)
 	}
 	hostBefore := directoryDACL(t, filepath.Dir(working))
@@ -60,8 +47,12 @@ func TestStorageLeasePinsHierarchyAndPersistedStateUntilClose(t *testing.T) {
 			t.Fatalf("expected mutation sharing violation for %s: %v", path, err)
 		}
 	}
-	for _, path := range []string{working, filepath.Join(working, "cache"), filepath.Join(working, "tmp"), nested, state, filepath.Join(working, "core.lock")} {
+	for _, path := range []string{working, filepath.Join(working, "cache"), filepath.Join(working, "tmp"), filepath.Join(working, "core.lock")} {
 		assertPrivateStorageACL(t, path, true, false)
+	}
+	for _, path := range []string{nested, state} {
+		assertPrivateStorageACL(t, path, false, true)
+		assertStorageIntegrity(t, path, true)
 	}
 	if after := directoryDACL(t, filepath.Dir(working)); after != hostBefore {
 		t.Fatalf("host policy changed: %s -> %s", hostBefore, after)
@@ -89,7 +80,7 @@ func TestStorageLeasePinsHierarchyAndPersistedStateUntilClose(t *testing.T) {
 	retry.Close()
 }
 
-func withMediumIntegrity(t *testing.T, operation func()) {
+func mediumStorageToken(t *testing.T) windows.Token {
 	t.Helper()
 	if !isElevated() {
 		t.Skip("lower-integrity isolation requires an elevated Windows test process")
@@ -103,7 +94,6 @@ func withMediumIntegrity(t *testing.T, operation func()) {
 		nil, windows.SecurityImpersonation, windows.TokenImpersonation, &token); err != nil {
 		t.Fatal(err)
 	}
-	defer token.Close()
 	sid, err := windows.CreateWellKnownSid(windows.WinMediumLabelSid)
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +102,13 @@ func withMediumIntegrity(t *testing.T, operation func()) {
 	if err := windows.SetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), label.Size()); err != nil {
 		t.Fatal(err)
 	}
+	return token
+}
+
+func withMediumIntegrity(t *testing.T, operation func()) {
+	t.Helper()
+	token := mediumStorageToken(t)
+	defer token.Close()
 	runtime.LockOSThread()
 	if err := windows.SetThreadToken(nil, token); err != nil {
 		runtime.UnlockOSThread()
@@ -124,6 +121,15 @@ func withMediumIntegrity(t *testing.T, operation func()) {
 		runtime.UnlockOSThread()
 	}()
 	operation()
+}
+
+func storagePolicySnapshot(t *testing.T, path string) string {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return descriptor.String()
 }
 
 func assertStorageIntegrity(t *testing.T, path string, inherited bool) {
@@ -213,7 +219,7 @@ func TestStorageIntegrityBlocksLowerIntegrityMutationAndPreservesNativeIO(t *tes
 	}
 }
 
-func TestStorageIntegrityResistsPreexistingMetadataHandles(t *testing.T) {
+func TestStorageRejectsUnsafePreownedMetadataWithoutChanges(t *testing.T) {
 	if !isElevated() {
 		t.Skip("requires elevated Windows helper")
 	}
@@ -272,35 +278,23 @@ func TestStorageIntegrityResistsPreexistingMetadataHandles(t *testing.T) {
 			metadata = append(metadata, handle)
 		}
 	})
-	lease, err := initializeStorage(working)
-	if err != nil {
-		t.Fatal(err)
+	before := []string{storagePolicySnapshot(t, working), storagePolicySnapshot(t, state)}
+	if lease, err := initializeStorage(working); err == nil {
+		lease.Close()
+		t.Fatal("adopted objects with retained unsafe metadata rights")
 	}
-	defer lease.Close()
-	private, err := privateDirectorySecurity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dacl, _, err := private.DACL()
-	if err != nil {
-		t.Fatal(err)
+	for i, path := range paths {
+		if after := storagePolicySnapshot(t, path); after != before[i] {
+			t.Fatalf("rewrote rejected preowned state: %s -> %s", before[i], after)
+		}
 	}
 	withMediumIntegrity(t, func() {
-		for i, handle := range metadata {
-			// WRITE_OWNER was granted before sealing and is not revoked by
-			// file sharing. Relabel must still enforce the current integrity.
-			_ = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, mediumACL)
-			assertStorageIntegrity(t, paths[i], false)
-			_ = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, nil)
-			assertStorageIntegrity(t, paths[i], false)
-			// Pre-granted WRITE_DAC may affect the DACL, but cannot bypass MIC.
-			_ = windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
-		}
-		if err := os.WriteFile(state, []byte("attacker"), 0o600); err == nil {
-			t.Fatal("preexisting metadata rights re-enabled unsafe file writes")
-		}
-		if err := os.Mkdir(filepath.Join(working, "inserted"), 0o700); err == nil {
-			t.Fatal("preexisting metadata rights re-enabled unsafe child insertion")
+		for _, handle := range metadata {
+			// This right survives sharing/ACL changes, as the prior regression
+			// demonstrated. SDK initialization must reject, not upgrade, it.
+			if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, mediumACL); err != nil {
+				t.Fatalf("metadata fixture no longer demonstrates retained rights: %v", err)
+			}
 		}
 	})
 	if contents, err := os.ReadFile(state); err != nil || string(contents) != "persisted" {
@@ -317,6 +311,9 @@ func TestStorageRejectsUnsafeLeaseAndDescendantsWithoutOutsideACLWrites(t *testi
 			t.Run(kind+"/"+position, func(t *testing.T) {
 				base := directoryTestCacheRoot(t)
 				working := filepath.Join(base, "Host App", "sing_box_flutter")
+				if err := initializeDirectories(working); err != nil {
+					t.Fatal(err)
+				}
 				nested := filepath.Join(working, "cache", "nested")
 				if err := os.MkdirAll(nested, 0o700); err != nil {
 					t.Fatal(err)
@@ -329,6 +326,9 @@ func TestStorageRejectsUnsafeLeaseAndDescendantsWithoutOutsideACLWrites(t *testi
 				link := filepath.Join(nested, "unsafe")
 				if position == "lease" {
 					link = filepath.Join(working, "core.lock")
+					if err := os.Remove(link); err != nil {
+						t.Fatal(err)
+					}
 				}
 				switch kind {
 				case "junction":

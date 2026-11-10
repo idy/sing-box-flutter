@@ -19,6 +19,11 @@ repository is `idy/sing-box-flutter`. Native core inputs are pinned in
   Initializes native directories and system integration; does not connect. Returns null.
   The Dart API also accepts `applicationId`, required by the Windows backend as a
   stable, case-sensitive host identity. Mobile method channels do not forward it.
+  Platforms opt into this identity through `SingBoxFlutterApplicationIdentity` and
+  its `initializeForApplication` method; the original platform `initialize`
+  signature stays compatible with existing overrides and implementations.
+  Windows secure storage initialization requires elevation and fails before
+  creating managed state if the helper is not elevated.
 - `getVersion`: returns the native core version. On iOS the app reads its bundled
   capabilities manifest; the extension verifies it against the linked engine on start.
 - `checkConfig`: arguments `{config: String}` containing sing-box JSON. Android uses

@@ -5,14 +5,13 @@ package main
 
 import (
 	"io"
-	"os"
 	"path/filepath"
-	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// One owner retains the full hierarchy, all managed directories and the
+// One owner retains the verified hierarchy, all managed directory pins and
 // handle-relative core.lock until every core/check operation has closed.
 type windowsStorage struct{ directories *directoryHandles }
 
@@ -21,8 +20,14 @@ func (s *windowsStorage) Close() error {
 	return nil
 }
 
-func initializePlatformStorage(path, base string) (_ io.Closer, err error) {
-	descriptor, err := privateDirectorySecurity()
+func initializePlatformStorage(path, base string) (io.Closer, error) {
+	return initializeWindowsStorage(path, base, windows.GetCurrentProcessToken())
+}
+
+func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Closer, err error) {
+	// Authorization precedes every filesystem operation, including creation
+	// of the ordinary host parent. A first Medium launch cannot poison v1 state.
+	descriptor, err := privateDirectorySecurityForToken(token)
 	if err != nil {
 		return nil, err
 	}
@@ -35,31 +40,40 @@ func initializePlatformStorage(path, base string) (_ io.Closer, err error) {
 			directories.close()
 		}
 	}()
-	// The host's policy is not ours. Missing host storage inherits normally.
+	// The host's existing security policy is never changed. Only missing
+	// host storage is created, with ordinary inherited security.
 	host, err := directories.openChild(directories.last(), filepath.Base(filepath.Dir(path)), true, nil)
 	if err != nil {
 		return nil, err
 	}
-	working, err := directories.sealDirectory(host, filepath.Base(path), true, descriptor)
+	working, err := directories.openChild(host, filepath.Base(path), true, descriptor)
 	if err != nil {
 		return nil, err
 	}
-	// FILE_OPEN_IF never truncates an existing lease. openFile verifies its
-	// handle is a regular, single-link file before any ACL or label mutation.
+	if err = verifyPrivateRoot(working); err != nil {
+		return nil, err
+	}
+	// FILE_CREATE supplies the full private policy atomically for new objects.
+	// A collision is opened without mutation and must already match policy.
 	lock, err := directories.openFile(working, "core.lock", true, true, descriptor)
 	if err != nil {
 		return nil, err
 	}
-	if err = setPrivateDirectorySecurity(lock, descriptor); err != nil {
+	lockID, err := storageFileID(lock)
+	if err != nil {
 		return nil, err
 	}
-	children := make(map[string]windows.Handle)
+	known := make(map[uint64]windows.Handle)
 	for _, name := range []string{"cache", "tmp"} {
-		child, err := directories.sealDirectory(working, name, true, descriptor)
+		child, err := directories.openChild(working, name, true, descriptor)
 		if err != nil {
 			return nil, err
 		}
-		children[name] = child
+		id, err := storageFileID(child)
+		if err != nil {
+			return nil, err
+		}
+		known[id] = child
 	}
 	remaining := 16384
 	var walk func(windows.Handle, int) error
@@ -72,14 +86,23 @@ func initializePlatformStorage(path, base string) (_ io.Closer, err error) {
 			return err
 		}
 		for _, entry := range entries {
-			if !safeDirectoryComponent(entry.Name()) {
+			if !safeDirectoryComponent(entry.name) || entry.attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 				return errDirectories
 			}
+			isDirectory := entry.attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 			if parent == working {
-				if strings.EqualFold(entry.Name(), "core.lock") {
-					continue // Already exclusively owned and verified above.
+				// Compare identities, never folded names. Case-sensitive Windows
+				// directories can contain both core.lock/CORE.LOCK or cache/Cache.
+				if entry.id == lockID {
+					if isDirectory {
+						return errDirectories
+					}
+					continue
 				}
-				if child, ok := children[strings.ToLower(entry.Name())]; ok {
+				if child, ok := known[entry.id]; ok {
+					if !isDirectory {
+						return errDirectories
+					}
 					if err := walk(child, depth+1); err != nil {
 						return err
 					}
@@ -90,25 +113,28 @@ func initializePlatformStorage(path, base string) (_ io.Closer, err error) {
 			if remaining < 0 {
 				return errDirectories
 			}
-			if entry.IsDir() {
-				child, err := directories.sealDirectory(parent, entry.Name(), false, descriptor)
-				if err != nil {
-					return err
-				}
+			var child windows.Handle
+			if isDirectory {
+				child, err = directories.openChild(parent, entry.name, false, descriptor)
+			} else {
+				child, err = directories.openFile(parent, entry.name, false, false, descriptor)
+			}
+			if err != nil {
+				return err
+			}
+			id, err := storageFileID(child)
+			if err != nil || id != entry.id {
+				return errDirectories
+			}
+			if isDirectory {
 				if err := walk(child, depth+1); err != nil {
 					return err
 				}
 			} else {
-				file, err := directories.openFile(parent, entry.Name(), false, false, descriptor)
-				if err != nil {
-					return err
-				}
-				if err := setPrivateDirectorySecurity(file, descriptor); err != nil {
-					return err
-				}
-				// Native services must be able to reopen regular files for IO.
-				// The sealed parent and file now deny lower-integrity mutation.
-				directories.release(file)
+				// Native IO may reopen safe regular files. The private policy was
+				// present at creation; no old lower-token metadata handle can have
+				// been acquired before an in-place privilege transition here.
+				directories.release(child)
 			}
 		}
 		return nil
@@ -119,54 +145,97 @@ func initializePlatformStorage(path, base string) (_ io.Closer, err error) {
 	return &windowsStorage{directories: directories}, nil
 }
 
-func (d *directoryHandles) sealDirectory(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
-	exclusive, err := d.openChild(parent, name, create, descriptor)
+func verifyPrivateRoot(handle windows.Handle) error {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	// Seal before enumerating: no lower-integrity process can insert new
-	// children after this transition, including through an unvisited subtree.
-	// Exclusive sharing suppresses implicit ACL/label propagation to children.
-	if err := setPrivateDirectorySecurity(exclusive, descriptor); err != nil {
-		return 0, err
+	control, _, err := descriptor.Control()
+	if err != nil || control&(windows.SE_DACL_PROTECTED|windows.SE_SACL_PROTECTED) != windows.SE_DACL_PROTECTED|windows.SE_SACL_PROTECTED {
+		return errDirectories
 	}
-	var before windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(exclusive, &before); err != nil {
-		return 0, err
+	label, _, err := descriptor.SACL()
+	if err != nil || label == nil || label.AceCount != 1 {
+		return errDirectories
 	}
-	d.release(exclusive)
-	// Reopen only relative to the pinned parent, without following reparses.
-	// Read sharing permits normal native directory enumeration. Write/delete
-	// sharing stays denied for the helper lifetime. Identity must be unchanged.
-	handle, err := d.openChild(parent, name, false, nil)
-	if err != nil {
-		return 0, err
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if windows.GetAce(label, 0, &ace) != nil || ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+		return errDirectories
 	}
-	var after windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &after); err != nil {
-		return 0, err
-	}
-	if before.VolumeSerialNumber != after.VolumeSerialNumber || before.FileIndexHigh != after.FileIndexHigh || before.FileIndexLow != after.FileIndexLow {
-		return 0, errDirectories
-	}
-	return handle, nil
+	return nil
 }
 
-func storageDirectoryEntries(handle windows.Handle) ([]os.DirEntry, error) {
-	var duplicate windows.Handle
-	if err := windows.DuplicateHandle(windows.CurrentProcess(), handle, windows.CurrentProcess(),
-		&duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
-		return nil, err
+func storageFileID(handle windows.Handle) (uint64, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return 0, err
 	}
-	file := os.NewFile(uintptr(duplicate), "verified storage directory")
-	defer file.Close()
-	// Enumerate the handle, never its pathname. Bound memory for hostile state.
-	entries, err := file.ReadDir(16388)
-	if err != nil && err != io.EOF {
-		return nil, err
+	id := uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow)
+	if id == 0 {
+		return 0, errDirectories
 	}
-	if len(entries) == 16388 {
-		return nil, errDirectories
+	return id, nil
+}
+
+type storageEntry struct {
+	name       string
+	attributes uint32
+	id         uint64
+}
+
+// FILE_ID_BOTH_DIR_INFO, used only for handle-based directory enumeration.
+// The FileName field starts at offset 104 on the supported Windows targets.
+type storageDirectoryInfo struct {
+	NextEntryOffset, FileIndex                              uint32
+	CreationTime, LastAccessTime, LastWriteTime, ChangeTime int64
+	EndOfFile, AllocationSize                               int64
+	FileAttributes, FileNameLength, EaSize                  uint32
+	ShortNameLength                                         uint8
+	ShortName                                               [12]uint16
+	FileID                                                  uint64
+	FileName                                                [1]uint16
+}
+
+func storageDirectoryEntries(handle windows.Handle) ([]storageEntry, error) {
+	buffer := make([]byte, 64*1024)
+	class := uint32(windows.FileIdBothDirectoryRestartInfo)
+	var entries []storageEntry
+	for {
+		err := windows.GetFileInformationByHandleEx(handle, class, &buffer[0], uint32(len(buffer)))
+		if err == windows.ERROR_NO_MORE_FILES || err == windows.ERROR_FILE_NOT_FOUND && class == windows.FileIdBothDirectoryRestartInfo {
+			return entries, nil
+		}
+		if err != nil {
+			return nil, err // Filesystems without stable directory IDs are unsafe.
+		}
+		class = windows.FileIdBothDirectoryInfo
+		for offset := uint32(0); ; {
+			const nameOffset = uint32(unsafe.Offsetof(storageDirectoryInfo{}.FileName))
+			if offset > uint32(len(buffer))-nameOffset {
+				return nil, errDirectories
+			}
+			info := (*storageDirectoryInfo)(unsafe.Pointer(&buffer[offset]))
+			limit := uint32(len(buffer)) - offset
+			if info.NextEntryOffset != 0 {
+				if info.NextEntryOffset > limit || info.NextEntryOffset < nameOffset {
+					return nil, errDirectories
+				}
+				limit = info.NextEntryOffset
+			}
+			if info.FileNameLength%2 != 0 || info.FileNameLength > limit-nameOffset {
+				return nil, errDirectories
+			}
+			name := windows.UTF16ToString(unsafe.Slice(&info.FileName[0], info.FileNameLength/2))
+			if name != "." && name != ".." {
+				if len(entries) >= 16388 || info.FileID == 0 {
+					return nil, errDirectories
+				}
+				entries = append(entries, storageEntry{name: name, attributes: info.FileAttributes, id: info.FileID})
+			}
+			if info.NextEntryOffset == 0 {
+				break
+			}
+			offset += info.NextEntryOffset
+		}
 	}
-	return entries, nil
 }

@@ -1,12 +1,14 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sing_box_flutter/sing_box_flutter.dart';
+import 'package:sing_box_flutter/sing_box_flutter_platform_interface.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('dev.idy.sing_box_flutter/methods');
   final calls = <MethodCall>[];
   final plugin = SingBoxFlutter();
+  final originalPlatform = SingBoxFlutterPlatform.instance;
 
   setUp(() {
     calls.clear();
@@ -19,6 +21,7 @@ void main() {
   });
 
   tearDown(() {
+    SingBoxFlutterPlatform.instance = originalPlatform;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
   });
@@ -35,6 +38,40 @@ void main() {
       'providerBundleIdentifier': 'dev.idy.example.PacketTunnel',
       'notificationTitle': 'sing-box',
     });
+  });
+
+  test('legacy platform initialization overrides keep their contract',
+      () async {
+    final legacy = _LegacyPlatform();
+    SingBoxFlutterPlatform.instance = legacy;
+    await plugin.initialize(
+      applicationId: 'dev.example.host',
+      appGroup: 'group.dev.example.host',
+      providerBundleIdentifier: 'dev.example.host.PacketTunnel',
+      notificationTitle: 'Legacy host',
+    );
+    expect(legacy.initialization, {
+      'appGroup': 'group.dev.example.host',
+      'providerBundleIdentifier': 'dev.example.host.PacketTunnel',
+      'notificationTitle': 'Legacy host',
+    });
+  });
+
+  test('application identity is delivered through the optional capability',
+      () async {
+    final identified = _ApplicationPlatform();
+    SingBoxFlutterPlatform.instance = identified;
+    expect(() => plugin.initialize(), throwsArgumentError);
+    expect(identified.applicationInitialization, isNull);
+    await plugin.initialize(
+      applicationId: 'dev.example.host',
+      notificationTitle: 'Identified host',
+    );
+    expect(identified.applicationInitialization, {
+      'applicationId': 'dev.example.host',
+      'notificationTitle': 'Identified host',
+    });
+    expect(identified.initialization, isNull);
   });
 
   test('invalid JSON never reaches native code or leaks config in errors', () {
@@ -102,4 +139,39 @@ void main() {
       throwsFormatException,
     );
   });
+}
+
+// Intentionally uses the original signature: adding a named parameter to the
+// platform contract would make this downstream override fail to compile.
+class _LegacyPlatform extends SingBoxFlutterPlatform {
+  Map<String, Object?>? initialization;
+
+  @override
+  Future<void> initialize({
+    String? appGroup,
+    String? providerBundleIdentifier,
+    required String notificationTitle,
+  }) async {
+    initialization = {
+      'appGroup': appGroup,
+      'providerBundleIdentifier': providerBundleIdentifier,
+      'notificationTitle': notificationTitle,
+    };
+  }
+}
+
+class _ApplicationPlatform extends _LegacyPlatform
+    implements SingBoxFlutterApplicationIdentity {
+  Map<String, String>? applicationInitialization;
+
+  @override
+  Future<void> initializeForApplication({
+    required String applicationId,
+    required String notificationTitle,
+  }) async {
+    applicationInitialization = {
+      'applicationId': applicationId,
+      'notificationTitle': notificationTitle,
+    };
+  }
 }
