@@ -62,8 +62,8 @@ jobs:
       - name: Package Windows example
         if: steps.windows-inputs.outputs.build == 'true'
         working-directory: example
-        run: flutter build windows --release
-      - name: Verify bundled native files
+        run: flutter build windows --release -v
+      - name: Verify bundled native files and elevation manifest
         if: steps.windows-inputs.outputs.build == 'true'
         shell: pwsh
         run: |
@@ -75,6 +75,18 @@ jobs:
           $license = Join-Path $bundle 'sing_box_flutter/Legal/LICENSE.wintun'
           $expected = (Get-Content -Raw tool/wintun.json | ConvertFrom-Json).files.license.sha256
           if ((Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Wintun license checksum mismatch' }
+          $mt = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\mt.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $mt) { throw 'Windows SDK manifest tool not found' }
+          $binary = [IO.Path]::GetFullPath((Join-Path $bundle 'sing_box_flutter_example.exe'))
+          $manifest = Join-Path $env:RUNNER_TEMP 'sing_box_flutter_example.manifest'
+          & $mt.FullName -nologo "-inputresource:$binary;#1" "-out:$manifest"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the embedded application manifest' }
+          [xml]$embedded = Get-Content -Raw -LiteralPath $manifest
+          $levels = @($embedded.SelectNodes("//*[local-name()='requestedExecutionLevel']"))
+          if ($levels.Count -ne 1 -or $levels[0].GetAttribute('level') -ne 'requireAdministrator' -or $levels[0].GetAttribute('uiAccess') -ne 'false') {
+            throw 'The packaged example must request administrator privileges without uiAccess'
+          }
   wgc:
     runs-on: ubuntu-latest
     steps:

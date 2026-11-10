@@ -92,8 +92,20 @@ to the host's `windows/runner/runner.exe.manifest`:
 </trustInfo>
 ```
 
-The checked-in example includes this manifest. Launch its built executable to
-accept the Windows UAC prompt. For `flutter run`, use an elevated terminal so
+When the input manifest supplies the UAC level, suppress MSVC's default
+`asInvoker` fragment in the host's `windows/runner/CMakeLists.txt`, after the
+executable target is defined:
+
+```cmake
+if(MSVC)
+  target_link_options(${BINARY_NAME} PRIVATE "/MANIFESTUAC:NO")
+endif()
+```
+
+The supplied `requireAdministrator` manifest remains embedded in the executable.
+The checked-in example includes both settings, and Windows CI verifies the final
+embedded elevation level. Launch its built executable to accept the Windows UAC
+prompt. For `flutter run`, use an elevated terminal so
 Flutter can launch the runner. A plugin cannot change the host's manifest.
 
 ## Configuration and lifecycle
