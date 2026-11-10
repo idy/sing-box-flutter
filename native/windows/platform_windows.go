@@ -4,8 +4,6 @@
 package main
 
 import (
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"unsafe"
@@ -34,57 +32,6 @@ func isElevated() bool {
 	return err == nil && member
 }
 
-// An exclusive open handle is released by the OS on process death, so there
-// is no stale lock file to recover. Keep ownership through route cleanup.
-func lockWorkingDirectory(path string) (io.Closer, error) {
-	name, err := windows.UTF16PtrFromString(filepath.Join(path, "core.lock"))
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(handle), "core.lock"), nil
-}
-
-func initializePlatformDirectories(path, base string) error {
-	descriptor, err := privateDirectorySecurity()
-	if err != nil {
-		return err
-	}
-	directories, err := openDirectoryHierarchy(base)
-	if err != nil {
-		return err
-	}
-	defer directories.close()
-	// The host owns this parent's policy. Create it relative to the pinned
-	// LOCALAPPDATA handle with ordinary inheritance; never rewrite its DACL.
-	host, err := directories.openChild(directories.last(), filepath.Base(filepath.Dir(path)), true, nil)
-	if err != nil {
-		return err
-	}
-	working, err := directories.openChild(host, filepath.Base(path), true, descriptor)
-	if err != nil {
-		return err
-	}
-	private := []windows.Handle{working}
-	for _, name := range []string{"cache", "tmp"} {
-		child, err := directories.openChild(working, name, true, descriptor)
-		if err != nil {
-			return err
-		}
-		private = append(private, child)
-	}
-	// All targets and every ancestor remain pinned until the last ACL write.
-	for _, handle := range private {
-		if err := setPrivateDirectorySecurity(handle, descriptor); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func privateDirectory(path string) error {
 	_, parts, err := secureDirectoryPath(path)
 	if err != nil || len(parts) == 0 {
@@ -111,9 +58,24 @@ func privateDirectorySecurity() (*windows.SECURITY_DESCRIPTOR, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Protected, inheritable DACL: only this user and SYSTEM. Supply this at
-	// creation too, so a new directory is never temporarily world-writable.
-	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")")
+	var size uint32
+	err = windows.GetTokenInformation(windows.GetCurrentProcessToken(), windows.TokenIntegrityLevel, nil, 0, &size)
+	if err != windows.ERROR_INSUFFICIENT_BUFFER || size < uint32(unsafe.Sizeof(windows.Tokenmandatorylabel{})) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errDirectories
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(windows.GetCurrentProcessToken(), windows.TokenIntegrityLevel, &buffer[0], size, &size); err != nil {
+		return nil, err
+	}
+	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buffer[0])).Label.Sid.String()
+	// Keep user+SYSTEM full control. An inheritable no-write-up label at the
+	// process integrity level (high for the elevated helper) prevents a lower
+	// integrity process with the same user SID from changing managed state.
+	// This is local to these objects; no token privilege or global policy changes.
+	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")S:(ML;OICI;NW;;;" + label + ")")
 }
 
 func setPrivateDirectorySecurity(handle windows.Handle, descriptor *windows.SECURITY_DESCRIPTOR) error {
@@ -121,8 +83,13 @@ func setPrivateDirectorySecurity(handle windows.Handle, descriptor *windows.SECU
 	if err != nil {
 		return err
 	}
+	label, _, err := descriptor.SACL()
+	if err != nil {
+		return err
+	}
 	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION,
+		nil, nil, dacl, label)
 }
 
 // Accept only clean, drive-absolute paths and literal directory components.
@@ -148,12 +115,6 @@ func secureDirectoryPath(path string) (string, []string, error) {
 	return root, parts, nil
 }
 
-func safeDirectoryComponent(name string) bool {
-	return name != "" && name != "." && name != ".." && filepath.IsLocal(name) &&
-		strings.TrimSpace(name) == name && !strings.HasSuffix(name, ".") &&
-		!strings.ContainsAny(name, `<>:"/\|?*`+"\x00")
-}
-
 // Retain the entire chain, not just the target, denying write/delete sharing
 // to reject pre-existing mutation handles and prevent rename/reparse swaps.
 // Private targets additionally deny read sharing, preventing SetSecurityInfo
@@ -169,9 +130,21 @@ func (d *directoryHandles) last() windows.Handle { return d.handles[len(d.handle
 
 func (d *directoryHandles) close() {
 	for i := len(d.handles) - 1; i >= 0; i-- {
-		windows.CloseHandle(d.handles[i])
+		if d.handles[i] != 0 {
+			windows.CloseHandle(d.handles[i])
+		}
 	}
 	d.handles = nil
+}
+
+func (d *directoryHandles) release(handle windows.Handle) {
+	for i, owned := range d.handles {
+		if owned == handle {
+			windows.CloseHandle(handle)
+			d.handles[i] = 0
+			return
+		}
+	}
 }
 
 func openDirectoryHierarchy(path string) (_ *directoryHandles, err error) {
@@ -241,6 +214,17 @@ func (d *directoryHandles) openChild(parent windows.Handle, name string, create 
 }
 
 func (d *directoryHandles) open(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
+	return d.openObject(parent, name, create, descriptor, true, false)
+}
+
+func (d *directoryHandles) openFile(parent windows.Handle, name string, create, write bool, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
+	if parent == 0 || !safeDirectoryComponent(name) {
+		return 0, errDirectories
+	}
+	return d.openObject(parent, name, create, descriptor, false, write)
+}
+
+func (d *directoryHandles) openObject(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR, directory, write bool) (windows.Handle, error) {
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -254,19 +238,32 @@ func (d *directoryHandles) open(parent windows.Handle, name string, create bool,
 	access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
 	share := uint32(windows.FILE_SHARE_READ)
 	if descriptor != nil {
-		access |= windows.READ_CONTROL | windows.WRITE_DAC
+		access |= windows.READ_CONTROL | windows.WRITE_DAC | windows.WRITE_OWNER
 		share = 0 // Suppress automatic ACL propagation to unverified children.
 	}
 	disposition := uint32(windows.FILE_OPEN)
 	if create {
 		disposition = windows.FILE_OPEN_IF
 	}
+	options := uint32(windows.FILE_DIRECTORY_FILE)
+	fileAttributes := uint32(windows.FILE_ATTRIBUTE_DIRECTORY)
+	if !directory {
+		options = windows.FILE_NON_DIRECTORY_FILE
+		fileAttributes = windows.FILE_ATTRIBUTE_NORMAL
+		access &^= windows.FILE_TRAVERSE
+	}
+	if write {
+		access |= windows.FILE_WRITE_DATA
+	}
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(&handle, access, &attributes, &status, nil,
-		windows.FILE_ATTRIBUTE_DIRECTORY, share, disposition,
-		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+		fileAttributes, share, disposition,
+		options|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	if err != nil {
+		if handle != 0 && handle != windows.InvalidHandle {
+			windows.CloseHandle(handle)
+		}
 		return 0, err
 	}
 	// OPEN_REPARSE_POINT can return the reparse object itself. Inspect the
@@ -277,13 +274,24 @@ func (d *directoryHandles) open(parent windows.Handle, name string, create bool,
 	}
 	err = windows.GetFileInformationByHandleEx(handle, windows.FileAttributeTagInfo,
 		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
-	if err != nil || info.Attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 ||
+	if err != nil || (info.Attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) != directory ||
 		info.Attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.ReparseTag != 0 {
 		windows.CloseHandle(handle)
 		if err != nil {
 			return 0, err
 		}
 		return 0, errDirectories
+	}
+	if !directory {
+		var fileInfo windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &fileInfo); err != nil {
+			windows.CloseHandle(handle)
+			return 0, err
+		}
+		if fileInfo.NumberOfLinks != 1 {
+			windows.CloseHandle(handle)
+			return 0, errDirectories
+		}
 	}
 	d.handles = append(d.handles, handle)
 	return handle, nil

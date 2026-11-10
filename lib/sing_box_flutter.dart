@@ -21,11 +21,20 @@ class SingBoxFlutter {
   /// On iOS, [appGroup] must match the shared App Group entitlement and
   /// [providerBundleIdentifier] must identify the host's Packet Tunnel extension.
   /// Android uses [notificationTitle] for its foreground-service notification.
+  /// Windows requires a unique, stable [applicationId] shared by all versions of
+  /// this application. Its case-sensitive value identifies persistent storage.
   Future<void> initialize({
+    String? applicationId,
     String? appGroup,
     String? providerBundleIdentifier,
     String notificationTitle = 'sing-box',
   }) {
+    if (applicationId != null &&
+        !RegExp(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+            .hasMatch(applicationId)) {
+      throw ArgumentError(
+          'Application IDs must contain 1 to 128 ASCII identifier characters.');
+    }
     for (final value in [appGroup, providerBundleIdentifier]) {
       if (value != null && value.trim().isEmpty) {
         throw ArgumentError('Apple identifiers must not be empty.');
@@ -35,6 +44,7 @@ class SingBoxFlutter {
       throw ArgumentError('The notification title must not be empty.');
     }
     return SingBoxFlutterPlatform.instance.initialize(
+      applicationId: applicationId,
       appGroup: appGroup,
       providerBundleIdentifier: providerBundleIdentifier,
       notificationTitle: notificationTitle,

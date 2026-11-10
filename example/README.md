@@ -96,6 +96,11 @@ Wintun driver, and retains its license under `sing_box_flutter/Legal/`. For ARM6
 build the core with `--windows-arch arm64` and Flutter with
 `--target-platform windows-arm64`. See [Windows setup](../doc/windows-setup.md).
 
+The example passes `dev.idy.singboxflutter.example` as its stable Windows
+`applicationId`. Override `APPLICATION_ID` with your own unique identifier when
+adapting the host; keep the same ID across versioned-directory updates. IDs are
+case-sensitive and do not derive from executable paths.
+
 Cancelling the status subscription leaves the tunnel connected. Explicit stop or
 app exit closes the core and releases its routes; no Windows service is installed.
 

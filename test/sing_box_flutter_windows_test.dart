@@ -137,7 +137,8 @@ void main() {
       () async {
     process.onRequest = process.respondNormally;
     await Future.wait([
-      plugin.initialize(notificationTitle: 'Example'),
+      plugin.initialize(
+          applicationId: 'test.app', notificationTitle: 'Example'),
       plugin.getVersion(),
     ]);
     const config = '{"private_key":"private-secret"}';
@@ -151,7 +152,8 @@ void main() {
   test('subscriptions replay state and cancellation never stops the core',
       () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     process.onRequest = (request) {
       if (request['method'] == 'start') {
         process.event('connecting');
@@ -182,7 +184,8 @@ void main() {
 
   test('helper errors retain stable platform codes', () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     process.onRequest = (request) => process.send({
           'id': request['id'],
           'error': {
@@ -234,7 +237,8 @@ void main() {
   test('replacement waits for actual exit and shares one pending launch',
       () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     final failure = plugin.events.cast<VpnStatus>().firstWhere(
           (status) => status.state == VpnConnectionState.error,
         );
@@ -245,8 +249,10 @@ void main() {
     final replacement = _CoreProcess();
     replacement.onRequest = replacement.respondNormally;
     processes.add(replacement);
-    final reconnect = plugin.initialize(notificationTitle: 'Example');
-    final concurrent = plugin.initialize(notificationTitle: 'Example');
+    final reconnect = plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
+    final concurrent = plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     await Future<void>.delayed(Duration.zero);
     expect(launches, hasLength(1));
     expect(process._exit.isCompleted, isFalse);
@@ -266,7 +272,8 @@ void main() {
     final subscription = plugin.events.cast<VpnStatus>().listen(
           (status) => states.add(status.state),
         );
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     await process.exit();
     await Future<void>.delayed(Duration.zero);
     expect(states.last, VpnConnectionState.error);
@@ -274,7 +281,8 @@ void main() {
     final replacement = _CoreProcess();
     replacement.onRequest = replacement.respondNormally;
     processes.add(replacement);
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     await Future<void>.delayed(Duration.zero);
     expect(states.last, VpnConnectionState.disconnected);
     expect((await plugin.events.first as VpnStatus).state,
@@ -286,7 +294,8 @@ void main() {
   test('an awaited status snapshot never replaces a newer native event',
       () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     process.onRequest = (request) {
       // One OS read can carry both an older RPC response and the newer event.
       final response = jsonEncode({
@@ -325,7 +334,8 @@ void main() {
       'status refresh and stop after helper loss never launch an uninitialized core',
       () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     await process.exit();
     expect((await plugin.getStatus()).state, VpnConnectionState.error);
     await expectLater(
@@ -343,7 +353,8 @@ void main() {
       'version-only replacement remains uninitialized until initialize succeeds',
       () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     await process.exit();
     final replacement = _CoreProcess();
     replacement.onRequest = replacement.respondNormally;
@@ -357,7 +368,8 @@ void main() {
             .having((error) => error.code, 'code', 'not_initialized')));
     expect(replacement.requests.map((request) => request['method']),
         ['getVersion']);
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     expect(replacement.initialized, isTrue);
     await plugin.checkConfig('{}');
     expect((await plugin.getStatus()).state, VpnConnectionState.disconnected);
@@ -366,7 +378,8 @@ void main() {
   test('oversized UTF-8 requests do not disconnect an existing connection',
       () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     final connected = plugin.events.cast<VpnStatus>().firstWhere(
           (status) => status.isConnected,
         );
@@ -425,34 +438,89 @@ void main() {
     expect(failures, 0);
   });
 
-  test(
-      'application storage separates installations and normalizes Windows aliases',
-      () {
+  test('application storage uses stable case-sensitive identifiers', () {
     final first =
-        SingBoxFlutterWindows.applicationStorageName(r'C:\Apps\One\client.exe');
-    final second =
-        SingBoxFlutterWindows.applicationStorageName(r'C:\Apps\Two\client.exe');
-    expect(first, isNot(second));
+        SingBoxFlutterWindows.applicationStorageName('dev.example.Vpn');
     expect(
-        first,
-        SingBoxFlutterWindows.applicationStorageName(
-            r'c:/apps/one/./CLIENT.exe'));
-    expect(first, matches(RegExp(r'^client-[a-f0-9]{64}$')));
-    final bounded = SingBoxFlutterWindows.applicationStorageName(
-        'C:\\Apps\\${'a' * 200}.exe');
-    expect(bounded.length, lessThanOrEqualTo(89));
+        first, SingBoxFlutterWindows.applicationStorageName('dev.example.Vpn'));
+    expect(first,
+        isNot(SingBoxFlutterWindows.applicationStorageName('dev.example.vpn')));
+    expect(first, matches(RegExp(r'^dev_example_Vpn-[a-f0-9]{64}$')));
+    expect(SingBoxFlutterWindows.applicationStorageName('a' * 128).length,
+        lessThanOrEqualTo(89));
+    for (final invalid in ['', ' app', 'app ', 'app/id', 'a' * 129]) {
+      expect(() => SingBoxFlutterWindows.applicationStorageName(invalid),
+          throwsArgumentError);
+    }
+  });
+
+  test('Windows requires an application ID before starting any helper',
+      () async {
+    await expectLater(
+        plugin.initialize(notificationTitle: 'Example'), throwsArgumentError);
+    expect(launches, isEmpty);
+  });
+
+  test('versioned installation paths keep the same persistent namespace',
+      () async {
+    final directories = <Object?>[];
+    for (final executable in [
+      r'C:\Apps\app-1.2.3\sing_box_flutter_core.exe',
+      r'C:\Apps\app-1.2.4\sing_box_flutter_core.exe',
+    ]) {
+      final current = _CoreProcess();
+      current.onRequest = current.respondNormally;
+      processes.add(current);
+      final backend = SingBoxFlutterWindows.withLauncher(
+        launcher: (_) async => current,
+        localAppData: r'C:\Users\Test\AppData\Local',
+        executable: executable,
+      );
+      await backend.initialize(
+          applicationId: 'dev.example.Vpn', notificationTitle: 'Example');
+      directories
+          .add((current.requests.first['arguments'] as Map)['workingPath']);
+      await current.exit();
+    }
+    expect(directories.first, directories.last);
+  });
+
+  test('case-sensitive installations retain distinct caller identities',
+      () async {
+    final directories = <Object?>[];
+    for (final entry in [
+      (r'C:\Apps\Product\core.exe', 'dev.example.Product'),
+      (r'C:\Apps\product\core.exe', 'dev.example.product'),
+    ]) {
+      final current = _CoreProcess();
+      current.onRequest = current.respondNormally;
+      processes.add(current);
+      final backend = SingBoxFlutterWindows.withLauncher(
+        launcher: (_) async => current,
+        localAppData: r'C:\Users\Test\AppData\Local',
+        executable: entry.$1,
+      );
+      await backend.initialize(
+          applicationId: entry.$2, notificationTitle: 'Example');
+      directories
+          .add((current.requests.first['arguments'] as Map)['workingPath']);
+      await current.exit();
+    }
+    expect(directories.first, isNot(directories.last));
   });
 
   test('repeated initialization preserves the native connected state',
       () async {
     process.onRequest = process.respondNormally;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     final connected = plugin.events.cast<VpnStatus>().firstWhere(
           (status) => status.isConnected,
         );
     process.event('connected');
     await connected;
-    await plugin.initialize(notificationTitle: 'Example');
+    await plugin.initialize(
+        applicationId: 'test.app', notificationTitle: 'Example');
     expect((await plugin.events.first as VpnStatus).isConnected, isTrue);
   });
 }

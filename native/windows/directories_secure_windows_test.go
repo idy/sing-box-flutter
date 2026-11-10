@@ -8,8 +8,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -21,6 +21,63 @@ func directoryDACL(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return descriptor.String()
+}
+
+// Compare control flags, masks and binary SIDs. SDDL may legitimately use LA
+// for the current user, reorder flags, or report auto-inheritance (D:PAI).
+func assertPrivateStorageACL(t *testing.T, path string, protected, inherited bool) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil || (control&windows.SE_DACL_PROTECTED != 0) != protected {
+		t.Fatalf("unexpected DACL protection: %s, %v", descriptor.String(), err)
+	}
+	acl, _, err := descriptor.DACL()
+	if err != nil || acl == nil || acl.AceCount != 2 {
+		t.Fatalf("expected exactly two private ACEs: %s, %v", descriptor.String(), err)
+	}
+	want, err := privateDirectorySecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantACL, _, err := want.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[uint32]bool)
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			info.IsDir() && ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE) != windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE ||
+			(ace.Header.AceFlags&windows.INHERITED_ACE != 0) != inherited {
+			t.Fatalf("unexpected private ACE flags/type: %s", descriptor.String())
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		matched := false
+		for j := uint32(0); j < uint32(wantACL.AceCount); j++ {
+			var expected *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(wantACL, j, &expected); err != nil {
+				t.Fatal(err)
+			}
+			if windows.EqualSid(sid, (*windows.SID)(unsafe.Pointer(&expected.SidStart))) && ace.Mask == expected.Mask && !seen[j] {
+				seen[j], matched = true, true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("unexpected SID/access mask: %s", descriptor.String())
+		}
+	}
 }
 
 func directoryMutationHandle(path string) (windows.Handle, error) {
@@ -245,12 +302,14 @@ func TestSecureDirectoriesRejectExistingMutationHandles(t *testing.T) {
 			if after := directoryDACL(t, path); after != before {
 				t.Fatalf("DACL changed despite an existing mutation handle: %s -> %s", before, after)
 			}
+			// Release our own write/delete handle before ReadDir: its sharing
+			// mode otherwise conflicts with Go's directory enumeration handle.
+			windows.CloseHandle(handle)
+			handle = 0
 			entries, err := os.ReadDir(path)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("created directories before pinning hierarchy: %v, %v", entries, err)
 			}
-			windows.CloseHandle(handle)
-			handle = 0
 			if err := initializeDirectories(working); err != nil {
 				t.Fatalf("failure leaked a handle or prevented retry: %v", err)
 			}
@@ -271,20 +330,11 @@ func TestPrivateDirectoryACLAndNoUnverifiedPropagation(t *testing.T) {
 	outside := t.TempDir()
 	createDirectoryJunction(t, filepath.Join(path, "junction"), outside)
 	existingBefore, outsideBefore := directoryDACL(t, existing), directoryDACL(t, outside)
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for range 2 {
 		if err := privateDirectory(path); err != nil {
 			t.Fatal(err)
 		}
-		text := directoryDACL(t, path)
-		if !strings.HasPrefix(text, "D:P") || strings.Count(text, "(A;") != 2 ||
-			!strings.Contains(text, "(A;OICI;FA;;;SY)") ||
-			!strings.Contains(text, "(A;OICI;FA;;;"+user.User.Sid.String()+")") {
-			t.Fatalf("directory has an unexpected private DACL: %s", text)
-		}
+		assertPrivateStorageACL(t, path, true, false)
 		if after := directoryDACL(t, existing); after != existingBefore {
 			t.Fatalf("ACL write propagated to an unverified child: %s -> %s", existingBefore, after)
 		}
@@ -297,10 +347,7 @@ func TestPrivateDirectoryACLAndNoUnverifiedPropagation(t *testing.T) {
 	if err := os.Mkdir(child, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if text := directoryDACL(t, child); !strings.Contains(text, ";FA;;;SY)") ||
-		!strings.Contains(text, ";FA;;;"+user.User.Sid.String()+")") || strings.Contains(text, ";;;BU)") {
-		t.Fatalf("new child did not inherit the private DACL: %s", text)
-	}
+	assertPrivateStorageACL(t, child, false, true)
 	moved := path + "-moved"
 	if err := os.Rename(path, moved); err != nil {
 		t.Fatalf("privateDirectory retained a handle after success: %v", err)

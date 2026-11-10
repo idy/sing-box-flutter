@@ -27,6 +27,8 @@ class VpnExample extends StatefulWidget {
 }
 
 class _VpnExampleState extends State<VpnExample> {
+  static const applicationId = String.fromEnvironment('APPLICATION_ID',
+      defaultValue: 'dev.idy.singboxflutter.example');
   static const appGroup = String.fromEnvironment('APP_GROUP');
   static const provider = String.fromEnvironment('TUNNEL_BUNDLE_ID');
   final _plugin = SingBoxFlutter();
@@ -66,6 +68,7 @@ class _VpnExampleState extends State<VpnExample> {
       );
     }
     await _plugin.initialize(
+      applicationId: applicationId,
       appGroup: appGroup.isEmpty ? null : appGroup,
       providerBundleIdentifier: provider.isEmpty ? null : provider,
       notificationTitle: 'sing_box_flutter example',

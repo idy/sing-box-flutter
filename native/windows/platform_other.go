@@ -16,6 +16,13 @@ func lockWorkingDirectory(path string) (io.Closer, error) {
 	return os.OpenFile(filepath.Join(path, "core.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 }
 
+func initializePlatformStorage(path, base string) (io.Closer, error) {
+	if err := initializePlatformDirectories(path, base); err != nil {
+		return nil, err
+	}
+	return lockWorkingDirectory(path)
+}
+
 func initializePlatformDirectories(path, _ string) error {
 	// This path-based implementation is only a host-test shim. Windows uses
 	// pinned handles for both creation and ACL writes in its elevated helper.

@@ -93,8 +93,7 @@ func newHarness(t *testing.T, b backend) *protocolHarness {
 	input, writer := io.Pipe()
 	output := &captureWriter{messages: make(chan wireMessage, 100)}
 	s := newServer(output, b)
-	s.setup = func(string) error { return nil }
-	s.lock = func(string) (io.Closer, error) { return io.NopCloser(strings.NewReader("")), nil }
+	s.storage = func(string) (io.Closer, error) { return io.NopCloser(strings.NewReader("")), nil }
 	s.admin = func() bool { return true }
 	h := &protocolHarness{t: t, server: s, input: writer, output: output, done: make(chan struct{})}
 	go func() { defer close(h.done); s.run(context.Background(), input) }()

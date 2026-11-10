@@ -17,6 +17,8 @@ repository is `idy/sing-box-flutter`. Native core inputs are pinned in
 - `initialize`: arguments `{appGroup?: String, providerBundleIdentifier?: String,
   notificationTitle: String}`. The two Apple identifiers are required on iOS.
   Initializes native directories and system integration; does not connect. Returns null.
+  The Dart API also accepts `applicationId`, required by the Windows backend as a
+  stable, case-sensitive host identity. Mobile method channels do not forward it.
 - `getVersion`: returns the native core version. On iOS the app reads its bundled
   capabilities manifest; the extension verifies it against the linked engine on start.
 - `checkConfig`: arguments `{config: String}` containing sing-box JSON. Android uses

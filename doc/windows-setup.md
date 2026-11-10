@@ -98,12 +98,24 @@ Use complete sing-box JSON with a `tun` inbound, `auto_route: true`, and
 into the tunnel. The example's direct-routing configuration works on Windows.
 `stack: "gvisor"` is available when the selected core includes TUN.
 
+Windows initialization requires `applicationId`, a unique, case-sensitive host
+identifier such as `dev.example.vpn`. Keep that exact ID in every application
+version, including updates that change the executable directory. Independently
+operated applications must use different IDs. Android and iOS ignore this option.
+
 `initialize()` creates application storage under
-`%LOCALAPPDATA%/<short executable name>-<executable path SHA-256>/sing_box_flutter`.
-The identity uses the normalized absolute executable path, so independently
-installed apps with the same basename keep separate locks and persistent state.
+`%LOCALAPPDATA%/<short application ID>-<application ID SHA-256>/sing_box_flutter`.
+Executable paths and filename case do not determine the namespace. Changing the
+ID intentionally selects separate empty storage; no ambiguous path-based cache
+is automatically adopted.
 Storage must be on a local volume with persistent ACL support and no reparse-point
-ancestors. Directory creation and private ACL changes use verified, pinned handles.
+ancestors. Directory creation, lease acquisition and private ACL changes use
+verified, pinned handles retained until all core/check cleanup completes. Existing
+regular single-link state keeps its contents while receiving private ACLs and
+inheritable no-write-up labels at the helper's integrity level. Reparse points and
+multi-linked state are rejected. Storage previously sealed by an elevated helper
+requires administrator privileges when reopened; normal cache and temporary-file
+features remain enabled.
 The Apple identifiers and Android notification title are not used on Windows. `checkConfig()` parses against
 the selected native registry and validates the engine before connecting.
 Configurations travel through an anonymous process pipe, never command-line

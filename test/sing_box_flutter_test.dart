@@ -25,6 +25,7 @@ void main() {
 
   test('initialization never starts a connection', () async {
     await plugin.initialize(
+      applicationId: 'dev.idy.example',
       appGroup: 'group.dev.idy.example',
       providerBundleIdentifier: 'dev.idy.example.PacketTunnel',
     );
@@ -55,6 +56,8 @@ void main() {
     }
     expect(() => plugin.start(config: '{}', name: ''), throwsArgumentError);
     expect(() => plugin.initialize(appGroup: ' '), throwsArgumentError);
+    expect(
+        () => plugin.initialize(applicationId: 'app/id'), throwsArgumentError);
     expect(calls, isEmpty);
   });
 

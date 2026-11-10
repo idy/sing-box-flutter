@@ -25,6 +25,24 @@ func TestWorkingPathIsBoundToPerApplicationLocalData(t *testing.T) {
 	}
 }
 
+func TestStorageComponentsAreValidatedLexically(t *testing.T) {
+	for _, name := range []string{"Host App", " Leading space", " leading.dot", "normal.txt", ".state", "COM0", "LPT10"} {
+		if !safeDirectoryComponent(name) {
+			t.Errorf("rejected valid literal component %q", name)
+		}
+		base := t.TempDir()
+		if err := validateWorkingPath(filepath.Join(base, name, "sing_box_flutter"), base); err != nil {
+			t.Errorf("rejected valid host component %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{"", ".", "..", "trailing ", "trailing.", "a/b", `a\b`, "a:stream", "a\x00b", "a\x1fb", "a\x7fb",
+		"CON", "con.txt", "NUL.txt", "nul .txt", "PRN", "AUX", "CONIN$", "CONOUT$.txt", "CLOCK$", "COM1.log", "LPT9.txt", "COM¹.txt", "LPT²"} {
+		if safeDirectoryComponent(name) {
+			t.Errorf("accepted ambiguous/unsafe component %q", name)
+		}
+	}
+}
+
 func TestPrivateDirectoryRejectsLink(t *testing.T) {
 	base := t.TempDir()
 	outside := t.TempDir()

@@ -155,6 +155,8 @@ import 'package:sing_box_flutter/sing_box_flutter.dart';
 final vpn = SingBoxFlutter();
 
 await vpn.initialize(
+  // Required on Windows; keep stable across updates and install-directory changes.
+  applicationId: 'com.example.myapp',
   // Required on iOS; omit on Android.
   appGroup: 'group.com.example.app',
   providerBundleIdentifier: 'com.example.app.PacketTunnel',

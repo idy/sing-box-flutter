@@ -24,10 +24,12 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
   @visibleForTesting
   SingBoxFlutterWindows.withLauncher({
     required Future<Process> Function(String executable) launcher,
-    required String workingPath,
+    String? workingPath,
+    String? localAppData,
     required String executable,
   })  : _launcher = launcher,
         _workingPath = workingPath,
+        _localAppData = localAppData,
         _executable = executable;
 
   static final _instance = SingBoxFlutterWindows();
@@ -37,26 +39,24 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
     SingBoxFlutterPlatform.instance = _instance;
   }
 
-  /// Derives a stable per-installation name without relying on the basename.
+  /// Names storage by a caller-owned identifier, independent of install paths.
   @visibleForTesting
-  static String applicationStorageName(String executable) {
-    final paths = p.Context(style: p.Style.windows);
-    if (!paths.isAbsolute(executable)) {
-      throw ArgumentError('The application executable path must be absolute.');
+  static String applicationStorageName(String applicationId) {
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+        .hasMatch(applicationId)) {
+      throw ArgumentError(
+          'A stable application ID with 1 to 128 ASCII identifier characters is required.');
     }
-    final normalized = paths.normalize(executable).toLowerCase();
-    final basename = paths
-        .basenameWithoutExtension(normalized)
-        .replaceAll(RegExp(r'[^a-z0-9_-]'), '_');
-    final prefix = basename.isEmpty
-        ? 'app'
-        : basename.substring(0, basename.length > 24 ? 24 : basename.length);
-    final identity = sha256.convert(utf8.encode(normalized));
+    final readable = applicationId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+    final prefix =
+        readable.substring(0, readable.length > 24 ? 24 : readable.length);
+    final identity = sha256.convert(utf8.encode(applicationId));
     return '$prefix-$identity';
   }
 
   Future<Process> Function(String executable)? _launcher;
   String? _workingPath;
+  String? _localAppData;
   String? _executable;
   Future<WindowsCoreClient>? _client;
   Future<int>? _retirement;
@@ -173,23 +173,27 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform {
 
   @override
   Future<void> initialize({
+    String? applicationId,
     String? appGroup,
     String? providerBundleIdentifier,
     required String notificationTitle,
   }) async {
+    if (applicationId == null) {
+      throw ArgumentError(
+          'Windows requires a stable applicationId when initializing the VPN.');
+    }
+    final storageName = applicationStorageName(applicationId);
     var workingPath = _workingPath;
     if (workingPath == null) {
-      final local = Platform.environment['LOCALAPPDATA'];
-      if (local == null || local.isEmpty || !p.isAbsolute(local)) {
+      final paths = p.Context(style: p.Style.windows);
+      final local = _localAppData ?? Platform.environment['LOCALAPPDATA'];
+      if (local == null || local.isEmpty || !paths.isAbsolute(local)) {
         throw PlatformException(
           code: 'initialization_failed',
           message: 'Windows local application storage is unavailable.',
         );
       }
-      workingPath = p.join(
-          local,
-          applicationStorageName(Platform.resolvedExecutable),
-          'sing_box_flutter');
+      workingPath = paths.join(local, storageName, 'sing_box_flutter');
     }
     final pending = _core();
     final generation = _generation;

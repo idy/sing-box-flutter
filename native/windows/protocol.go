@@ -51,8 +51,7 @@ type connection struct {
 // config can be accepted. In particular, Close is never raced against box.Start.
 type server struct {
 	backend  backend
-	setup    func(string) error
-	lock     func(string) (io.Closer, error)
+	storage  func(string) (io.Closer, error)
 	lease    io.Closer
 	admin    func() bool
 	output   *json.Encoder
@@ -72,7 +71,7 @@ func newServer(output io.Writer, engine backend) *server {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &server{
 		lifetime: ctx, cancel: cancel,
-		backend: engine, setup: initializeDirectories, lock: lockWorkingDirectory, admin: isElevated,
+		backend: engine, storage: initializeStorage, admin: isElevated,
 		output: json.NewEncoder(output), failed: make(chan struct{}),
 		current: status{Type: "status", State: "disconnected"},
 	}
@@ -181,14 +180,16 @@ func (s *server) handle(line []byte) {
 			} else {
 				s.failure(id, "already_initialized", "The helper is already initialized for another application path")
 			}
-		} else if s.setup(path) != nil {
-			s.failure(id, "initialize_failed", "Could not initialize private application directories")
 		} else {
-			lease, err := s.lock(path)
-			if err != nil {
-				s.failure(id, "initialize_failed", "Could not acquire exclusive application core ownership")
+			lease, err := s.storage(path)
+			if err != nil || lease == nil {
+				if lease != nil {
+					_ = lease.Close()
+				}
+				s.failure(id, "initialize_failed", "Could not acquire private application storage ownership; reopening elevated storage requires administrator privileges")
 			} else {
 				s.working, s.lease = path, lease
+				s.lifetime = withStorageContext(s.lifetime, lease)
 				s.result(id, nil)
 			}
 		}
@@ -233,7 +234,7 @@ func (s *server) handle(line []byte) {
 			s.failure(id, "permission_denied", "Run the application as administrator to start the tunnel")
 			return
 		}
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(s.lifetime)
 		conn := &connection{cancel: cancel, done: make(chan struct{})}
 		s.active = conn
 		s.result(id, nil)

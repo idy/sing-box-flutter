@@ -22,6 +22,7 @@ abstract class SingBoxFlutterPlatform extends PlatformInterface {
 
   /// Initializes native platform integration without connecting.
   Future<void> initialize({
+    String? applicationId,
     String? appGroup,
     String? providerBundleIdentifier,
     required String notificationTitle,
