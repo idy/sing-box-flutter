@@ -240,6 +240,10 @@ publication policy.
 
 ## Example and development
 
+The standalone project website is built from `site/`. See the
+[website development and deployment guide](doc/website.md) for local preview,
+GitHub Pages and custom-domain setup.
+
 The [example](example/) accepts editable sing-box JSON and demonstrates permission,
 validation, connection status, and explicit disconnection. Its default configuration
 captures traffic through a TUN and routes it directly; it does not connect to an
