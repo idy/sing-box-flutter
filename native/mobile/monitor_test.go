@@ -304,6 +304,79 @@ func TestUpdateQueueAdmitsWaitersInArrivalOrder(t *testing.T) {
 	}
 }
 
+func TestMonitorRejectsOwnedInterfaceRegisteredDuringEnumeration(t *testing.T) {
+	monitor, manager, _ := newMonitorFixture()
+	published := 0
+	monitor.RegisterCallback(func(*control.Interface, int) { published++ })
+	entered, release := blockFirstEnumeration(t, manager)
+	updated := make(chan struct{})
+	go func() { monitor.UpdateDefaultInterface("wifi-test", 101, false, false); close(updated) }()
+	receive(t, entered)
+	registered := make(chan struct{})
+	go func() { monitor.RegisterMyInterface("wifi-test"); close(registered) }()
+	// Registration can run under route/start locks: it cannot wait on the
+	// update queue or synchronously dispatch default-interface callbacks.
+	receive(t, registered)
+	release()
+	receive(t, updated)
+	if monitor.DefaultInterface() != nil || published != 0 {
+		t.Fatal("in-flight enumeration published an interface after ownership registration")
+	}
+	monitor.UpdateDefaultInterface("cell-test", 102, true, true)
+	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+	if current := monitor.DefaultInterface(); current == nil || current.Index != 102 || published != 1 {
+		t.Fatalf("stale owned report replaced the physical default: %+v, callbacks=%d", current, published)
+	}
+	requirePathMetadata(t, manager, 102, true, true)
+}
+
+func TestMonitorRegistrationWithdrawsPublishedDefaultWithoutReentry(t *testing.T) {
+	monitor, _, _ := newMonitorFixture()
+	published, registrations := 0, 0
+	monitor.RegisterCallback(func(*control.Interface, int) { published++ })
+	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+	monitor.defaultInterfaceAccess.Lock()
+	monitor.defaultDNSServers = []string{"192.0.2.1"}
+	monitor.defaultInterfaceAccess.Unlock()
+	monitor.registerInterface = func(name string) {
+		registrations++
+		// The host hook must run outside the mutex and after atomic withdrawal.
+		if monitor.DefaultInterface() != nil || !slices.Contains(monitor.MyInterfaces(), name) {
+			t.Error("host refresh saw an owned default interface")
+		}
+		temporary := monitor.RegisterCallback(func(*control.Interface, int) {})
+		monitor.UnregisterCallback(temporary)
+	}
+	registered := make(chan struct{})
+	go func() { monitor.RegisterMyInterface("wifi-test"); close(registered) }()
+	receive(t, registered)
+	if monitor.DefaultInterface() != nil || monitor.defaultDNSServers != nil || published != 1 || registrations != 1 {
+		t.Fatal("registration retained an owned default/DNS or dispatched synchronous callbacks")
+	}
+	monitor.RegisterMyInterface("wifi-test")
+	monitor.UpdateDefaultInterface("wifi-test", 101, false, false)
+	if monitor.DefaultInterface() != nil || registrations != 1 || published != 1 {
+		t.Fatal("duplicate registration or stale report restored an owned default")
+	}
+	monitor.UpdateDefaultInterface("cell-test", 102, false, false)
+	if current := monitor.DefaultInterface(); current == nil || current.Index != 102 || published != 2 {
+		t.Fatal("host refresh did not publish the physical uplink")
+	}
+}
+
+func TestMonitorRegistrationFromCallbackDoesNotEnterUpdateQueue(t *testing.T) {
+	monitor, _, _ := newMonitorFixture()
+	monitor.RegisterCallback(func(iif *control.Interface, _ int) {
+		monitor.RegisterMyInterface(iif.Name)
+		if monitor.DefaultInterface() != nil {
+			t.Error("callback registration left an owned default")
+		}
+	})
+	updated := make(chan struct{})
+	go func() { monitor.UpdateDefaultInterface("wifi-test", 101, false, false); close(updated) }()
+	receive(t, updated)
+}
+
 func TestMonitorCloseDoesNotWaitForQueuedUpdates(t *testing.T) {
 	monitor, manager, platform := newMonitorFixture()
 	published := 0

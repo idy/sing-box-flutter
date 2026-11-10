@@ -51,6 +51,8 @@ class SingBoxFlutter {
   /// Android validates it using the native engine. iOS performs structural and
   /// compiled-capability preflight in the app; the extension performs full engine
   /// validation during startup, so a successful preflight cannot guarantee start.
+  /// macOS user_tun requires an idle runtime and returns `busy` while a check,
+  /// connection startup, active tunnel, or teardown owns the native resources.
   /// Invalid JSON is rejected locally without including its contents in errors.
   Future<void> checkConfig(String config) {
     _validateConfig(config);

@@ -19,24 +19,35 @@ struct NativeCoreSmoke {
         }
         let capabilities = try CoreCapabilities.load()
         try NativeCore.verify(capabilities)
-        precondition(capabilities.supports("outbounds", "direct"), "Smoke core must include direct.")
+        precondition(capabilities.supports("outbounds", "direct") && capabilities.supports("dns", "udp"), "Smoke core must include direct and UDP DNS.")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try NativeCore.setup(directory: directory, crashReportSource: "macOS native smoke")
-        let config = "{\"log\":{\"disabled\":true},\"outbounds\":[{\"type\":\"direct\",\"tag\":\"direct\"}]}"
+        // Explicit UDP avoids the implicit local resolver, which intentionally
+        // is not compiled into the minimal WGC profile used by CI.
+        let config = """
+        {"log":{"disabled":true},"dns":{"servers":[{"type":"udp","tag":"smoke-dns","server":"127.0.0.1","server_port":9}],"final":"smoke-dns"},"outbounds":[{"type":"direct","tag":"direct"}]}
+        """
         try NativeCore.check(config)
+        // Exercise the same monitor-only adapter as the Flutter backend. The
+        // legacy constructor uses a different, native route-table monitor.
+        let monitor = UserTunPathMonitor()
         var error: NSError?
-        guard let server = LibboxNewStandaloneCommandServer(&error), error == nil else {
+        guard let server = LibboxNewStandaloneCommandServerWithMonitor(monitor, &error), error == nil else {
             fatalError("Standalone command server creation failed.")
         }
+        defer { server.close() }
         let prepared = try server.prepareService(config, overrides: LibboxOverrideOptions())
         precondition(!prepared.hasTun && prepared.dnsMode == LibboxDNSModeDisabled)
+        print("Monitored native service prepared; activating.")
         try server.activateService()
+        print("Monitored native service activated; closing before restart.")
         try server.closeService()
+        print("Monitored native service closed; restarting.")
         try server.startOrReloadService(config, options: LibboxOverrideOptions())
         try server.closeService()
         server.close()
-        print("Actual macOS Go runtime: metadata verified, standalone service started, stopped and restarted without PlatformInterface.")
+        print("Actual macOS Go runtime: metadata verified, standalone service started, stopped and restarted with native networking and host path monitoring.")
 
         let secret = "native-smoke-private-auth-sentinel"
         do {

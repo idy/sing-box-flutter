@@ -109,6 +109,12 @@ Apple identifiers:
 await vpn.initialize();
 ```
 
+`checkConfig` runs only while the standalone runtime is idle. Configuration
+checks reserve the native runtime through constructor cleanup: another check or
+start returns `busy` until validation finishes, and checks during connection
+startup, an active tunnel or teardown also return `busy`. Status queries and
+explicit stop requests remain responsive.
+
 When automatic routing and DNS are enabled, the backend registers the effective
 TUN DNS addresses as a temporary system resolver. Stopping or failing startup
 removes that registration without overwriting physical-network DNS settings.

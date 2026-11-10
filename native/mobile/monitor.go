@@ -132,7 +132,7 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 	leave := m.updates.enter()
 	defer leave()
 	m.defaultInterfaceAccess.Lock()
-	if m.closed {
+	if m.closed || slices.Contains(m.myInterfaces, interfaceName) {
 		m.defaultInterfaceAccess.Unlock()
 		return
 	}
@@ -164,6 +164,13 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 	if err != nil {
 		m.defaultInterfaceAccess.Unlock()
 		m.logger.Error(E.Cause(err, "find updated interface: ", interfaceName))
+		return
+	}
+	// A host may have selected this path before RegisterMyInterface learned its
+	// dynamically assigned name. Test ownership under the assignment mutex, so
+	// neither an in-flight enumeration nor a queued stale report can restore it.
+	if slices.Contains(m.myInterfaces, newInterface.Name) {
+		m.defaultInterfaceAccess.Unlock()
 		return
 	}
 	oldDNSServers := m.defaultDNSServers
@@ -245,6 +252,13 @@ func (m *platformDefaultInterfaceMonitor) RegisterMyInterface(interfaceName stri
 		return
 	}
 	m.myInterfaces = append(m.myInterfaces, interfaceName)
+	// Registration may follow publication of the new interface. Withdraw that
+	// pointer atomically with ownership; Start/route callers must never wait for
+	// the host's asynchronous refresh before seeing that it is not an uplink.
+	if m.defaultInterface != nil && m.defaultInterface.Name == interfaceName {
+		m.defaultInterface = nil
+		m.defaultDNSServers = nil
+	}
 	m.defaultInterfaceAccess.Unlock()
 	// Hosts may enqueue a refreshed path. Never invoke them while holding the
 	// interface mutex: their listener can re-enter the monitor asynchronously.

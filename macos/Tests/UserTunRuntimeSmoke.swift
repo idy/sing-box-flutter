@@ -107,8 +107,8 @@ enum UserTunRuntimeSmoke {
         return false
     }
 
-    private static func runtime(_ factory: @escaping () -> UserTunService, privileged: Bool = true) async -> (UserTunRuntime, Statuses) {
-        let runtime = UserTunRuntime(dependencies: .init(version: { "fixture" }, setup: {}, check: { _ in }, makeService: factory, isPrivileged: { privileged }))
+    private static func runtime(_ factory: @escaping () -> UserTunService, privileged: Bool = true, check: @escaping (String) throws -> Void = { _ in }) async -> (UserTunRuntime, Statuses) {
+        let runtime = UserTunRuntime(dependencies: .init(version: { "fixture" }, setup: {}, check: check, makeService: factory, isPrivileged: { privileged }))
         let statuses = Statuses()
         _ = runtime.addObserver { statuses.append($0) }
         userTunRequire(await call(runtime, "initialize") == nil)
@@ -179,9 +179,99 @@ enum UserTunRuntimeSmoke {
         userTunRequire(!failedStatuses.states.contains("connected") && failed.closeCount == 1)
         _ = await call(failedRuntime, "stop")
 
+        await checkTests()
         try await dnsTests()
         try await pathTests()
-        print("Fake user_tun runtime: responsive stop/status, acceptance, generations, DNS ownership/recovery and IPv6 paths passed without host network writes.")
+        print("Fake user_tun runtime: responsive stop/status, exclusive validation, generations, DNS ownership/recovery and IPv6 paths passed without host network writes.")
+    }
+
+    private final class FakeChecker {
+        let entered = DispatchSemaphore(value: 0)
+        let prepareGate = DispatchSemaphore(value: 0)
+        let cleanupEntered = DispatchSemaphore(value: 0)
+        let cleanupGate = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var calls = 0
+        private var completed = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
+        var running: Bool { lock.lock(); defer { lock.unlock() }; return calls != completed }
+        func check(_ config: String) throws {
+            lock.lock(); calls += 1; lock.unlock()
+            entered.signal()
+            userTunRequire(prepareGate.wait(timeout: .now() + 5) == .success)
+            // The native checker owns its engine through deferred Close, too.
+            defer {
+                cleanupEntered.signal()
+                userTunRequire(cleanupGate.wait(timeout: .now() + 5) == .success)
+                lock.lock(); completed += 1; lock.unlock()
+            }
+            if config == "invalid" { throw NSError(domain: "private-config-diagnostic", code: 1) }
+        }
+    }
+
+    private static func checkTests() async {
+        let checker = FakeChecker()
+        let service = FakeService()
+        let (checkingRuntime, _) = await runtime({
+            userTunRequire(!checker.running, "start constructed a service during validation")
+            return service
+        }, check: checker.check)
+        let arguments = ["config": "invalid"]
+        let pendingCheck = Task { await call(checkingRuntime, "checkConfig", arguments) }
+        userTunRequire(await signalled(checker.entered))
+        userTunRequire((await call(checkingRuntime, "getStatus") as? [String: Any])?["state"] as? String == "disconnected")
+        userTunRequire((await call(checkingRuntime, "checkConfig", arguments) as? FlutterError)?.code == "busy")
+        userTunRequire((await call(checkingRuntime, "start", startArguments) as? FlutterError)?.code == "busy")
+        userTunRequire(await call(checkingRuntime, "stop") == nil)
+        // A no-op stop must not release a validation reservation.
+        userTunRequire((await call(checkingRuntime, "start", startArguments) as? FlutterError)?.code == "busy")
+        checker.prepareGate.signal()
+        userTunRequire(await signalled(checker.cleanupEntered))
+        userTunRequire((await call(checkingRuntime, "checkConfig", arguments) as? FlutterError)?.code == "busy")
+        userTunRequire((await call(checkingRuntime, "start", startArguments) as? FlutterError)?.code == "busy")
+        userTunRequire(checker.count == 1)
+        checker.cleanupGate.signal()
+        let invalid = await pendingCheck.value as? FlutterError
+        userTunRequire(invalid?.code == "invalid_config" && invalid?.message == TunnelFailure.invalidConfig.message)
+        userTunRequire(await call(checkingRuntime, "start", startArguments) == nil)
+        userTunRequire(await call(checkingRuntime, "stop") == nil)
+        // Successful checks also release the reservation before their replies.
+        for _ in 0..<2 {
+            checker.prepareGate.signal()
+            checker.cleanupGate.signal()
+            userTunRequire(await call(checkingRuntime, "checkConfig", ["config": "valid"]) == nil)
+        }
+        userTunRequire(checker.count == 3)
+
+        let services = [FakeService(blockPrepare: true), FakeService(blockActivate: true, blockClose: true)]
+        let sessionChecker = FakeChecker()
+        sessionChecker.prepareGate.signal()
+        sessionChecker.cleanupGate.signal()
+        var generation = 0
+        let (sessionRuntime, statuses) = await runtime({
+            defer { generation += 1 }
+            return services[generation]
+        }, check: sessionChecker.check)
+        let preparing = Task { await call(sessionRuntime, "start", startArguments) }
+        userTunRequire(await signalled(services[0].prepareEntered))
+        userTunRequire((await call(sessionRuntime, "checkConfig", arguments) as? FlutterError)?.code == "busy")
+        userTunRequire(await call(sessionRuntime, "stop") == nil)
+        userTunRequire((await preparing.value as? FlutterError)?.code == "operation_cancelled")
+        userTunRequire(await call(sessionRuntime, "start", startArguments) == nil)
+        userTunRequire(await signalled(services[1].activateEntered))
+        userTunRequire((await call(sessionRuntime, "checkConfig", arguments) as? FlutterError)?.code == "busy")
+        services[1].activateGate.signal()
+        userTunRequire(await eventually { statuses.states.last == "connected" })
+        userTunRequire((await call(sessionRuntime, "checkConfig", arguments) as? FlutterError)?.code == "busy")
+        let stopping = Task { await call(sessionRuntime, "stop") }
+        userTunRequire(await signalled(services[1].closeEntered))
+        userTunRequire((await call(sessionRuntime, "checkConfig", arguments) as? FlutterError)?.code == "busy")
+        userTunRequire((await call(sessionRuntime, "getStatus") as? [String: Any])?["state"] as? String == "disconnecting")
+        userTunRequire(sessionChecker.count == 0)
+        services[1].closeGate.signal()
+        userTunRequire(await stopping.value == nil)
+        userTunRequire(await call(sessionRuntime, "checkConfig", ["config": "valid"]) == nil)
+        userTunRequire(sessionChecker.count == 1)
     }
 
     private final class FakeDNSStore: UserTunDNSStore {
@@ -317,7 +407,9 @@ enum UserTunRuntimeSmoke {
         private let lock = NSLock()
         private var indices: [Int32] = []
         var updates: [Int32] { lock.lock(); defer { lock.unlock() }; return indices }
+        var beforeUpdate: ((Int32) -> Void)?
         func updateDefaultInterface(_ interfaceName: String?, interfaceIndex: Int32, isExpensive: Bool, isConstrained: Bool) {
+            beforeUpdate?(interfaceIndex)
             lock.lock(); indices.append(interfaceIndex); lock.unlock()
         }
         func updateNetworkPath(_ networkPath: String?) {}
@@ -346,5 +438,40 @@ enum UserTunRuntimeSmoke {
         let count = listener.updates.count
         late?(ipv6)
         userTunRequire(listener.updates.count == count)
+
+        // Hold a callback after Swift has selected an as-yet unknown utun.
+        // Registration must return without waiting for that callback and must
+        // queue the IPv6 physical refresh. The native assignment guard handles
+        // the stale selected interface (covered by monitor_test.go).
+        let racingSource = FakePathSource(ipv6)
+        let racingMonitor = UserTunPathMonitor(factory: { racingSource }, initialTimeout: .seconds(3))
+        let racingListener = PathListener()
+        let selected = DispatchSemaphore(value: 0)
+        let publishGate = DispatchSemaphore(value: 0)
+        racingListener.beforeUpdate = { index in
+            if index == 600 {
+                selected.signal()
+                userTunRequire(publishGate.wait(timeout: .now() + 5) == .success)
+            }
+        }
+        let starting = Task {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global().async {
+                    do { try racingMonitor.startDefaultInterfaceMonitor(racingListener); continuation.resume(returning: true) }
+                    catch { continuation.resume(returning: false) }
+                }
+            }
+        }
+        userTunRequire(await signalled(selected))
+        let registered = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            racingMonitor.registerMyInterface("own-dynamic-tunnel")
+            registered.signal()
+        }
+        userTunRequire(await signalled(registered), "ownership registration waited on a listener callback")
+        publishGate.signal()
+        userTunRequire(await starting.value)
+        userTunRequire(await eventually { racingListener.updates == [600, 601] })
+        try racingMonitor.closeDefaultInterfaceMonitor(racingListener)
     }
 }

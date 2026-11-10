@@ -183,10 +183,12 @@ struct CITunTrafficSmoke {
 
     private static func config(interface: String, port: UInt16) -> String {
         // The pinned option/rule_action.go places both override fields directly
-        // on the route action. No DNS servers, platform proxy or default routes.
+        // on the route action. Explicit inert UDP avoids implicit local DNS;
+        // system DNS, platform proxy and default routes remain unchanged.
         """
         {
           "log": {"disabled": true},
+          "dns": {"servers": [{"type": "udp", "tag": "ci-dns", "server": "127.0.0.1", "server_port": 9}], "final": "ci-dns"},
           "inbounds": [{
             "type": "tun", "tag": "ci-tun", "interface_name": "\(interface)",
             "address": ["\(address)/30"], "mtu": 1500, "stack": "system",
@@ -225,7 +227,7 @@ struct CITunTrafficSmoke {
         try require(ProcessInfo.processInfo.environment["TS_PERMIT_TOOLCHAIN_MISMATCH"] != "1", "Do not bypass the pinned Go toolchain assertion.")
         let capabilities = try CoreCapabilities.load()
         try NativeCore.verify(capabilities)
-        try require(capabilities.supports("inbounds", "tun") && capabilities.supports("outbounds", "direct"), "Selected core must contain tun and direct.")
+        try require(capabilities.supports("inbounds", "tun") && capabilities.supports("outbounds", "direct") && capabilities.supports("dns", "udp"), "Selected core must contain tun, direct and UDP DNS.")
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("sing-box-ci-tun-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }

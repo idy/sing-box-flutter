@@ -51,6 +51,7 @@ final class UserTunRuntime {
     private let dependencies: Dependencies
     private var initialized = false
     private var session: Session?
+    private var checking = false
     private var status = TunnelStatus("disconnected")
     private var observers: [UUID: (TunnelStatus) -> Void] = [:]
 
@@ -88,10 +89,7 @@ final class UserTunRuntime {
                 case "requestPermission": self.reply(result, self.dependencies.isPrivileged())
                 case "checkConfig":
                     guard let config = arguments["config"] as? String, !config.isEmpty else { throw TunnelFailure.invalidArguments }
-                    self.workers.async {
-                        do { try self.dependencies.check(config); self.reply(result) }
-                        catch { self.reply(result, failure: error as? TunnelFailure ?? .invalidConfig) }
-                    }
+                    try self.check(config, reply: result)
                 case "start": try self.start(arguments, reply: result)
                 case "stop": self.stop(reply: result)
                 default: break
@@ -100,12 +98,30 @@ final class UserTunRuntime {
         }
     }
 
+    private func check(_ config: String, reply result: @escaping FlutterResult) throws {
+        // The standalone checker constructs and closes an engine using the same
+        // native setup directories. Reserve it until cleanup has returned, just
+        // as a session owns those resources through both teardown workers.
+        guard session == nil, !checking else { throw TunnelFailure.busy }
+        checking = true
+        workers.async {
+            var failure: TunnelFailure?
+            do { try self.dependencies.check(config) }
+            catch { failure = error as? TunnelFailure ?? .invalidConfig }
+            let outcome = failure
+            self.queue.async {
+                self.checking = false
+                self.reply(result, failure: outcome)
+            }
+        }
+    }
+
     private func start(_ arguments: [String: Any], reply result: @escaping FlutterResult) throws {
         // Permission takes precedence over malformed config, arguments and busy.
         guard dependencies.isPrivileged() else { throw Self.permissionRequired }
         guard let config = arguments["config"] as? String, !config.isEmpty,
               let name = arguments["name"] as? String, !name.isEmpty else { throw TunnelFailure.invalidArguments }
-        guard session == nil else { throw TunnelFailure.busy }
+        guard session == nil, !checking else { throw TunnelFailure.busy }
         let current = Session(service: try dependencies.makeService(), reply: result)
         session = current // Establish cancellation ownership before entering Go.
         workers.async {

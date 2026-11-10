@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 2 || "$1" != /* || ( $# -eq 2 && "$2" != --ci-tun ) ]]; then
-  printf 'Usage: %s /absolute/host/project [--ci-tun]\nRequires a built --target macos core including direct, plus Flutter macOS artifacts.\n' "$0" >&2
+  printf 'Usage: %s /absolute/host/project [--ci-tun]\nRequires a built --target macos core including direct and UDP DNS, plus Flutter macOS artifacts.\n' "$0" >&2
   exit 64
 fi
 ci_tun=false

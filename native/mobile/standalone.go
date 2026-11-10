@@ -100,14 +100,16 @@ func standaloneDNSPlan(options option.Options) (*StandaloneDNSPlan, error) {
 // monitor. All TUN, route, interface enumeration and socket binding stay native.
 type standalonePlatformWrapper struct {
 	platformInterfaceStub
-	state *platformInterfaceWrapper
+	state platformInterfaceWrapper
 	host  StandalonePlatformInterface
 }
 
 var _ adapter.PlatformInterface = (*standalonePlatformWrapper)(nil)
 
 func (w *standalonePlatformWrapper) Initialize(manager adapter.NetworkManager) error {
-	w.state = &platformInterfaceWrapper{networkManager: manager}
+	// Box constructs the monitor before initializing the platform. Populate the
+	// existing shared state rather than replacing a pointer captured by it.
+	w.state.networkManager = manager
 	return nil
 }
 
@@ -115,7 +117,7 @@ func (w *standalonePlatformWrapper) UsePlatformAutoDetectInterfaceControl() bool
 
 func (w *standalonePlatformWrapper) CreateDefaultInterfaceMonitor(log logger.Logger) tun.DefaultInterfaceMonitor {
 	return &platformDefaultInterfaceMonitor{
-		platformInterfaceWrapper: w.state, host: w.host, logger: log,
+		platformInterfaceWrapper: &w.state, host: w.host, logger: log,
 		registerInterface: w.host.RegisterMyInterface,
 	}
 }

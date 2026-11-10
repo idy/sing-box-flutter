@@ -230,12 +230,19 @@ func TestStandaloneMonitorKeepsNativeNetworkingAndIPv6Callbacks(t *testing.T) {
 	if platform == nil || platform.UsePlatformInterface() || platform.UsePlatformNetworkInterfaces() || platform.UnderNetworkExtension() || platform.UsePlatformAutoDetectInterfaceControl() || !platform.UsePlatformDefaultInterfaceMonitor() {
 		t.Fatal("monitor adapter replaced native networking or socket control")
 	}
+	// Match Box.New: monitor construction precedes platform.Initialize.
+	monitor := platform.CreateDefaultInterfaceMonitor(log.NewNOPFactory().Logger()).(*platformDefaultInterfaceMonitor)
+	if monitor.platformInterfaceWrapper == nil || monitor.DefaultInterface() != nil {
+		t.Fatal("monitor must retain usable empty state before platform initialization")
+	}
 	_, manager, mobile := newMonitorFixture()
 	mobile.interfaces = []*NetworkInterface{{Index: 601, Name: "v6-uplink", Addresses: newIterator([]string{"2001:db8::1/64"})}}
 	if err := platform.Initialize(manager); err != nil {
 		t.Fatal(err)
 	}
-	monitor := platform.CreateDefaultInterfaceMonitor(log.NewNOPFactory().Logger()).(*platformDefaultInterfaceMonitor)
+	if monitor.networkManager != manager {
+		t.Fatal("initialization replaced state already retained by the monitor")
+	}
 	callbacks := 0
 	monitor.RegisterCallback(func(iif *control.Interface, _ int) {
 		if iif != nil && iif.Index == 601 {
