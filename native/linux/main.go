@@ -105,11 +105,12 @@ func main() {
 	signal.Ignore(syscall.SIGPIPE)
 	dataDir := flag.String("data-dir", "", "private absolute state directory")
 	flag.Parse()
-	if err := prepareStateDirectory(*dataDir); err != nil {
+	statePath, err := prepareStateDirectory(*dataDir)
+	if err != nil {
 		os.Exit(2)
 	}
 	if err := libbox.Setup(&libbox.SetupOptions{
-		BasePath: *dataDir, WorkingPath: *dataDir, TempPath: filepath.Join(*dataDir, "tmp"),
+		BasePath: statePath, WorkingPath: statePath, TempPath: filepath.Join(statePath, "tmp"),
 	}); err != nil {
 		os.Exit(2)
 	}

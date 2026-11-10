@@ -11,16 +11,49 @@ import 'package:path/path.dart' as p;
 import 'sing_box_flutter_platform_interface.dart';
 import 'src/events.dart';
 
-/// Resolves Linux state storage using the canonical host executable identity.
+/// Resolves and validates the stable application identity supplied by the host.
+@visibleForTesting
+String linuxApplicationId({
+  String? applicationIdOverride,
+  String? Function()? readApplicationId,
+}) {
+  try {
+    return _validatedApplicationId(
+        applicationIdOverride ?? (readApplicationId ?? _gio.applicationId)());
+  } catch (_) {
+    throw _applicationIdentityError();
+  }
+}
+
+PlatformException _applicationIdentityError() => PlatformException(
+      code: 'application_identity',
+      message: 'A valid GTK application ID or '
+          'SING_BOX_FLUTTER_APPLICATION_ID build define is required.',
+    );
+
+String _validatedApplicationId(String? applicationId) {
+  // GApplication/DBus IDs: ASCII elements, no leading digits, at least one dot.
+  if (applicationId == null ||
+      applicationId.length > 255 ||
+      !RegExp(r'^[A-Za-z_-][A-Za-z0-9_-]*(\.[A-Za-z_-][A-Za-z0-9_-]*)+$')
+          .hasMatch(applicationId)) {
+    throw _applicationIdentityError();
+  }
+  return applicationId;
+}
+
+/// Resolves Linux state storage using the stable host application identity.
 ///
 /// With no valid data home, allocates a private directory for this backend. This
 /// fallback survives helper restarts but does not persist across engine launches.
 @visibleForTesting
 String linuxDataDirectory({
   required Map<String, String> environment,
-  required String executable,
+  required String applicationId,
   required String temporaryDirectory,
+  void Function(String)? onTemporaryDirectoryCreated,
 }) {
+  _validatedApplicationId(applicationId);
   final xdgDataHome = environment['XDG_DATA_HOME'];
   final home = environment['HOME'];
   final String dataHome;
@@ -33,7 +66,8 @@ String linuxDataDirectory({
       throw ArgumentError('The fallback state directory must be absolute.');
     }
     try {
-      return _privateTemporaryDirectory(temporaryDirectory);
+      return _privateTemporaryDirectory(
+          temporaryDirectory, onTemporaryDirectoryCreated);
     } catch (_) {
       throw PlatformException(
         code: 'state_directory',
@@ -41,17 +75,181 @@ String linuxDataDirectory({
       );
     }
   }
-  // Platform.resolvedExecutable is canonical and remains stable across launches.
-  // A full digest also avoids path-length limits for long executable basenames.
-  final installation = sha256.convert(utf8.encode(executable)).toString();
-  return p.posix.join(dataHome, installation, 'sing_box_flutter');
+  // The application ID survives versioned deployment paths and launcher changes.
+  final application = sha256.convert(utf8.encode(applicationId)).toString();
+  return p.posix.join(dataHome, application, 'sing_box_flutter');
 }
 
-String _privateTemporaryDirectory(String parent) {
+final _gio = _Gio();
+
+// GIO is already provided by Flutter's GTK host. Its attribute API avoids
+// guessing platform-specific struct stat layouts for ownership checks.
+class _Gio {
+  final _library = ffi.DynamicLibrary.open('libgio-2.0.so.0');
+  late final _defaultApplication = _library.lookupFunction<
+      ffi.Pointer<ffi.Void> Function(),
+      ffi.Pointer<ffi.Void> Function()>('g_application_get_default');
+  late final _applicationId = _library.lookupFunction<
+      ffi.Pointer<ffi.Uint8> Function(ffi.Pointer<ffi.Void>),
+      ffi.Pointer<ffi.Uint8> Function(
+          ffi.Pointer<ffi.Void>)>('g_application_get_application_id');
+  late final _fileForPath = _library.lookupFunction<
+      ffi.Pointer<ffi.Void> Function(ffi.Pointer<ffi.Uint8>),
+      ffi.Pointer<ffi.Void> Function(
+          ffi.Pointer<ffi.Uint8>)>('g_file_new_for_path');
+  late final _queryInfo = _library.lookupFunction<
+      ffi.Pointer<ffi.Void> Function(
+          ffi.Pointer<ffi.Void>,
+          ffi.Pointer<ffi.Uint8>,
+          ffi.Int32,
+          ffi.Pointer<ffi.Void>,
+          ffi.Pointer<ffi.Pointer<ffi.Void>>),
+      ffi.Pointer<ffi.Void> Function(
+          ffi.Pointer<ffi.Void>,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Void>,
+          ffi.Pointer<ffi.Pointer<ffi.Void>>)>('g_file_query_info');
+  late final _hasAttribute = _library.lookupFunction<
+      ffi.Int32 Function(ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Uint8>),
+      int Function(ffi.Pointer<ffi.Void>,
+          ffi.Pointer<ffi.Uint8>)>('g_file_info_has_attribute');
+  late final _uint32Attribute = _library.lookupFunction<
+      ffi.Uint32 Function(ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Uint8>),
+      int Function(ffi.Pointer<ffi.Void>,
+          ffi.Pointer<ffi.Uint8>)>('g_file_info_get_attribute_uint32');
+  late final _unref = _library.lookupFunction<
+      ffi.Void Function(ffi.Pointer<ffi.Void>),
+      void Function(ffi.Pointer<ffi.Void>)>('g_object_unref');
+
+  String? applicationId() {
+    final application = _defaultApplication();
+    if (application == ffi.nullptr) return null;
+    final id = _applicationId(application);
+    if (id == ffi.nullptr) return null;
+    // A valid GApplication ID is at most 255 ASCII bytes. Never scan unbounded
+    // native memory when a custom host supplies an unavailable/invalid ID.
+    final bytes = <int>[];
+    for (var index = 0; index <= 255; index++) {
+      final byte = id[index];
+      if (byte == 0) return utf8.decode(bytes);
+      bytes.add(byte);
+    }
+    return null;
+  }
+
+  ({int uid, int mode}) directoryMetadata(String path) =>
+      _withCString(path, (nativePath) {
+        final file = _fileForPath(nativePath);
+        if (file == ffi.nullptr) {
+          throw const FileSystemException('Could not inspect directory.');
+        }
+        try {
+          return _withCString('unix::uid,unix::mode', (attributes) {
+            // G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS = 1: inspect the final entry.
+            final info =
+                _queryInfo(file, attributes, 1, ffi.nullptr, ffi.nullptr);
+            if (info == ffi.nullptr) {
+              throw const FileSystemException('Could not inspect directory.');
+            }
+            try {
+              int attribute(String name) => _withCString(name, (nativeName) {
+                    if (_hasAttribute(info, nativeName) == 0) {
+                      throw const FileSystemException(
+                          'Directory ownership is unavailable.');
+                    }
+                    return _uint32Attribute(info, nativeName);
+                  });
+              return (
+                uid: attribute('unix::uid'),
+                mode: attribute('unix::mode')
+              );
+            } finally {
+              _unref(info);
+            }
+          });
+        } finally {
+          _unref(file);
+        }
+      });
+}
+
+T _withCString<T>(String value, T Function(ffi.Pointer<ffi.Uint8>) action) {
+  final encoded = utf8.encode(value);
+  if (encoded.contains(0)) {
+    throw const FormatException('Invalid native string.');
+  }
+  final libc = ffi.DynamicLibrary.process();
+  final malloc = libc.lookupFunction<ffi.Pointer<ffi.Void> Function(ffi.IntPtr),
+      ffi.Pointer<ffi.Void> Function(int)>('malloc');
+  final free = libc.lookupFunction<ffi.Void Function(ffi.Pointer<ffi.Void>),
+      void Function(ffi.Pointer<ffi.Void>)>('free');
+  final buffer = malloc(encoded.length + 1).cast<ffi.Uint8>();
+  if (buffer == ffi.nullptr) {
+    throw const FileSystemException('Could not allocate native string.');
+  }
+  try {
+    buffer.asTypedList(encoded.length + 1)
+      ..setAll(0, encoded)
+      ..[encoded.length] = 0;
+    return action(buffer);
+  } finally {
+    free(buffer.cast<ffi.Void>());
+  }
+}
+
+({int uid, int mode}) _directoryMetadata(String path) {
+  if (Platform.isLinux) return _gio.directoryMetadata(path);
+  // This Linux backend is also filesystem-tested on macOS. The system stat
+  // utility provides no-follow metadata there without a guessed Darwin ABI.
+  if (Platform.isMacOS) {
+    final result = Process.runSync('/usr/bin/stat', ['-f', '%u %p', path]);
+    if (result.exitCode == 0) {
+      final fields = (result.stdout as String).trim().split(RegExp(r'\s+'));
+      if (fields.length == 2) {
+        return (
+          uid: int.parse(fields[0]),
+          mode: int.parse(fields[1], radix: 8)
+        );
+      }
+    }
+  }
+  throw const FileSystemException('Directory ownership is unavailable.');
+}
+
+void _validateTemporaryParent(String parent) {
+  final getuid = ffi.DynamicLibrary.process()
+      .lookupFunction<ffi.Uint32 Function(), int Function()>('getuid');
+  final uid = getuid();
+  var ancestor = '/';
+  for (final component in p.posix.split(parent)) {
+    ancestor = p.posix.join(ancestor, component);
+    final metadata = _directoryMetadata(ancestor);
+    final mode = metadata.mode;
+    if (mode & 0xf000 != 0x4000 || // S_IFMT / S_IFDIR
+        (metadata.uid != uid && metadata.uid != 0) ||
+        (mode & 0x12 != 0 && // group/other write (0022)
+            !(metadata.uid == 0 && mode & 0x200 != 0))) {
+      // sticky (01000)
+      throw const FileSystemException('Unsafe temporary directory ancestry.');
+    }
+  }
+}
+
+String _privateTemporaryDirectory(
+    String parent, void Function(String)? onCreated) {
   // Dart's Directory.createTemp does not guarantee 0700 on Linux. POSIX mkdtemp
   // creates the unpredictable directory atomically with private permissions,
   // without a process-wide umask change or a create-then-chmod exposure window.
-  final template = utf8.encode(p.posix.join(parent, 'sing-box-flutter-XXXXXX'));
+  // Resolve only the parent, then check its entire ancestry before creating
+  // anything. Never follow a replacement symlink at the newly created child.
+  if (parent.contains('\u0000')) {
+    throw const FormatException('Invalid temporary directory.');
+  }
+  final canonicalParent = Directory(parent).resolveSymbolicLinksSync();
+  _validateTemporaryParent(canonicalParent);
+  final template =
+      utf8.encode(p.posix.join(canonicalParent, 'sing-box-flutter-XXXXXX'));
   if (template.contains(0)) {
     throw const FormatException('Invalid temporary directory.');
   }
@@ -76,7 +274,8 @@ String _privateTemporaryDirectory(String parent) {
     }
     // mkdtemp replaces the six ASCII Xs in place and preserves the byte length.
     final path = utf8.decode(bytes.sublist(0, template.length));
-    return Directory(path).resolveSymbolicLinksSync();
+    onCreated?.call(path);
+    return path;
   } finally {
     free(buffer.cast<ffi.Void>());
   }
@@ -96,7 +295,13 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
         ),
         _dataDirectory = linuxDataDirectory(
           environment: Platform.environment,
-          executable: Platform.resolvedExecutable,
+          applicationId: linuxApplicationId(
+            applicationIdOverride:
+                const bool.hasEnvironment('SING_BOX_FLUTTER_APPLICATION_ID')
+                    ? const String.fromEnvironment(
+                        'SING_BOX_FLUTTER_APPLICATION_ID')
+                    : null,
+          ),
           temporaryDirectory: Directory.systemTemp.path,
         ),
         _startProcess = Process.start;

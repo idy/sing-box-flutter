@@ -99,18 +99,34 @@ Each IPC request must fit within 16 MiB including its JSON envelope, UTF-8 encod
 and trailing newline. A larger request fails locally with a sanitized
 `PlatformException` (`request_too_large`) and leaves an active connection running.
 
-State is stored under `$XDG_DATA_HOME/<installation-id>/sing_box_flutter` when
+State is stored under `$XDG_DATA_HOME/<application-id-hash>/sing_box_flutter` when
 `XDG_DATA_HOME` is an absolute path. An unset, empty or relative value uses
-`$HOME/.local/share/<installation-id>/sing_box_flutter`. The installation ID is the
-full SHA-256 digest of `Platform.resolvedExecutable`, the canonical host executable
-path. It stays stable across launches at the same path and separates installations
-with identical executable names. Moving an installation changes its state location;
-old basename-only state directories are not reused.
+`$HOME/.local/share/<application-id-hash>/sing_box_flutter`. The hash is the full
+SHA-256 digest of the host's GTK `GApplication` ID, normally the `APPLICATION_ID`
+in the host's `linux/CMakeLists.txt`. Keep this ID stable across releases and use a
+different ID for each application. State survives versioned installation paths,
+launcher symlink updates and executable moves; applications with the same executable
+basename remain separate when their application IDs differ. Old basename-only and
+executable-path-hash state directories are not reused.
+
+Custom hosts can supply a stable ID when building Flutter, for example
+`flutter build linux --dart-define=SING_BOX_FLUTTER_APPLICATION_ID=dev.example.Vpn`.
+This compile-time override takes precedence over the GTK ID. IDs must have at least
+two nonempty dot-separated ASCII elements containing letters, digits, `_` or `-`,
+with no element starting with a digit, and must be at most 255 characters. A missing
+or invalid identity fails with a sanitized `application_identity` error; the backend
+does not fall back to the executable name or a version-dependent path.
 
 If `HOME` is also unset, empty or relative, the backend calls POSIX `mkdtemp` to
 atomically create a fresh directory with mode `0700` in the system temporary
-directory. It reuses that directory for helper restarts within the same backend,
-but a new engine/backend gets a new one.
+directory. Before creation it canonicalizes the parent and verifies ownership and
+permissions throughout its ancestry. Root-owned sticky directories such as `/tmp`
+are allowed; nonsticky group/other-writable ancestors and foreign-owned ancestors
+are rejected before any directory is created. A safe symlinked temporary parent is
+supported. The newly created child is passed to the helper without resolving it,
+so replacing that child with a symlink cannot hide the replacement from the helper.
+It reuses that directory for helper restarts within the same backend, but a new
+engine/backend gets a new one.
 This fallback does not provide persistence across application launches and may be
 removed by the operating system's temporary-file cleanup. Set a valid `HOME` or
 `XDG_DATA_HOME` when persistent caches or other state are required. State paths
@@ -119,11 +135,14 @@ variables such as `USER` and `UID` do not establish ownership.
 
 Before opening state, the helper creates missing directories with mode `0700` and
 checks ownership against its real process UID. Existing state and `tmp` directories
-must belong to that UID and have no group or other permissions. Symlinks, foreign
-owners and unsafe permissions are rejected; the helper never repairs them with
-`chmod`. Ancestors may be ordinary user-owned or root-owned directories, but must
-not be writable by other users, except for root-owned sticky directories such as
-`/tmp`. Use actual directory paths rather than symlinks for state storage.
+must belong to that UID and have no group or other permissions. Symlinks at those
+private entries, foreign owners and unsafe permissions are rejected; the helper
+never repairs them with `chmod`. Ancestors may be ordinary user-owned or root-owned
+directories, but must not be writable by other users, except for root-owned sticky
+directories such as `/tmp`. Trusted ancestor symlinks, including `/home` pointing
+to `/var/home`, are resolved through pinned descriptors and the target ancestry is
+validated. The helper uses the resulting canonical path; the private state and
+`tmp` entries themselves must be actual directories.
 
 A minimal direct-routing configuration is:
 

@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sing_box_flutter/sing_box_flutter.dart';
 import 'package:sing_box_flutter/sing_box_flutter_linux.dart'
-    show linuxDataDirectory;
+    show linuxApplicationId, linuxDataDirectory;
 
 const fingerprint =
     '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -148,7 +149,7 @@ void main() {
   test('an absolute XDG data home takes precedence over HOME', () {
     final directory = linuxDataDirectory(
       environment: {'XDG_DATA_HOME': '/data/app', 'HOME': 'relative/home'},
-      executable: '/opt/my_app/bin/my_app',
+      applicationId: 'dev.test.Vpn',
       temporaryDirectory: '/tmp',
     );
     expect(directory, matches(r'^/data/app/[a-f0-9]{64}/sing_box_flutter$'));
@@ -169,7 +170,7 @@ void main() {
             if (xdgDataHome != null) 'XDG_DATA_HOME': xdgDataHome,
             'HOME': '/home/alice',
           },
-          executable: '/opt/my_app/bin/my_app',
+          applicationId: 'dev.test.Vpn',
           temporaryDirectory: '/tmp',
         ),
         matches(r'^/home/alice/\.local/share/[a-f0-9]{64}/sing_box_flutter$'),
@@ -178,30 +179,125 @@ void main() {
     }
   });
 
-  test('canonical installation paths separate equal executable names',
-      () async {
-    final first = File('${bundle.path}/vendor-a/vpn');
-    final second = File('${bundle.path}/vendor-b/vpn');
-    for (final file in [first, second]) {
+  test('application identity survives versioned launcher upgrades', () async {
+    final first = File('${bundle.path}/vendor-a/1.0/vpn');
+    final upgraded = File('${bundle.path}/vendor-a/2.0/vpn');
+    final other = File('${bundle.path}/vendor-b/1.0/vpn');
+    for (final file in [first, upgraded, other]) {
       await file.parent.create(recursive: true);
       await file.writeAsString('executable fixture');
     }
-    final alias = await Link('${bundle.path}/vpn-alias').create(first.path);
-    final dataHome = Directory('${bundle.path}/user-data');
-    await dataHome.create();
-    String directory(String executable) => linuxDataDirectory(
-          environment: {'XDG_DATA_HOME': dataHome.path},
-          executable: executable,
+    final launcher =
+        await Link('${bundle.path}/vpn-launcher').create(first.path);
+    String directory(String applicationId) => linuxDataDirectory(
+          environment: {'XDG_DATA_HOME': '${bundle.path}/user-data'},
+          applicationId: applicationId,
           temporaryDirectory: bundle.path,
         );
-    final firstDirectory = directory(await first.resolveSymbolicLinks());
-    expect(
-        firstDirectory, isNot(directory(await second.resolveSymbolicLinks())));
-    expect(firstDirectory, directory(await first.resolveSymbolicLinks()));
-    expect(firstDirectory, directory(await alias.resolveSymbolicLinks()));
-    expect(firstDirectory, startsWith('${dataHome.path}/'));
-    expect(await dataHome.list().isEmpty, isTrue);
+    final before = await launcher.resolveSymbolicLinks();
+    final firstDirectory = directory('dev.vendor_a.Vpn');
+    await launcher.update(upgraded.path);
+    expect(await launcher.resolveSymbolicLinks(), isNot(before));
+    expect(firstDirectory, directory('dev.vendor_a.Vpn'));
+    expect(firstDirectory, isNot(directory('dev.vendor_b.Vpn')));
+    expect(firstDirectory, startsWith('${bundle.path}/user-data/'));
+    expect(await Directory('${bundle.path}/user-data').exists(), isFalse);
   });
+
+  test('application override takes precedence over GTK identity', () {
+    expect(
+      linuxApplicationId(
+        applicationIdOverride: 'dev.custom.Host',
+        readApplicationId: () => throw StateError('must not read GTK'),
+      ),
+      'dev.custom.Host',
+    );
+    expect(linuxApplicationId(readApplicationId: () => 'dev.gtk.Host'),
+        'dev.gtk.Host');
+  });
+
+  test('missing and invalid application identities fail sanitized', () {
+    for (final id in [
+      null,
+      '',
+      'vpn',
+      '/opt/vendor/vpn',
+      'dev..Vpn',
+      'dev.1Vpn',
+      'dev.Vpn\n',
+      'dev.私密',
+      'dev.${'a' * 252}',
+    ]) {
+      expect(
+        () => linuxApplicationId(readApplicationId: () => id),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'application_identity')
+            .having((error) => error.toString(), 'message',
+                isNot(contains('/opt/vendor/vpn')))),
+        reason: 'ID=$id',
+      );
+    }
+    expect(
+      () => linuxApplicationId(
+        applicationIdOverride: 'private-path-secret',
+        readApplicationId: () => 'dev.valid.Host',
+      ),
+      throwsA(isA<PlatformException>()
+          .having((error) => error.code, 'code', 'application_identity')
+          .having((error) => error.toString(), 'message',
+              isNot(contains('private-path-secret')))),
+    );
+    expect(
+      () => linuxApplicationId(
+          readApplicationId: () => throw StateError('private-path-secret')),
+      throwsA(isA<PlatformException>().having((error) => error.toString(),
+          'message', isNot(contains('private-path-secret')))),
+    );
+  });
+
+  test('GTK default application supplies the stable native identity', () {
+    final gio = ffi.DynamicLibrary.open('libgio-2.0.so.0');
+    final getDefault = gio.lookupFunction<ffi.Pointer<ffi.Void> Function(),
+        ffi.Pointer<ffi.Void> Function()>('g_application_get_default');
+    final setDefault = gio.lookupFunction<
+        ffi.Void Function(ffi.Pointer<ffi.Void>),
+        void Function(ffi.Pointer<ffi.Void>)>('g_application_set_default');
+    final create = gio.lookupFunction<
+        ffi.Pointer<ffi.Void> Function(ffi.Pointer<ffi.Uint8>, ffi.Int32),
+        ffi.Pointer<ffi.Void> Function(
+            ffi.Pointer<ffi.Uint8>, int)>('g_application_new');
+    final unref = gio.lookupFunction<ffi.Void Function(ffi.Pointer<ffi.Void>),
+        void Function(ffi.Pointer<ffi.Void>)>('g_object_unref');
+    final libc = ffi.DynamicLibrary.process();
+    final malloc = libc.lookupFunction<
+        ffi.Pointer<ffi.Void> Function(ffi.IntPtr),
+        ffi.Pointer<ffi.Void> Function(int)>('malloc');
+    final free = libc.lookupFunction<ffi.Void Function(ffi.Pointer<ffi.Void>),
+        void Function(ffi.Pointer<ffi.Void>)>('free');
+    final bytes = utf8.encode('dev.test.GtkVpn');
+    final id = malloc(bytes.length + 1).cast<ffi.Uint8>();
+    expect(id, isNot(ffi.nullptr));
+    id.asTypedList(bytes.length + 1)
+      ..setAll(0, bytes)
+      ..[bytes.length] = 0;
+    final previous = getDefault();
+    final application = create(id, 0);
+    expect(application, isNot(ffi.nullptr));
+    try {
+      setDefault(application);
+      expect(linuxApplicationId(), 'dev.test.GtkVpn');
+      setDefault(ffi.nullptr);
+      expect(
+        linuxApplicationId,
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'application_identity')),
+      );
+    } finally {
+      setDefault(previous);
+      unref(application);
+      free(id.cast<ffi.Void>());
+    }
+  }, skip: !Platform.isLinux);
 
   test('invalid HOME creates a fresh private temporary fallback', () async {
     final directories = <String>{};
@@ -213,7 +309,7 @@ void main() {
           'UID': '0',
           'USER': 'another-user',
         },
-        executable: '/opt/my_app/bin/my_app',
+        applicationId: 'dev.test.Vpn',
         temporaryDirectory: bundle.path,
       );
       expect(
@@ -231,7 +327,7 @@ void main() {
     expect(
       () => linuxDataDirectory(
         environment: {},
-        executable: '/opt/my_app/bin/my_app',
+        applicationId: 'dev.test.Vpn',
         temporaryDirectory: 'relative/tmp',
       ),
       throwsArgumentError,
@@ -242,7 +338,7 @@ void main() {
     final parent = await Directory('${bundle.path}/tmp-空间-\u{10400}').create();
     final directory = linuxDataDirectory(
       environment: {},
-      executable: '/opt/my_app/bin/my_app',
+      applicationId: 'dev.test.Vpn',
       temporaryDirectory: parent.path,
     );
     expect(directory,
@@ -251,13 +347,85 @@ void main() {
     expect((await Directory(directory).stat()).mode & 0x1ff, 0x1c0);
   });
 
+  test('fallback rejects nonsticky writable temporary ancestry before creation',
+      () async {
+    for (final mode in ['0777', '0770']) {
+      final unsafe = await Directory('${bundle.path}/unsafe-$mode').create();
+      final chmod = Process.runSync('/bin/chmod', [mode, unsafe.path]);
+      expect(chmod.exitCode, 0, reason: chmod.stderr.toString());
+      for (final nested in [false, true]) {
+        final parent =
+            nested ? await Directory('${unsafe.path}/nested').create() : unsafe;
+        final before = await parent.list().length;
+        expect(
+          () => linuxDataDirectory(
+            environment: {},
+            applicationId: 'dev.test.Vpn',
+            temporaryDirectory: parent.path,
+          ),
+          throwsA(isA<PlatformException>()
+              .having((error) => error.code, 'code', 'state_directory')),
+        );
+        expect(await parent.list().length, before);
+      }
+    }
+  });
+
+  test('fallback supports a safe symlinked temporary parent', () async {
+    final target = await Directory('${bundle.path}/temporary-parent').create();
+    final alias =
+        await Link('${bundle.path}/temporary-alias').create(target.path);
+    final directory = linuxDataDirectory(
+      environment: {},
+      applicationId: 'dev.test.Vpn',
+      temporaryDirectory: alias.path,
+    );
+    expect(directory,
+        startsWith('${await target.resolveSymbolicLinks()}/sing-box-flutter-'));
+    expect(directory, isNot(startsWith('${alias.path}/')));
+    expect((await Directory(directory).stat()).mode & 0x1ff, 0x1c0);
+  });
+
+  test('fallback works under the real system temporary directory', () async {
+    final directory = linuxDataDirectory(
+      environment: {},
+      applicationId: 'dev.test.Vpn',
+      temporaryDirectory: Directory.systemTemp.path,
+    );
+    addTearDown(() => Directory(directory).delete(recursive: true));
+    expect((await Directory(directory).stat()).mode & 0x1ff, 0x1c0);
+  });
+
+  test('fallback never follows a replaced child after mkdtemp', () async {
+    final target =
+        await Directory('${bundle.path}/replacement-target').create();
+    final marker =
+        await File('${target.path}/marker').writeAsString('untouched');
+    late String created;
+    final directory = linuxDataDirectory(
+      environment: {},
+      applicationId: 'dev.test.Vpn',
+      temporaryDirectory: bundle.path,
+      onTemporaryDirectoryCreated: (path) {
+        created = path;
+        Directory(path).renameSync('$path-original');
+        Link(path).createSync(target.path);
+      },
+    );
+    expect(directory, created);
+    expect(directory, isNot(await target.resolveSymbolicLinks()));
+    expect(await FileSystemEntity.type(directory, followLinks: false),
+        FileSystemEntityType.link);
+    expect(await marker.readAsString(), 'untouched');
+  });
+
   test('temporary fallback rejects NUL paths before native path truncation',
       () async {
     final entries = await bundle.list().length;
     expect(
       () => linuxDataDirectory(
         environment: {},
-        executable: '/opt/my_app/bin/my_app',
+        applicationId: 'dev.test.Vpn',
         temporaryDirectory: '${bundle.path}\u0000/private-path-secret',
       ),
       throwsA(isA<PlatformException>()
@@ -277,7 +445,7 @@ void main() {
     await Link('${predictable.path}/sing_box_flutter').create(target.path);
     final directory = linuxDataDirectory(
       environment: {'HOME': '', 'XDG_DATA_HOME': ''},
-      executable: '/opt/my_app/bin/my_app',
+      applicationId: 'dev.test.Vpn',
       temporaryDirectory: bundle.path,
     );
     expect(directory, isNot('${predictable.path}/sing_box_flutter'));
@@ -293,7 +461,7 @@ void main() {
     expect(
       () => linuxDataDirectory(
         environment: {},
-        executable: '/opt/my_app/bin/my_app',
+        applicationId: 'dev.test.Vpn',
         temporaryDirectory: invalidTemp.path,
       ),
       throwsA(isA<PlatformException>()
@@ -307,7 +475,7 @@ void main() {
       () async {
     final dataDirectory = linuxDataDirectory(
       environment: {},
-      executable: '/opt/my_app/bin/my_app',
+      applicationId: 'dev.test.Vpn',
       temporaryDirectory: bundle.path,
     );
     final launches = <List<String>>[];
