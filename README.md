@@ -1,7 +1,10 @@
 # sing_box_flutter
 
+[Project website](https://sing-box-flutter.idy.dev/) · [Feature guide](doc/core-features.md)
+
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
-as a native VPN on Android, iOS and Windows (Wintun). Select the compiled protocols in your host
+as a native VPN on Android, iOS, macOS and Windows (Wintun). Select the compiled
+protocols in your host
 `pubspec.yaml` and build them from source with the pinned **Tailscale Go** compiler.
 
 ![Overview: a minimal WGC core is 62–64% smaller than the standard libbox build, the iOS app process has no Go runtime, and three steps build it from the host pubspec.yaml](doc/images/overview.svg)
@@ -20,6 +23,8 @@ Kotlin and JDK 17; the checked-in example and CI use the same Flutter toolchain.
 | --- | --- | --- |
 | Android | Foreground `VpnService`, socket protection, network monitoring | Android 7 / API 24 |
 | iOS | `NEPacketTunnelProvider` in a separately signed host extension | iOS 15 |
+| macOS (NE) | `NEPacketTunnelProvider` in a separately signed host extension | macOS 12 |
+| macOS (user TUN) | Native `utun`, core-managed routes and DNS, unsandboxed administrator process | macOS 12 |
 | Windows | Bundled core process, native Wintun adapter and routes; elevated host | Windows 10, x64 / ARM64 |
 
 Flutter controls the service through method channels and receives typed connection
@@ -59,8 +64,10 @@ Install these build prerequisites:
 - For Android: OpenJDK 17, the Android SDK and NDK `28.0.13004108`.
 - For iOS: macOS with Xcode and its iPhoneOS/simulator SDKs, plus CocoaPods for the
   Flutter host integration.
+- For macOS: Xcode and CocoaPods, plus the backend-specific host setup described
+  in [macOS setup](doc/macos-setup.md).
 - For Windows packaging: Windows with Visual Studio's Desktop development with C++
-  workload and Windows SDK. The Go core also cross-compiles from macOS/Linux.
+  workload, Windows SDK and CMake 3.27+. The Go core also cross-compiles from macOS/Linux.
 
 The builder automatically downloads and verifies the pinned **Tailscale Go**
 compiler and mobile tools. You do not need to install Go globally. The installed
@@ -147,6 +154,36 @@ Follow [the complete iOS setup guide](doc/ios-setup.md) before running the app.
 A physical device is required to test VPN traffic; the simulator can validate
 compilation and the UI only.
 
+### macOS host setup
+
+Select one backend in the host `pubspec.yaml`, alongside `core`:
+
+```yaml
+sing_box_flutter:
+  macos:
+    mode: ne # or user_tun
+  core:
+    inbounds: [tun]
+    outbounds: [direct]
+    endpoints: [wgc]
+    dns: [udp, tcp, fakeip]
+```
+
+```bash
+dart run sing_box_flutter build --target macos
+```
+
+`ne` (the default) uses a separately signed Packet Tunnel extension and App Group,
+keeping Go out of the Flutter app process. `user_tun` links the core in the host
+process and lets sing-box create `utun`, routes and DNS directly. It requires an
+unsandboxed process already running with administrator privileges; this plugin
+does not install a privileged helper or elevate the Flutter app.
+
+The selection controls CocoaPods source/link dependencies at build time. Rebuild
+the core and rerun `pod install` after changing it. Both modes expose the same Dart
+API. Follow [the macOS setup guide](doc/macos-setup.md) for host targets,
+entitlements, permissions and validation.
+
 ## Dart API
 
 ```dart
@@ -157,7 +194,7 @@ final vpn = SingBoxFlutter();
 await vpn.initialize(
   // Required on Windows; keep stable across updates and install-directory changes.
   applicationId: 'com.example.myapp',
-  // Required on iOS; omit on Android.
+  // Required on iOS and macOS NE; omit on Android, macOS user_tun and Windows.
   appGroup: 'group.com.example.app',
   providerBundleIdentifier: 'com.example.app.PacketTunnel',
   notificationTitle: 'Example VPN',
@@ -256,6 +293,10 @@ for SDK prerequisites, verification, artifact provenance and the source-only
 publication policy.
 
 ## Example and development
+
+The standalone project website is built from `site/`. See the
+[website development and deployment guide](doc/website.md) for local preview,
+GitHub Pages and custom-domain setup.
 
 The [example](example/) accepts editable sing-box JSON and demonstrates permission,
 validation, connection status, and explicit disconnection. Its default configuration

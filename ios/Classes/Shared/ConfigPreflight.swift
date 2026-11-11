@@ -41,8 +41,8 @@ enum ConfigPreflight {
             try checkConstructed(root, capabilities)
             let inbounds = effectiveArray(root.members, "inbounds")
             let tunCount = inbounds.filter { ($0 as? JSONObject).flatMap { discriminator($0.members) } == "tun" }.count
-            if tunCount > 1 { throw TunnelFailure(code: "multiple_tun", message: "Only one TUN inbound is supported on iOS.") }
-            if requireTUN && tunCount != 1 { throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound on iOS.") }
+            if tunCount > 1 { throw TunnelFailure(code: "multiple_tun", message: "Only one TUN inbound is supported by the Network Extension backend.") }
+            if requireTUN && tunCount != 1 { throw TunnelFailure(code: "missing_tun", message: "The configuration must start a TUN inbound in the Network Extension backend.") }
             // Endpoints become the default only through an explicit route.final.
             // Otherwise the engine creates direct when no outbound is configured.
             let final = merged(root.members, "route").flatMap { lastValue($0, "final") as? String } ?? ""

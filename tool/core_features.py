@@ -63,7 +63,7 @@ def selection_hash(selection: dict) -> str:
 
 def resolve_features(selection: dict, target: str) -> dict:
     requested = canonicalize(selection)
-    if target not in {"android", "apple", "ios", "windows"}:
+    if target not in {"android", "apple", "ios", "macos", "windows"}:
         raise FeatureError(f"Unsupported core target: {target}")
     unsupported = {
         "inbounds": {"redirect", "tproxy"},
@@ -71,7 +71,7 @@ def resolve_features(selection: dict, target: str) -> dict:
         "dns": {"resolved"},
         "services": {"resolved", "usbip-server", "usbip-client"},
     }
-    if target in {"apple", "ios", "windows"}:
+    if target in {"apple", "ios", "macos", "windows"}:
         unsupported["outbounds"].add("naive")
     reasons = {
         "redirect": "Linux transparent interception is unavailable to the mobile VPN host",
@@ -138,7 +138,7 @@ def generate_registry(features: dict, extensions: list[dict] | None = None, *,
     Extension records are validated by wgc_overlay.load_extensions; their package
     imports install WGC transport factories via init, without extra endpoints.
     """
-    if target not in {"android", "apple", "ios", "windows"}:
+    if target not in {"android", "apple", "ios", "macos", "windows"}:
         raise FeatureError(f"Unsupported registry target: {target}")
     features = canonicalize(features)
     prefix = "github.com/sagernet/sing-box/"

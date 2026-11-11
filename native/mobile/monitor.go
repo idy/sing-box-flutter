@@ -27,6 +27,8 @@ var (
 
 type platformDefaultInterfaceMonitor struct {
 	*platformInterfaceWrapper
+	host              DefaultInterfaceMonitorHost
+	registerInterface func(string)
 	logger            logger.Logger
 	updates           updateQueue
 	callbacks         list.List[tun.DefaultInterfaceUpdateCallback]
@@ -34,6 +36,13 @@ type platformDefaultInterfaceMonitor struct {
 	defaultDNSServers []string
 	dnsWatcher        *dnsinfo.Watcher
 	closed            bool
+}
+
+func (m *platformDefaultInterfaceMonitor) monitorHost() DefaultInterfaceMonitorHost {
+	if m.host != nil {
+		return m.host
+	}
+	return m.iif
 }
 
 func (m *platformDefaultInterfaceMonitor) Start() error {
@@ -44,13 +53,13 @@ func (m *platformDefaultInterfaceMonitor) Start() error {
 		}
 		m.dnsWatcher = dnsWatcher
 	}
-	err := m.iif.StartDefaultInterfaceMonitor(m)
+	err := m.monitorHost().StartDefaultInterfaceMonitor(m)
 	if err != nil {
 		if m.dnsWatcher != nil {
 			_ = m.dnsWatcher.Close()
 			m.dnsWatcher = nil
 		}
-		_ = m.iif.CloseDefaultInterfaceMonitor(m)
+		_ = m.monitorHost().CloseDefaultInterfaceMonitor(m)
 		return err
 	}
 	return nil
@@ -64,7 +73,7 @@ func (m *platformDefaultInterfaceMonitor) Close() error {
 	}
 	m.closed = true
 	m.defaultInterfaceAccess.Unlock()
-	err := m.iif.CloseDefaultInterfaceMonitor(m)
+	err := m.monitorHost().CloseDefaultInterfaceMonitor(m)
 	if m.dnsWatcher != nil {
 		err = E.Errors(err, m.dnsWatcher.Close())
 		m.dnsWatcher = nil
@@ -123,7 +132,7 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 	leave := m.updates.enter()
 	defer leave()
 	m.defaultInterfaceAccess.Lock()
-	if m.closed {
+	if m.closed || slices.Contains(m.myInterfaces, interfaceName) {
 		m.defaultInterfaceAccess.Unlock()
 		return
 	}
@@ -155,6 +164,13 @@ func (m *platformDefaultInterfaceMonitor) updateDefaultInterface(interfaceName s
 	if err != nil {
 		m.defaultInterfaceAccess.Unlock()
 		m.logger.Error(E.Cause(err, "find updated interface: ", interfaceName))
+		return
+	}
+	// A host may have selected this path before RegisterMyInterface learned its
+	// dynamically assigned name. Test ownership under the assignment mutex, so
+	// neither an in-flight enumeration nor a queued stale report can restore it.
+	if slices.Contains(m.myInterfaces, newInterface.Name) {
+		m.defaultInterfaceAccess.Unlock()
 		return
 	}
 	oldDNSServers := m.defaultDNSServers
@@ -203,15 +219,24 @@ type updateQueue struct {
 }
 
 func (q *updateQueue) enter() (leave func()) {
+	wait, leave := q.reserve()
+	wait()
+	return leave
+}
+
+// reserve fixes publication order without waiting on callbacks that may be
+// holding a route/start lock needed by the caller.
+func (q *updateQueue) reserve() (wait func(), leave func()) {
 	done := make(chan struct{})
 	q.access.Lock()
 	previous := q.tail
 	q.tail = done
 	q.access.Unlock()
-	if previous != nil {
-		<-previous
-	}
-	return func() { close(done) }
+	return func() {
+		if previous != nil {
+			<-previous
+		}
+	}, func() { close(done) }
 }
 
 func (m *platformDefaultInterfaceMonitor) readDNSServers(interfaceIndex int) []string {
@@ -231,8 +256,44 @@ func (m *platformDefaultInterfaceMonitor) readDNSServers(interfaceIndex int) []s
 
 func (m *platformDefaultInterfaceMonitor) RegisterMyInterface(interfaceName string) {
 	m.defaultInterfaceAccess.Lock()
-	defer m.defaultInterfaceAccess.Unlock()
+	if m.closed || slices.Contains(m.myInterfaces, interfaceName) {
+		m.defaultInterfaceAccess.Unlock()
+		return
+	}
 	m.myInterfaces = append(m.myInterfaces, interfaceName)
+	// Registration may follow publication of the new interface. Withdraw that
+	// pointer atomically with ownership; Start/route callers must never wait for
+	// the host's asynchronous refresh before seeing that it is not an uplink.
+	if m.defaultInterface != nil && m.defaultInterface.Name == interfaceName {
+		m.defaultInterface = nil
+		m.defaultDNSServers = nil
+		// Listeners on every platform must lose the owned default too. Reserve
+		// before unlocking so a later path cannot overtake this notification;
+		// dispatch asynchronously because registration can hold route/start locks
+		// or run inside an existing update callback.
+		wait, leave := m.updates.reserve()
+		go func() {
+			wait()
+			defer leave()
+			m.defaultInterfaceAccess.Lock()
+			// An earlier queued update may already have found a physical uplink.
+			if m.closed || m.defaultInterface != nil {
+				m.defaultInterfaceAccess.Unlock()
+				return
+			}
+			callbacks := m.callbacks.Array()
+			m.defaultInterfaceAccess.Unlock()
+			for _, callback := range callbacks {
+				callback(nil, 0)
+			}
+		}()
+	}
+	m.defaultInterfaceAccess.Unlock()
+	// Hosts may enqueue a refreshed path. Never invoke them while holding the
+	// interface mutex: their listener can re-enter the monitor asynchronously.
+	if m.registerInterface != nil {
+		m.registerInterface(interfaceName)
+	}
 }
 
 func (m *platformDefaultInterfaceMonitor) MyInterfaces() []string {

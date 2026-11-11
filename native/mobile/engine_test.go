@@ -32,6 +32,8 @@ import (
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/sing/service/filemanager"
 	"github.com/sagernet/sing/service/pause"
+
+	"golang.org/x/sys/unix"
 )
 
 func cacheTestContext(dir string) context.Context {
@@ -218,5 +220,322 @@ func TestMobileWakeEndsDevicePauseOnEveryPlatform(t *testing.T) {
 	}
 	if strings.Count(string(content), " awake\n") != 2 {
 		t.Fatal("wake did not record its lifecycle event")
+	}
+}
+
+func privateLogTestContext(dir string) context.Context {
+	return filemanager.WithDefault(context.Background(), dir, dir, os.Getuid(), os.Getgid())
+}
+
+func privateLogTestEngine(t *testing.T, dir, output string) *boxEngine {
+	t.Helper()
+	ctx := privateLogTestContext(dir)
+	path, err := privateLogPath(ctx, &option.LogOptions{Output: output})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := &boxEngine{ctx: ctx, logPath: path}
+	t.Cleanup(func() { _ = engine.Close() })
+	return engine
+}
+
+func writePrivateLogTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Fixtures live only in t.TempDir. Set a known mode independently of umask
+	// so an unintended chmod to 0600 is observable on every test host.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertPrivateLogUnchanged(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != mode {
+		t.Fatalf("permissions changed: got %o, want %o", info.Mode().Perm(), mode)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != content {
+		t.Fatalf("file content changed: %q", got)
+	}
+}
+
+func assertPrivateLogOpenRejected(t *testing.T, engine *boxEngine) {
+	t.Helper()
+	if err := engine.openLog(); err == nil || err.Error() != "could not open private mobile log" {
+		t.Fatalf("expected sanitized log access error, got %v", err)
+	}
+	if engine.log != nil {
+		t.Fatal("rejected log retained a writable descriptor")
+	}
+}
+
+func TestPrivateLogPathConfinement(t *testing.T) {
+	dir := t.TempDir()
+	ctx := privateLogTestContext(dir)
+	for _, tc := range []struct {
+		name    string
+		options *option.LogOptions
+		want    string
+		wantErr string
+	}{
+		{name: "absent"},
+		{name: "disabled", options: &option.LogOptions{Disabled: true, Output: "../ignored.log"}},
+		{name: "default", options: &option.LogOptions{}, want: "mobile.log"},
+		{name: "relative", options: &option.LogOptions{Output: "logs/mobile.log"}, want: "logs/mobile.log"},
+		{name: "absolute-inside", options: &option.LogOptions{Output: filepath.Join(dir, "logs/mobile.log")}, want: "logs/mobile.log"},
+		{name: "parent-escape", options: &option.LogOptions{Output: "../outside.log"}, wantErr: "mobile logging requires a private file"},
+		{name: "nested-escape", options: &option.LogOptions{Output: "logs/../../outside.log"}, wantErr: "mobile logging requires a private file"},
+		{name: "absolute-outside", options: &option.LogOptions{Output: filepath.Join(dir, "..", "outside.log")}, wantErr: "mobile logging requires a private file"},
+		{name: "prefix-sibling", options: &option.LogOptions{Output: dir + "-other/mobile.log"}, wantErr: "mobile logging requires a private file"},
+		{name: "directory", options: &option.LogOptions{Output: "."}, wantErr: "mobile logging requires a private file"},
+		{name: "stdout", options: &option.LogOptions{Output: "stdout"}, wantErr: "mobile logging requires a private file"},
+		{name: "stderr", options: &option.LogOptions{Output: "stderr"}, wantErr: "mobile logging requires a private file"},
+		{name: "invalid-level", options: &option.LogOptions{Level: "secret-invalid-level"}, wantErr: "invalid mobile log level"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := privateLogPath(ctx, tc.options)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr || got != "" {
+					t.Fatalf("path=%q, error=%v", got, err)
+				}
+			} else if err != nil || got != tc.want {
+				t.Fatalf("path=%q, error=%v; want %q", got, err, tc.want)
+			}
+		})
+	}
+	if _, err := privateLogPath(context.Background(), &option.LogOptions{}); err == nil || err.Error() != "mobile logging requires a private file" {
+		t.Fatalf("unconfigured runtime accepted: %v", err)
+	}
+}
+
+func TestPrivateLogRejectsOutsidePathsAtOpen(t *testing.T) {
+	dir := t.TempDir()
+	runtime := filepath.Join(dir, "runtime")
+	if err := os.Mkdir(runtime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.log")
+	writePrivateLogTestFile(t, outside, "unchanged\n")
+	for _, path := range []string{outside, "../outside.log", "../new/mobile.log"} {
+		// Exercise the open-time boundary independently of option validation,
+		// using only disposable paths even if both protections regress.
+		engine := &boxEngine{ctx: privateLogTestContext(runtime), logPath: path}
+		t.Cleanup(func() { _ = engine.Close() })
+		assertPrivateLogOpenRejected(t, engine)
+	}
+	assertPrivateLogUnchanged(t, outside, "unchanged\n", 0o644)
+	if _, err := os.Stat(filepath.Join(dir, "new")); !os.IsNotExist(err) {
+		t.Fatalf("created storage outside runtime: %v", err)
+	}
+}
+
+func TestPrivateLogPathRejectsDevicePaths(t *testing.T) {
+	ctx := privateLogTestContext(t.TempDir())
+	for _, output := range []string{"/dev/null", "/dev/zero", "/dev/tty"} {
+		t.Run(filepath.Base(output), func(t *testing.T) {
+			// Validation only: never pass host devices to openLog, even if a
+			// regression lets one of these paths through validation.
+			path, err := privateLogPath(ctx, &option.LogOptions{Output: output})
+			if err == nil || err.Error() != "mobile logging requires a private file" || path != "" {
+				t.Fatalf("device path accepted: path=%q, error=%v", path, err)
+			}
+		})
+	}
+}
+
+func TestPrivateLogValidationDoesNotCreateStorage(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing-runtime")
+	engine := privateLogTestEngine(t, dir, "logs/mobile.log")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("path validation created runtime storage: %v", err)
+	}
+	assertPrivateLogOpenRejected(t, engine)
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("log opening created an unconfigured runtime directory: %v", err)
+	}
+}
+
+func TestPrivateLogAppendsRegularFiles(t *testing.T) {
+	for _, kind := range []string{"relative", "absolute-inside"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "mobile.log")
+			writePrivateLogTestFile(t, path, "previous\n")
+			output := "mobile.log"
+			if kind == "absolute-inside" {
+				output = path
+			}
+			engine := privateLogTestEngine(t, dir, output)
+			if err := engine.openLog(); err != nil {
+				t.Fatal(err)
+			}
+			opened := engine.log
+			if err := engine.openLog(); err != nil || engine.log != opened {
+				t.Fatalf("repeated log opening replaced the descriptor: %v", err)
+			}
+			engine.event("started")
+			if err := engine.Close(); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != 0o600 || !info.Mode().IsRegular() {
+				t.Fatalf("log is not a private regular file: %v, %v", info, err)
+			}
+			content, err := os.ReadFile(path)
+			if err != nil || !strings.HasPrefix(string(content), "previous\n") || strings.Count(string(content), " started\n") != 1 || strings.Count(string(content), " stopped\n") != 1 {
+				t.Fatalf("log was not appended: %q, %v", content, err)
+			}
+		})
+	}
+}
+
+func TestPrivateLogCreatesNestedFilesThroughTrustedRuntimeAlias(t *testing.T) {
+	dir := t.TempDir()
+	runtime := filepath.Join(dir, "runtime")
+	if err := os.Mkdir(runtime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Apple and Android may provide storage through trusted system aliases.
+	alias := filepath.Join(dir, "alias")
+	if err := os.Symlink(runtime, alias); err != nil {
+		t.Fatal(err)
+	}
+	engine := privateLogTestEngine(t, alias, "logs/mobile.log")
+	if err := engine.openLog(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(runtime, "logs"))
+	if err != nil || info.Mode().Perm() != 0o700 || !info.IsDir() {
+		t.Fatalf("log parent is not private: %v, %v", info, err)
+	}
+	assertPrivateLogUnchanged(t, filepath.Join(runtime, "logs/mobile.log"), "", 0o600)
+}
+
+func TestPrivateLogRejectsSymlinkEscapes(t *testing.T) {
+	for _, kind := range []string{"absolute-leaf", "relative-leaf", "inside-leaf", "dangling-leaf", "absolute-parent", "relative-parent"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			runtime, outside := filepath.Join(dir, "runtime"), filepath.Join(dir, "outside")
+			for _, path := range []string{runtime, outside} {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				writePrivateLogTestFile(t, filepath.Join(path, "victim.log"), "unchanged\n")
+			}
+			output, target := "link", filepath.Join(outside, "victim.log")
+			switch kind {
+			case "relative-leaf":
+				target = "../outside/victim.log"
+			case "inside-leaf":
+				target = "victim.log"
+			case "dangling-leaf":
+				target = "../outside/missing.log"
+			case "absolute-parent":
+				output, target = "link/new/mobile.log", outside
+			case "relative-parent":
+				output, target = "link/new/mobile.log", "../outside"
+			}
+			engine := privateLogTestEngine(t, runtime, output)
+			// Install the link after path validation to exercise the open-time
+			// boundary rather than relying on a prior path/type inspection.
+			if err := os.Symlink(target, filepath.Join(runtime, "link")); err != nil {
+				t.Fatal(err)
+			}
+			assertPrivateLogOpenRejected(t, engine)
+			assertPrivateLogUnchanged(t, filepath.Join(outside, "victim.log"), "unchanged\n", 0o644)
+			assertPrivateLogUnchanged(t, filepath.Join(runtime, "victim.log"), "unchanged\n", 0o644)
+			for _, path := range []string{filepath.Join(outside, "new"), filepath.Join(outside, "missing.log")} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("created storage through symlink: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestPrivateLogRejectsNonRegularFiles(t *testing.T) {
+	for _, kind := range []string{"directory", "fifo-without-reader", "fifo-with-reader"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "mobile.log")
+			if kind == "directory" {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := unix.Mkfifo(path, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "fifo-with-reader" {
+					// Keep a reader so the writer open succeeds and the descriptor
+					// type check, rather than ENXIO, must reject this temporary FIFO.
+					reader, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = reader.Close() })
+				}
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPrivateLogOpenRejected(t, privateLogTestEngine(t, dir, "mobile.log"))
+			after, err := os.Stat(path)
+			if err != nil || after.Mode() != before.Mode() {
+				t.Fatalf("nonregular log permissions changed: %v, %v", after, err)
+			}
+		})
+	}
+}
+
+func TestPrivateLogRejectsHardLinkAliases(t *testing.T) {
+	dir := t.TempDir()
+	runtime := filepath.Join(dir, "runtime")
+	if err := os.Mkdir(runtime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.log")
+	writePrivateLogTestFile(t, outside, "unchanged\n")
+	if err := os.Link(outside, filepath.Join(runtime, "mobile.log")); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivateLogOpenRejected(t, privateLogTestEngine(t, runtime, "mobile.log"))
+	assertPrivateLogUnchanged(t, outside, "unchanged\n", 0o644)
+}
+
+func TestPrivateLogWritesRetainOpenedFile(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.log")
+	writePrivateLogTestFile(t, outside, "unchanged\n")
+	engine := privateLogTestEngine(t, dir, "mobile.log")
+	if err := engine.openLog(); err != nil {
+		t.Fatal(err)
+	}
+	retained := filepath.Join(dir, "retained.log")
+	if err := os.Rename(filepath.Join(dir, "mobile.log"), retained); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "mobile.log")); err != nil {
+		t.Fatal(err)
+	}
+	engine.event("started")
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivateLogUnchanged(t, outside, "unchanged\n", 0o644)
+	content, err := os.ReadFile(retained)
+	if err != nil || strings.Count(string(content), " started\n") != 1 {
+		t.Fatalf("event did not reach the opened file: %q, %v", content, err)
 	}
 }

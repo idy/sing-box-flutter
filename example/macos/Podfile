@@ -1,0 +1,49 @@
+platform :osx, '12.0'
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+require_relative 'configure_project'
+macos_mode = SingBoxFlutterMacOSExample.configure
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  configuration = File.expand_path('Flutter/ephemeral/Flutter-Generated.xcconfig', __dir__)
+  raise 'Run flutter pub get from example/ first.' unless File.exist?(configuration)
+  File.foreach(configuration) do |line|
+    match = line.match(/FLUTTER_ROOT\=(.*)/)
+    return match[1].strip if match
+  end
+  raise 'FLUTTER_ROOT was not found in Flutter-Generated.xcconfig.'
+end
+
+require File.expand_path('packages/flutter_tools/bin/podhelper', flutter_root)
+flutter_macos_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+  # Plugin is Go-free in ne mode and depends on Core in user_tun mode.
+  flutter_install_all_macos_pods __dir__
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+if macos_mode == 'ne'
+  target 'PacketTunnel' do
+    use_frameworks!
+    pod 'sing_box_flutter/PacketTunnel', :path => 'Flutter/ephemeral/.symlinks/plugins/sing_box_flutter/macos'
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_macos_build_settings(target)
+    target.build_configurations.each do |config|
+      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '12.0'
+    end
+  end
+end

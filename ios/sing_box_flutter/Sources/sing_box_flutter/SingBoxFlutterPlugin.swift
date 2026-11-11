@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#if os(macOS)
+import FlutterMacOS
+#else
 import Flutter
+#endif
 import Foundation
 import NetworkExtension
 
@@ -20,8 +24,13 @@ public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamH
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = SingBoxFlutterPlugin()
-        let methods = FlutterMethodChannel(name: "dev.idy.sing_box_flutter/methods", binaryMessenger: registrar.messenger())
-        let events = FlutterEventChannel(name: "dev.idy.sing_box_flutter/events", binaryMessenger: registrar.messenger())
+        #if os(macOS)
+        let messenger = registrar.messenger
+        #else
+        let messenger = registrar.messenger()
+        #endif
+        let methods = FlutterMethodChannel(name: "dev.idy.sing_box_flutter/methods", binaryMessenger: messenger)
+        let events = FlutterEventChannel(name: "dev.idy.sing_box_flutter/events", binaryMessenger: messenger)
         registrar.addMethodCallDelegate(instance, channel: methods)
         events.setStreamHandler(instance)
     }

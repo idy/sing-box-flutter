@@ -11,7 +11,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, android, apple]
+        options: [all, android, apple, macos]
       profile:
         description: Example selectable core profile
         required: true
@@ -50,7 +50,7 @@ jobs:
                   raise SystemExit('Missing pull request comparison revisions')
               # Do not hide the native side of renames into another directory.
               changed = subprocess.check_output(['git', 'diff', '--no-renames', '--name-only', '-z', *revisions, '--'])
-              prefixes = (b'native/', b'ios/', b'android/', b'bin/', b'lib/', b'example/', b'tool/', b'tests/')
+              prefixes = (b'native/', b'ios/', b'macos/', b'android/', b'bin/', b'lib/', b'example/', b'tool/', b'tests/')
               files = {b'native-core.json', b'pubspec.yaml', b'THIRD_PARTY_NOTICES.md', b'LICENSE',
                        b'.github/workflows/native-core.yml', b'.github/scripts/publish_native_release.py'}
               required = any(path.startswith(prefixes) or path in files for path in changed.split(b'\0') if path)
@@ -223,6 +223,72 @@ jobs:
             example/.dart_tool/sing_box_flutter/builds/**/native-build.json
             example/.dart_tool/sing_box_flutter/builds/**/core-capabilities.json
 
+  macos:
+    needs: validate
+    if: github.event_name == 'pull_request' || inputs.target == 'all' || inputs.target == 'macos'
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [ne, user_tun]
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - uses: subosito/flutter-action@fd55f4c5af5b953cc57a2be44cb082c8f6635e8e # v2.21.0
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+      - name: Use CocoaPods Ruby and bundled gems
+        run: |
+          brew list --versions cocoapods >/dev/null || brew install cocoapods
+          printf '%s/bin\n' "$(brew --prefix ruby)" >> "$GITHUB_PATH"
+          printf 'GEM_HOME=%s/libexec\n' "$(brew --prefix cocoapods)" >> "$GITHUB_ENV"
+      - name: Select macOS backend and build the host core
+        working-directory: example
+        env:
+          MACOS_MODE: ${{ matrix.mode }}
+          CORE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'wgc-minimal' }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          from pathlib import Path
+          pubspec = Path('pubspec.yaml')
+          pubspec.write_text(pubspec.read_text().replace('mode: ne', 'mode: ' + os.environ['MACOS_MODE']))
+          PY
+          flutter pub get
+          dart run tool/select_core_profile.dart "$CORE_PROFILE"
+          ruby macos/configure_project.rb
+          dart run sing_box_flutter build --target macos
+      - name: Check native macOS contracts
+        run: |
+          ruby example/macos/configure_project_test.rb
+          ruby macos/Tests/podspec_contract_test.rb
+          bash macos/Tests/run-native-smoke.sh "$GITHUB_WORKSPACE/example"
+      - name: Check iOS artifact contracts
+        if: matrix.mode == 'ne'
+        run: ruby ios/Tests/podspec_contract_test.rb
+      - name: Compile macOS host and selected extension without signing
+        working-directory: example
+        run: |
+          flutter build macos --debug --config-only
+          xcodebuild -workspace macos/Runner.xcworkspace -scheme Runner \
+            -configuration Debug -derivedDataPath build/macos \
+            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+          xcrun swift ../macos/Tests/check-built-bundles.swift \
+            "$PWD/build/macos/Build/Products/Debug/sing_box_flutter_example.app"
+      - name: Exercise real user TUN traffic on the disposable runner
+        if: matrix.mode == 'user_tun'
+        timeout-minutes: 5
+        env:
+          SINGBOX_CI_TUN_SMOKE: '1'
+        run: bash macos/Tests/run-native-smoke.sh "$GITHUB_WORKSPACE/example" --ci-tun
+      - name: Check representative macOS core registries
+        if: matrix.mode == 'ne'
+        run: python3 -B tool/check_core_profiles.py --target macos --race
+
   release-inputs:
     if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'all')
     needs: build
@@ -276,7 +342,7 @@ jobs:
   gate:
     name: Native CI gate
     if: always() && github.event_name == 'pull_request'
-    needs: [changes, validate, build, release-inputs]
+    needs: [changes, validate, build, macos, release-inputs]
     runs-on: ubuntu-24.04
     steps:
       - name: Require successful native validation when needed
@@ -285,16 +351,17 @@ jobs:
           NATIVE_REQUIRED: ${{ needs.changes.outputs.native }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
           RELEASE_RESULT: ${{ needs.release-inputs.result }}
         run: |
           python3 -I - <<'PY'
           import os
           if os.environ['CHANGES_RESULT'] != 'success':
               raise SystemExit('Native input detection did not succeed')
-          results = [os.environ[name] for name in ('VALIDATE_RESULT', 'BUILD_RESULT', 'RELEASE_RESULT')]
+          results = [os.environ[name] for name in ('VALIDATE_RESULT', 'BUILD_RESULT', 'MACOS_RESULT', 'RELEASE_RESULT')]
           if os.environ['NATIVE_REQUIRED'] == 'true':
               if any(result != 'success' for result in results):
-                  raise SystemExit('Native validation, both platform builds and release-input checks must pass')
+                  raise SystemExit('Native validation, Android/iOS/macOS builds and release-input checks must pass')
               print('Native CI gate passed: all native checks succeeded')
           elif os.environ['NATIVE_REQUIRED'] == 'false':
               if any(result != 'skipped' for result in results):

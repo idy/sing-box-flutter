@@ -49,8 +49,9 @@ path, version and checksum, then checks the embedded resource against
 `tool/wintun.json`. It never downloads a separate Wintun ZIP or bundles a sidecar DLL.
 
 Windows requires a host feature selection; the historical mobile `install`
-command cannot provide a Windows core. `--target all` retains its Android + Apple
-meaning, so build Windows explicitly.
+command cannot provide a Windows core. With a host core selection, `--target all`
+builds Android, Apple and macOS; legacy standard-core builds still select Android
+and Apple only. Build Windows explicitly in either case.
 
 Artifacts stay in the host's `.dart_tool/sing_box_flutter/`, with a receipt bound
 to the host pubspec, selected features, native source, compiler pins, Wintun hashes,

@@ -21,14 +21,17 @@ enum NativeCore {
     }
 
     static func setup(storage: TunnelStorage) throws {
-        let directory = try storage.runtimeDirectory()
+        try setup(directory: storage.runtimeDirectory(), crashReportSource: "PacketTunnel")
+    }
+
+    static func setup(directory: URL, crashReportSource: String) throws {
         let options = LibboxSetupOptions()
         options.basePath = directory.path
         options.workingPath = directory.appendingPathComponent("Working").path
         options.tempPath = directory.appendingPathComponent("Temp").path
         options.logMaxLines = 100
         options.debug = false
-        options.crashReportSource = "PacketTunnel"
+        options.crashReportSource = crashReportSource
         options.commandServerSecret = UUID().uuidString
         options.oomKillerEnabled = true
         var error: NSError?

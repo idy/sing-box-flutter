@@ -7,6 +7,12 @@
 .atom/
 .build/
 .buildlog/
+
+# Local Claude project configuration.
+/.claude/
+
+# Local design review evidence, not website assets.
+.impeccable/review/
 **/.kotlin/
 .history
 .svn/
@@ -36,5 +42,6 @@ migrate_working_dir/
 # Reproducible native build outputs (install with tool/build_libbox.py).
 /android/libs/*.aar
 /ios/Frameworks/Libbox.xcframework/
+/macos/Frameworks/Libbox.xcframework/
 /native-artifacts/
 **/__pycache__/

@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -45,8 +46,18 @@ def mobile_sources(root: Path = ROOT) -> dict[str, str]:
     return selected_sources(root, "mobile")
 
 
+def canonical_macos(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) - {"mode"}:
+        raise BuildError("sing_box_flutter.macos must contain only mode")
+    mode = value.get("mode", "ne")
+    if mode not in ("ne", "user_tun"):
+        raise BuildError("sing_box_flutter.macos.mode must be ne or user_tun")
+    return {"mode": mode}
+
+
 def build_identity(selection: dict, extensions: list[dict], pins: dict, root: Path = ROOT, *,
-                   target: str = "android", windows_arch: str = "amd64") -> dict:
+                   target: str = "android", windows_arch: str = "amd64",
+                   macos: dict | None = None) -> dict:
     tooling = ["build_core.py", "core_features.py", "build_libbox.py", "native_common.py",
                "wgc_overlay.py", "source_inputs.py", "tailscale-go.json"]
     identity = {"schema": 1, "pins": pin_identity(pins, root), "selection": selection,
@@ -60,15 +71,18 @@ def build_identity(selection: dict, extensions: list[dict], pins: dict, root: Pa
         tooling.extend(["windows_core.py", "wintun.json"])
     else:
         identity["mobile_sources"] = mobile_sources(root)
+        if macos is not None:
+            identity["macos"] = canonical_macos(macos)
     identity["tooling"] = {name: sha256(root / "tool" / name) for name in tooling}
     return identity
 
 
-def load_build_request(path: Path, project: Path) -> tuple[dict, str]:
+def load_host_build_request(path: Path, project: Path) -> tuple[dict, str, dict | None]:
     """Read the immutable Dart handoff, bound to exactly its parsed host bytes."""
     try:
         request = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
-        if (not isinstance(request, dict) or set(request) != {"schema", "pubspec", "features"} or
+        if (not isinstance(request, dict) or
+                set(request) not in ({"schema", "pubspec", "features"}, {"schema", "pubspec", "features", "macos"}) or
                 type(request["schema"]) is not int or request["schema"] != 1):
             raise ValueError("invalid request envelope")
         source = request["pubspec"]
@@ -84,7 +98,8 @@ def load_build_request(path: Path, project: Path) -> tuple[dict, str]:
                 any(character not in "0123456789abcdef" for character in digest) or
                 sha256(actual) != digest):
             raise ValueError("pubspec snapshot does not match the host")
-        return canonicalize(request["features"]), digest
+        macos = canonical_macos(request["macos"]) if "macos" in request else None
+        return canonicalize(request["features"]), digest, macos
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise BuildError("Invalid or changed pubspec snapshot. "
                          "Run dart run sing_box_flutter build again from the host project.") from error
@@ -158,6 +173,8 @@ def bind_command(env: dict, output: Path, target: str, tags: list[str],
     if target == "android":
         command += ["-target", ",".join(ANDROID_TARGETS[name] for name in android_abis),
                     "-androidapi", "24", "-javapkg=io.nekohasekai", "-libname=box"]
+    elif target == "macos":
+        command += ["-target", "macos/arm64,macos/amd64", "-libname=box", "-macosversion=12.0"]
     else:
         command += ["-target", apple_platform, "-libname=box", "-iosversion=15.0",
                     "-tags-not-macos=with_low_memory"]
@@ -276,7 +293,8 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
     final = host_path(project, relative.as_posix())
     final.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=final.parent))
-    name = {"android": "libbox.aar", "apple": "Libbox.xcframework", "windows": "WindowsCore"}[target]
+    name = {"android": "libbox.aar", "apple": "Libbox.xcframework",
+            "macos": "Libbox.xcframework", "windows": "WindowsCore"}[target]
     try:
         # Stage small provenance/notice inputs even on a cache hit. Keep the first
         # provenance while it still describes these bytes; repair corrupt metadata
@@ -330,20 +348,78 @@ def update_receipt(project: Path, capabilities: dict, requested: dict, artifacts
         if (artifact_hashes(host_path(project, entry["path"])) != entry["sha256"] or
                 sha256(host_path(project, entry["capabilities"])) != entry["capabilities_sha256"]):
             raise BuildError("A previously built platform artifact was modified; rebuild that platform")
-    write_json(path, {**capabilities, "requested_features": requested,
-                      "pubspec_sha256": current_pubspec,
-                      "artifacts": {**retained, **artifacts}})
+    updated = {**capabilities, "requested_features": requested,
+               "pubspec_sha256": current_pubspec,
+               "artifacts": {**retained, **artifacts}}
+    for target, platform in (("apple", "ios"), ("macos", "macos")):
+        selection = _pod_selection(updated, target)
+        if (_pod_selection(previous, target) != selection or
+                (selection is not None and _installed_pod_selection(project, platform) != selection)):
+            # Refresh before publishing the new pointer. If refresh fails, the
+            # old receipt remains so a retry cannot mistake stale Pods for current.
+            invalidate_pods(project, platform)
+    write_json(path, updated)
 
 
-def invalidate_pods(project: Path) -> None:
+def _pod_selection(receipt: dict, target: str) -> dict | None:
+    artifacts = receipt.get("artifacts")
+    entry = artifacts.get(target) if isinstance(artifacts, dict) else None
+    if entry is None:
+        return None
+    return {"schema": 1, "target": target, "fingerprint": receipt.get("fingerprint"),
+            "pubspec_sha256": receipt.get("pubspec_sha256"),
+            "macos": receipt.get("macos"), "artifact": entry}
+
+
+def _installed_pod_selection(project: Path, platform: str) -> dict | None:
+    """Trust a guard marker only when CocoaPods' installed locks pin its podspec."""
+    pods = project / platform / "Pods"
+    manifest = pods / "Manifest.lock"
+    lock = pods.parent / "Podfile.lock"
+    podspec = pods / "Local Podspecs/sing_box_flutter.podspec.json"
+    try:
+        for path in (manifest, lock, podspec):
+            if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(project.resolve()):
+                return None
+        installed_lock = manifest.read_bytes()
+        if installed_lock != lock.read_bytes():
+            return None
+        spec_bytes = podspec.read_bytes()
+        # Read only CocoaPods' generated checksum section, without a YAML dependency.
+        checksums = re.search(r"(?m)^SPEC CHECKSUMS:\n((?:  .*\n)+)", installed_lock.decode())
+        if (checksums is None or
+                re.findall(r"(?m)^  sing_box_flutter: ([0-9a-f]{40})$", checksums[1]) !=
+                [hashlib.sha1(spec_bytes).hexdigest()]):
+            return None
+        spec = json.loads(spec_bytes, object_pairs_hook=_unique_object)
+        shared = next(part for part in spec["subspecs"] if part["name"] == "Shared")
+        phases = shared.get("script_phases", [])
+        if isinstance(phases, dict):
+            phases = [phases]
+        guards = [phase for phase in phases if phase.get("name") == "Validate selected core artifacts"]
+        if (len(guards) != 1 or guards[0].get("always_out_of_date") != "1" or
+                guards[0].get("execution_position") != "before_compile"):
+            return None
+        marker = "# sing_box_flutter pod selection: "
+        selections = [line[len(marker):] for line in guards[0]["script"].splitlines() if line.startswith(marker)]
+        if len(selections) == 1:
+            return json.loads(selections[0], object_pairs_hook=_unique_object)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
+        pass
+    return None
+
+
+def invalidate_pods(project: Path, platform: str = "ios") -> None:
     """Make Flutter refresh dynamic podspec paths without unlocking pod versions."""
-    manifest = project / "ios/Pods/Manifest.lock"
+    if platform not in ("ios", "macos"):
+        raise BuildError("Unsupported CocoaPods platform")
+    manifest = project / platform / "Pods/Manifest.lock"
     if not manifest.exists() and not manifest.is_symlink():
         return
     if (manifest.is_symlink() or not manifest.is_file() or
             not manifest.resolve().is_relative_to(project.resolve())):
         raise BuildError("Cannot refresh CocoaPods metadata outside this host; run pod install manually")
-    # This generated sandbox receipt is disposable. Keep ios/Podfile.lock intact;
+    # This generated sandbox receipt is disposable. Keep the host Podfile.lock;
     # Flutter detects its missing counterpart and runs pod install on next build.
     manifest.read_bytes()
     manifest.unlink()
@@ -405,8 +481,8 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--features-file", type=Path, required=True)
     result.add_argument("--project-dir", type=Path, required=True)
-    result.add_argument("--target", choices=("apple", "android", "windows", "all"), default="all",
-                        help="all retains its Android + Apple meaning; Windows is explicit")
+    result.add_argument("--target", choices=("apple", "android", "macos", "windows", "all"), default="all",
+                        help="all builds Android + Apple + macOS; Windows is explicit")
     result.add_argument("--windows-arch", choices=tuple(WINDOWS_ARCHES), default="amd64",
                         help="Standalone Windows helper architecture (default: amd64)")
     result.add_argument("--android-abis", default=",".join(ANDROID_TARGETS))
@@ -428,7 +504,7 @@ def main(argv: list[str] | None = None) -> int:
         project = args.project_dir.expanduser().resolve(strict=True)
         if not (project / "pubspec.yaml").is_file():
             raise BuildError("--project-dir must name the Flutter host project containing pubspec.yaml")
-        selection, pubspec_sha256 = load_build_request(args.features_file, project)
+        selection, pubspec_sha256, macos = load_host_build_request(args.features_file, project)
         if "tun" not in selection["inbounds"]:
             raise BuildError("A VPN core must include the tun inbound")
         pins = load_pins()
@@ -444,9 +520,10 @@ def main(argv: list[str] | None = None) -> int:
         cache = work_directory(args.cache_dir or work / "cache", work)
         if bootstrap == cache or bootstrap.is_relative_to(cache) or cache.is_relative_to(bootstrap):
             raise BuildError("Bootstrap and cache directories must be separate, non-nested work directories")
-        targets = ["android", "apple"] if args.target == "all" else [args.target]
+        targets = ["android", "apple", "macos"] if args.target == "all" else [args.target]
         resolved = {target: resolve_features(selection, target) for target in targets}
-        identity = build_identity(selection, extensions, pins, target=targets[0], windows_arch=args.windows_arch)
+        identity = build_identity(selection, extensions, pins, target=targets[0],
+                                  windows_arch=args.windows_arch, macos=macos)
         fingerprint = canonical_hash(identity)
         registry = generate_registry(next(iter(resolved.values()))["features"], extensions, target=targets[0])
         if args.dry_run:
@@ -455,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
                               "registry_sha256": hashlib.sha256(registry.encode()).hexdigest(),
                               "receipt": receipt_for_target(targets[0]).as_posix(), "android_abis": android_abis,
                               "apple_platform": args.apple_platform, "windows_arch": args.windows_arch,
+                              "macos": macos or {"mode": "ne"},
                               "shared_pub_cache_artifacts": False}, indent=2))
             return 0
         # The work lock protects its verified toolchain/source; the host lock
@@ -524,9 +602,8 @@ def main(argv: list[str] | None = None) -> int:
                             artifacts[target] = publish_artifact(project, output, target, capabilities, metadata, notices)
                 finally:
                     shutil.rmtree(stage)
-            update_receipt(project, capabilities, selection, artifacts, pubspec_sha256)
-            if "apple" in artifacts:
-                invalidate_pods(project)
+            receipt_capabilities = {**capabilities, **({"macos": macos} if macos is not None else {})}
+            update_receipt(project, receipt_capabilities, selection, artifacts, pubspec_sha256)
         print(f"Selectable core built. Receipt: {project / RECEIPT}")
         return 0
     except (BuildError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:

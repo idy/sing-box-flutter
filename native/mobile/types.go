@@ -6,6 +6,20 @@ package libbox
 
 import C "github.com/sagernet/sing-box/constant"
 
+// DefaultInterfaceMonitorHost supplies paths without taking ownership of TUNs,
+// interface enumeration, or native socket controls.
+type DefaultInterfaceMonitorHost interface {
+	StartDefaultInterfaceMonitor(listener InterfaceUpdateListener) error
+	CloseDefaultInterfaceMonitor(listener InterfaceUpdateListener) error
+}
+
+// StandalonePlatformInterface adds own-interface registration so a path monitor
+// can exclude the utuns created by the native standalone service.
+type StandalonePlatformInterface interface {
+	DefaultInterfaceMonitorHost
+	RegisterMyInterface(name string)
+}
+
 type PlatformInterface interface {
 	LocalDNSTransport() LocalDNSTransport
 	UsePlatformAutoDetectInterfaceControl() bool

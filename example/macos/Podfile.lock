@@ -1,0 +1,32 @@
+PODS:
+  - FlutterMacOS (1.0.0)
+  - sing_box_flutter (0.1.0):
+    - sing_box_flutter/Plugin (= 0.1.0)
+  - sing_box_flutter/Core (0.1.0):
+    - sing_box_flutter/Shared
+  - sing_box_flutter/PacketTunnel (0.1.0):
+    - sing_box_flutter/Core
+    - sing_box_flutter/Shared
+  - sing_box_flutter/Plugin (0.1.0):
+    - FlutterMacOS
+    - sing_box_flutter/Shared
+  - sing_box_flutter/Shared (0.1.0)
+
+DEPENDENCIES:
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - sing_box_flutter (from `Flutter/ephemeral/.symlinks/plugins/sing_box_flutter/macos`)
+  - sing_box_flutter/PacketTunnel (from `Flutter/ephemeral/.symlinks/plugins/sing_box_flutter/macos`)
+
+EXTERNAL SOURCES:
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  sing_box_flutter:
+    :path: Flutter/ephemeral/.symlinks/plugins/sing_box_flutter/macos
+
+SPEC CHECKSUMS:
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
+  sing_box_flutter: 57273677123f76e38cf656d95cf75f1861dc511e
+
+PODFILE CHECKSUM: 26883880ff16e1d8a7b6b24a8e3acb8d77a7dd36
+
+COCOAPODS: 1.17.0

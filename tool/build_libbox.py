@@ -269,6 +269,12 @@ def check_sdks(targets: list[str], env: dict) -> dict:
         for sdk in ("iphoneos", "iphonesimulator"):
             versions[sdk] = run(["xcrun", "--sdk", sdk, "--show-sdk-version"], env=env, capture=True)
         versions["xcode"] = run(["xcodebuild", "-version"], env=env, capture=True).replace("\n", "; ")
+    if "macos" in targets:
+        if platform.system() != "Darwin":
+            raise BuildError("macOS builds require macOS with Xcode and the macOS SDK")
+        versions["macosx"] = run(["xcrun", "--sdk", "macosx", "--show-sdk-version"], env=env, capture=True)
+        if "xcode" not in versions:
+            versions["xcode"] = run(["xcodebuild", "-version"], env=env, capture=True).replace("\n", "; ")
     if "android" in targets:
         candidates = [env.get("ANDROID_HOME"), env.get("ANDROID_SDK_ROOT"),
                       str(Path.home() / "Android/Sdk"), str(Path.home() / ".local/lib/android/sdk"),

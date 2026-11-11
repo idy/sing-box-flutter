@@ -11,7 +11,7 @@ sys.dont_write_bytecode = True
 # -I deliberately removes the script directory. Restore only this trusted package
 # directory, never the host project or downloaded artifact, for sibling imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_core import build_identity, canonical_hash, host_path, receipt_for_target
+from build_core import build_identity, canonical_hash, canonical_macos, host_path, receipt_for_target
 from core_features import canonicalize, resolve_features
 from native_common import BuildError, ROOT, artifact_hashes, load_pins, sha256
 from windows_core import WINDOWS_ARCHES, validate_windows_bundle
@@ -47,7 +47,9 @@ def verify_current_recipe(project: Path, receipt: dict, metadata: dict, *,
         if target == "windows" and (windows_arch not in WINDOWS_ARCHES or
                 receipt.get("windows_arch") != windows_arch or metadata.get("windows_arch") != windows_arch):
             raise ValueError("Windows architecture differs from the recipe")
-        expected = build_identity(requested, extensions, pins, root, target=target, windows_arch=windows_arch)
+        macos = canonical_macos(receipt["macos"]) if "macos" in receipt else None
+        expected = build_identity(requested, extensions, pins, root, target=target,
+                                  windows_arch=windows_arch, macos=macos)
         fingerprint = canonical_hash(expected)
         resolved = resolve_features(requested, target)
         if (identity != expected or receipt.get("fingerprint") != fingerprint or
@@ -105,7 +107,7 @@ def verify_current_artifact(project: Path, receipt: dict, target: str,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-dir", type=Path, required=True)
-    parser.add_argument("--target", choices=("android", "apple", "windows"), required=True)
+    parser.add_argument("--target", choices=("android", "apple", "macos", "windows"), required=True)
     parser.add_argument("--windows-arch", choices=tuple(WINDOWS_ARCHES),
                         help="Require this Windows bundle architecture")
     parser.add_argument("--installed-artifact", help="Artifact path baked in at pod install or CMake configuration")
