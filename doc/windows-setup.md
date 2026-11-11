@@ -69,11 +69,17 @@ pubspec in the invoking CMake process until it exits. These handles deny write
 and delete sharing while CMake copies the inputs. The installed helper bytes and
 current selection are also checked after copying; a mismatched helper is removed
 and installation fails. Non-Windows packaging checks use the same final byte
-validation. Every install invocation has an atomically allocated record handoff,
-so concurrent prefixes or components do not share mutable record files. Components
-can stage the host before a separately owned helper; Runtime resources follow the
-host, and each helper installation is verified in its own component. Whole-bundle
-installation requires the helper beside the host.
+validation. Each Windows install keeps its own record file exclusively open in
+CMake; writers and validators duplicate that handle and never reopen its pathname.
+Bounded hex chunks preserve large Unicode/semicolon manifests without exceeding
+Windows command-line limits. Closing the lease or installer deletes the temporary
+file. Concurrent invocations do not share records. Components can stage the host
+before a separately owned helper only when its generated copy policy admits that
+executable; metadata-only filters cannot defer the presence check. Companion
+resources follow the installed host or helper regardless of component name; the
+explicit `Runtime` resource-staging entry point is also retained. Each helper copy
+is verified in its own component. Whole-bundle installation requires the helper
+beside the host.
 It bundles `sing_box_flutter_core.exe` beside the host executable and installs
 capabilities, build provenance, and notices under `sing_box_flutter/`. The exact
 official driver license is package-owned at `native/windows/LICENSE.wintun` and

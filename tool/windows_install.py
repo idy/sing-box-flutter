@@ -8,7 +8,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
+
+# -I removes the script directory; restore only this trusted package directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_install_records import read_records
+from windows_install_rules import directory_copies_helper
 
 HELPER = "sing_box_flutter_core.exe"
 
@@ -56,7 +60,7 @@ def installation_model(settings: dict, configuration: str) -> tuple[Path, Path, 
 
 
 def helper_components(settings: dict, configuration: str) -> tuple[set[str], set[str]]:
-    _, reply, source, selected = installation_model(settings, configuration)
+    build, reply, source, selected = installation_model(settings, configuration)
     core = (Path(settings["core_dir"]) / HELPER).resolve()
     definite: set[str] = set()
     possible: set[str] = set()
@@ -77,7 +81,11 @@ def helper_components(settings: dict, configuration: str) -> tuple[set[str], set
                     if not isinstance(item, dict) or item.get("to", HELPER) == HELPER:
                         definite.add(component)
                         possible.add(component)
-                elif kind == "directory" and core.is_relative_to(path):
+                elif (kind == "directory" and core.is_relative_to(path) and
+                      directory_copies_helper(build / directory["build"] / "cmake_install.cmake",
+                                              component, selected["name"], path, core)):
+                    # File API omits filters. A directory component can defer the
+                    # host check only if its generated copy policy admits the exe.
                     possible.add(component)
     return definite, possible
 
@@ -189,8 +197,8 @@ def verify_installed(settings: dict, configuration: str, prefix: str, component:
                                        verify_copies=True, fallback=False, manifest=manifest)
     definite_components, possible_components = helper_components(settings, configuration)
     # An individual component may intentionally stage the host before its helper.
-    # Require colocation for whole installs or a component that owns the helper;
-    # defer ambiguous directory-filter cases that span other components.
+    # Only another component whose actual copy policy admits the helper can defer
+    # that check; resource-only filters cannot stand in for executable ownership.
     if (not component or component in definite_components or
             possible_components.issubset({component})):
         destinations += install_directories(settings, configuration, prefix, component,
@@ -225,8 +233,6 @@ def verify_installed(settings: dict, configuration: str, prefix: str, component:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    records = commands.add_parser("create-records")
-    records.add_argument("--directory", type=Path, required=True)
     configure = commands.add_parser("configure")
     configure.add_argument("--output", type=Path, required=True)
     configure.add_argument("--build-dir", type=Path, required=True)
@@ -248,20 +254,16 @@ def main() -> int:
         resolve.add_argument("--component", default="")
         records = resolve.add_mutually_exclusive_group()
         records.add_argument("--manifest")
-        records.add_argument("--manifest-file", type=Path)
+        records.add_argument("--records-lease")
     args = parser.parse_args()
     try:
-        if args.command == "create-records":
-            descriptor, path = tempfile.mkstemp(prefix="sing_box_flutter-installed-", suffix=".txt",
-                                               dir=args.directory)
-            os.close(descriptor)
-            print(json.dumps({"path": Path(path).as_posix()}, ensure_ascii=False))
-        elif args.command == "configure":
+        if args.command == "configure":
             settings = {"build_dir": args.build_dir.resolve().as_posix(),
                         "core_dir": args.core_dir.resolve().as_posix(),
                         "fallback_prefix": args.fallback_prefix,
                         "python": Path(sys.executable).as_posix(),
                         "resolver": Path(__file__).resolve().as_posix(),
+                        "records_tool": Path(__file__).with_name("windows_install_records.py").resolve().as_posix(),
                         "guard_file": args.guard_file.resolve().as_posix(),
                         "host_binary": args.host_binary}
             args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
@@ -277,7 +279,7 @@ def main() -> int:
             args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
         else:
             settings = json.loads(args.settings.read_text(encoding="utf-8"))
-            manifest = args.manifest_file.read_text(encoding="utf-8") if args.manifest_file else args.manifest
+            manifest = read_records(json.loads(args.records_lease)) if args.records_lease else args.manifest
             if args.command == "verify-copies":
                 verify_installed(settings, args.configuration, args.prefix, args.component, manifest)
             else:
@@ -285,7 +287,9 @@ def main() -> int:
                                                    manifest=manifest, fallback=False)
                 directories += install_directories(settings, args.configuration, args.prefix, args.component,
                                                     manifest=manifest, host_only=True, fallback=False)
-                if not directories:
+                # Preserve the existing explicit Runtime resource-staging entry
+                # point; unrelated named components never receive this fallback.
+                if not directories and args.component in ("", "Runtime"):
                     prefix = settings["fallback_prefix"] if "$<" in args.prefix else args.prefix
                     directories = [Path(prefix).resolve().as_posix()]
                 print(json.dumps(list(dict.fromkeys(directories)), ensure_ascii=False))

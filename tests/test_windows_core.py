@@ -358,7 +358,8 @@ class WindowsCMake(WindowsFixture):
                   nested_host=False, discover_application=False, relative_install=False, bundle_subdir="",
                   directory_install="", install_mutation="", exclude_helper=False,
                   helper_component="Runtime", metadata_copy=False, runner_component=None,
-                  extra_helper_copy=False):
+                  extra_helper_copy=False, metadata_component="Runtime", helper_filters="",
+                  omit_helper=False, asset_count=0, decoy_helper_rule=False):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -444,13 +445,13 @@ except PermissionError:
                     text += mutation_rule
             text += ('install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "' + runner_destination +
                      '" COMPONENT ' + (runner_component or helper_component) + ')\n')
-            if directory_install:
+            if directory_install and not omit_helper:
                 source = {"contents": "${CORE_BUNDLE_DIRECTORY}/", "named": "${CORE_BUNDLE_DIRECTORY}",
                           "parent": "${CORE_BUNDLE_PARENT}/"}[directory_install]
                 exclusion = ' PATTERN "' + WINDOWS_EXECUTABLE + '" EXCLUDE' if exclude_helper else ''
                 text += ('install(DIRECTORY "' + source + '" DESTINATION "' + destination +
-                         '" COMPONENT ' + helper_component + exclusion + ')\n')
-            else:
+                         '" COMPONENT ' + helper_component + exclusion + helper_filters + ')\n')
+            elif not omit_helper:
                 text += ('install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "' + destination +
                          '" COMPONENT ' + helper_component + ')\n')
             if install_mutation in ("copied", "remove"):
@@ -460,12 +461,24 @@ except PermissionError:
                 text += '''install(DIRECTORY "${CORE_BUNDLE_DIRECTORY}/" DESTINATION "secondary;tools"
   COMPONENT Runtime)
 '''
+            for index in range(asset_count):
+                source = '${CMAKE_CURRENT_BINARY_DIR}/fixture-asset-' + str(index) + '.txt'
+                text += ('file(WRITE "' + source + '" "fixture asset")\n'
+                         'install(FILES "' + source + '" DESTINATION "' + destination +
+                         '/assets" COMPONENT Runtime)\n')
             if metadata_copy:
                 text += '''get_filename_component(METADATA_SOURCE "${bundle_path}" DIRECTORY)
 get_filename_component(METADATA_SOURCE "${METADATA_SOURCE}" DIRECTORY)
 install(DIRECTORY "${METADATA_SOURCE}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/metadata;files"
-  COMPONENT Runtime FILES_MATCHING PATTERN "*.json")
+  COMPONENT ''' + metadata_component + ''' FILES_MATCHING PATTERN "*.json")
 '''
+                if decoy_helper_rule:
+                    # This body exists in the install script but is never called.
+                    # It must not turn a JSON-only component into a helper owner.
+                    text += ('install(CODE "function(unused_helper_copy)\\n'
+                             'file(INSTALL DESTINATION \\"unused\\" TYPE DIRECTORY '
+                             'FILES \\"${METADATA_SOURCE}/\\")\\nendfunction()" COMPONENT ' +
+                             metadata_component + ')\n')
         if nested_host:
             host_source = self.host / "windows"
             host_source.mkdir(exist_ok=True)
@@ -844,13 +857,14 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
         legal = artifact.parent / "Legal"
         legal.mkdir()
         (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
-        for kind in ("", "contents"):
-            with self.subTest(directory_install=kind):
-                prefix = self.root / ("staged " + (kind or "file"))
+        for kind, filters in (("", ""), ("contents", ""),
+                              ("contents", ' FILES_MATCHING PATTERN "*.exe"')):
+            with self.subTest(directory_install=kind, filters=filters):
+                prefix = self.root / ("staged " + (kind or "file") + (" filtered" if filters else ""))
                 result = self.configure(flutter_layout=True, relative_install=True,
                                         install_prefix=self.root / "configured staged bundle",
                                         directory_install=kind, bundle_subdir="bin;tools", metadata_copy=True,
-                                        runner_component="Runtime", helper_component="Helper")
+                                        runner_component="Runtime", helper_component="Helper", helper_filters=filters)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
                                          "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
@@ -870,6 +884,79 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                     self.assertTrue((installed / "sing_box_flutter/core-capabilities.json").is_file())
                     self.assertEqual((installed / "sing_box_flutter/Legal/LICENSE.wintun").read_bytes(), self.contents["license"])
                 self.assertEqual(list(self.cmake_build.rglob("sing_box_flutter-installed-*.txt")), [])
+
+    def test_large_install_manifest_preserves_unicode_and_semicolons(self):
+        entry, _, _ = self.published()
+        legal = build_core.host_path(self.host, entry["path"]).parent / "Legal"
+        legal.mkdir()
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
+        prefix = self.root / "large manifest 应用;bundle"
+        result = self.configure(flutter_layout=True, relative_install=True,
+                                install_prefix=self.root / "configured large bundle",
+                                bundle_subdir="bin;tools", asset_count=600)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                 "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = subprocess.run(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                                 "--component", "Runtime", "--prefix", str(prefix)],
+                                capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installed = prefix / "bin;tools"
+        self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
+        self.assertEqual(len(list((installed / "assets").glob("*.txt"))), 600)
+        self.assertTrue((installed / "sing_box_flutter/core-capabilities.json").is_file())
+        manifest = (self.cmake_build / "install_manifest_Runtime.txt").read_bytes()
+        self.assertGreater(len(manifest), 32768)
+
+    def test_non_runtime_host_components_install_companion_resources(self):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        legal = artifact.parent / "Legal"
+        legal.mkdir()
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
+        for kind in ("", "contents"):
+            with self.subTest(directory_install=kind):
+                prefix = self.root / ("App component " + (kind or "file"))
+                result = self.configure(flutter_layout=True, relative_install=True, install_prefix=prefix,
+                                        directory_install=kind, bundle_subdir="bin;app", metadata_copy=True,
+                                        runner_component="App", helper_component="App", metadata_component="Metadata")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                         "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for component in ("App", "Metadata"):
+                    result = subprocess.run(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                                             "--component", component], capture_output=True, text=True, encoding="utf-8")
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                installed = prefix / "bin;app"
+                self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
+                resources = installed / "sing_box_flutter"
+                for name in ("core-capabilities.json", "native-build.json", "Legal/NOTICE"):
+                    self.assertTrue((resources / name).is_file(), name)
+                self.assertEqual((resources / "Legal/LICENSE.wintun").read_bytes(), self.contents["license"])
+                self.assertTrue((prefix / "metadata;files/core-capabilities.json").is_file())
+                self.assertFalse((prefix / "metadata;files/WindowsCore/sing_box_flutter").exists())
+                self.assertFalse((prefix / "sing_box_flutter").exists())
+
+    def test_filtered_other_component_cannot_mask_missing_or_excluded_helper(self):
+        self.published()
+        for options in ({"omit_helper": True}, {"directory_install": "contents", "exclude_helper": True},
+                        {"omit_helper": True, "decoy_helper_rule": True}):
+            with self.subTest(options=options):
+                prefix = self.root / ("missing helper " + str(len(options)))
+                result = self.configure(flutter_layout=True, relative_install=True, install_prefix=prefix,
+                                        runner_component="Runtime", metadata_copy=True,
+                                        metadata_component="Metadata", **options)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                         "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                                         "--component", "Runtime"], capture_output=True, text=True, encoding="utf-8")
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Installed Windows helper failed byte verification", result.stdout + result.stderr)
+                self.assertFalse((prefix / WINDOWS_EXECUTABLE).exists())
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         self.published()
