@@ -768,6 +768,60 @@ class ToolchainTests(unittest.TestCase):
             self.assertTrue(Path(env["TEST_TELEMETRY_DIR"]).is_relative_to(root / "cache"))
             self.assertEqual((Path(env["TEST_TELEMETRY_DIR"]) / "mode").read_text(), "off\n")
 
+    def test_delimiter_gopath_is_private_per_environment_and_cleaned_on_process_exit(self):
+        import subprocess
+        script = '''
+import json
+from pathlib import Path
+import sys
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+from build_libbox import go_environment
+with mock.patch("build_libbox.os.pathsep", sys.argv[2]):
+    inherited = {"PATH": "fixture-stock", "GOPATH": "/ambient-global", "GOMODCACHE": "/ambient-modules"}
+    environments = [go_environment(Path(sys.argv[3]), Path(sys.argv[4]), inherited) for _ in range(2)]
+    print(json.dumps([{"environment": env, "exists": Path(env["GOPATH"]).is_dir(),
+                       "mode": Path(env["GOPATH"]).stat().st_mode & 0o777} for env in environments]), flush=True)
+if sys.argv[5] == "error":
+    raise RuntimeError("injected build failure")
+'''
+        for separator in sorted({os.pathsep, ";"}):
+            for failure in (False, True):
+                with self.subTest(separator=separator, failure=failure), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp).resolve()
+                    cache = root / ("缓存" + separator + "private")
+                    result = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(ROOT / "tool"),
+                                             separator, str(root / "fork"), str(cache), "error" if failure else "ok"],
+                                            capture_output=True, text=True, encoding="utf-8")
+                    self.assertEqual(result.returncode, 1 if failure else 0, result.stderr)
+                    records = json.loads(result.stdout)
+                    self.assertNotEqual(records[0]["environment"]["GOPATH"], records[1]["environment"]["GOPATH"])
+                    for record in records:
+                        env = record["environment"]
+                        metadata = Path(env["GOPATH"])
+                        self.assertTrue(record["exists"])
+                        self.assertTrue(metadata.is_absolute())
+                        self.assertNotIn(separator, str(metadata))
+                        self.assertFalse(metadata.exists(), "private GOPATH must be removed when the process exits")
+                        self.assertNotEqual(env["GOPATH"], "/ambient-global")
+                        self.assertEqual(env["GOBIN"], str(cache / "gopath/bin"))
+                        self.assertEqual(env["GOMODCACHE"], str(cache / "go-mod"))
+                        self.assertEqual(env["GOCACHE"], str(cache / "go-build"))
+                        self.assertEqual(env["GOTOOLCHAIN"], "local")
+                        if os.name != "nt":
+                            self.assertEqual(record["mode"], 0o700)
+
+    def test_delimiter_gopath_rejects_ambiguous_temporary_root_and_cleans_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            temporary_root = root / "temporary;ambiguous"
+            temporary_root.mkdir()
+            with mock.patch("build_libbox.os.pathsep", ";"), \
+                    mock.patch("build_libbox.tempfile.tempdir", str(temporary_root)):
+                with self.assertRaisesRegex(BuildError, "temporary directory without the PATH separator"):
+                    go_environment(root / "fork", root / "cache;ambiguous", {"GOPATH": "/ambient-global"})
+            self.assertEqual(list(temporary_root.iterdir()), [])
+
     def test_private_module_rules_survive_pinned_toolchain_environment(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

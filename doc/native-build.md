@@ -119,7 +119,12 @@ runs. A modified cached executable or a local provenance stamp cannot substitute
 for verification. `VERSION`, `go env` and explicit `GOROOT` must agree with the
 verified absolute compiler path. Standalone Windows/Linux builds never discover
 Go through `PATH`, including when a Windows work directory contains a semicolon.
-Mobile tools spawn nested commands through `PATH`, so they require Go and `GOBIN`
+If the project `GOPATH` would contain a path-list separator, only its checksum-db
+metadata uses a private, separator-free temporary directory, cleaned on process
+exit. Module, binary and build caches remain in the project. A temporary root
+containing the separator is rejected. The real pinned-compiler smoke checks both
+compiler and cache paths containing that separator with an empty `PATH` and no
+network proxy. Mobile tools spawn nested commands through `PATH`, so they require Go and `GOBIN`
 directories without the platform's path separator and verify those entries before
 any mobile tool download or compilation. The Tailscale dependency's embedded `go.toolchain.rev` / next-revision
 contract is checked before native compilation; a mismatched fork fails early rather

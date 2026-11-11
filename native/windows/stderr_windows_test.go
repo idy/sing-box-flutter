@@ -9,10 +9,12 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -104,5 +106,75 @@ func TestWindowsStderrRedirectionIncludesNativeAndRuntimeWrites(t *testing.T) {
 				t.Fatalf("redirected child leaked %d bytes to inherited stderr", stderr.Len())
 			}
 		})
+	}
+}
+
+func TestWindowsStderrIgnoresRemappedNUL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "captured-stderr.log")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	device, err := windows.UTF16PtrFromString("NUL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := windows.UTF16PtrFromString(`\??\` + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	define := windows.NewLazySystemDLL("kernel32.dll").NewProc("DefineDosDeviceW")
+	set := func(flags uintptr) error {
+		result, _, callErr := define.Call(flags, uintptr(unsafe.Pointer(device)), uintptr(unsafe.Pointer(target)))
+		if result == 0 {
+			return callErr
+		}
+		return nil
+	}
+	const rawTarget, removeDefinition, exactMatch, noBroadcast = 1, 2, 4, 8
+	if err := set(rawTarget | noBroadcast); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := set(rawTarget | removeDefinition | exactMatch | noBroadcast); err != nil {
+			t.Errorf("restore NUL alias: %v", err)
+		}
+	})
+	// The control proves that ordinary DOS NUL opens reach the attacker file.
+	const control = "remapped-null-control\n"
+	ordinary, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := ordinary.WriteString(control)
+	closeErr := ordinary.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("write remapped NUL control: %v, %v", writeErr, closeErr)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != control {
+		t.Fatalf("NUL was not remapped to the control file: %q, %v", data, err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestWindowsStderrRedirectChild$")
+	command.Env = append(os.Environ(), stderrChildMode+"=redirected", "GOTRACEBACK=single")
+	// Avoid an implicit DOS NUL open for the child's unused stdin.
+	command.Stdin = strings.NewReader("")
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err = command.Run()
+	var exit *exec.ExitError
+	if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 2 ||
+		!strings.Contains(stdout.String(), stderrChildReady) {
+		t.Fatalf("remapped-NUL child did not exercise native/runtime writes: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("trusted null sink leaked %d bytes to inherited stderr", stderr.Len())
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != control {
+		t.Fatalf("trusted null sink wrote diagnostics to remapped NUL: %d bytes, %v", len(data), err)
 	}
 }

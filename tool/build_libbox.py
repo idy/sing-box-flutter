@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import hashlib
 import gzip
@@ -60,9 +61,20 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
     # unintended search directories. Mobile tools reject these paths below.
     tool_paths = [str(path) for path in (goroot / "bin", cache / "gopath/bin")
                   if os.pathsep not in str(path)]
+    gopath = cache / "gopath"
+    if os.pathsep in str(gopath):
+        # Go always parses GOPATH as a path list, even with GOMODCACHE/GOBIN
+        # pinned separately. Only sumdb's GOPATH metadata needs this private
+        # fallback; module sources, binaries and build caches stay in the project.
+        metadata = tempfile.TemporaryDirectory(prefix="sing-box-gopath-")
+        gopath = Path(metadata.name).resolve()
+        if os.pathsep in str(gopath):
+            metadata.cleanup()
+            raise BuildError("Go requires a temporary directory without the PATH separator " + repr(os.pathsep))
+        atexit.register(metadata.cleanup)
     env.update({
         "GOROOT": str(goroot), "GOTOOLCHAIN": "local", "GOENV": "off", "GOWORK": "off",
-        "GOPATH": str(cache / "gopath"), "GOBIN": str(cache / "gopath/bin"),
+        "GOPATH": str(gopath), "GOBIN": str(cache / "gopath/bin"),
         "GOCACHE": str(cache / "go-build"), "GOMODCACHE": str(cache / "go-mod"),
         "GOTMPDIR": str(cache / "tmp"), "TMPDIR": str(cache / "tmp"),
         "TMP": str(cache / "tmp"), "TEMP": str(cache / "tmp"),

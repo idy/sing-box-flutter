@@ -229,18 +229,27 @@ or an absolute path within this same leased managed hierarchy. External paths ar
 rejected even if their current ACL/label appears private: retained metadata rights
 from earlier administrator hardening cannot be excluded by a sharing probe. The
 helper verifies the live root's volume/file identity and each cache descendant,
-without rewriting an explicit path. Normal managed cache and temporary persistence
-remain enabled. Concurrent checks can reuse the current core's admitted file, and
-its identity remains pinned through all core/check cleanup. An enabled-cache check
-can create an empty private file. Deleting/recreating a corrupt cache is blocked
-while leased; stop and exit the helper before manually cleaning it up.
+without rewriting an explicit path. On first admission per live storage owner,
+an unknown existing cache is copied through a real read handle that excludes
+writers into a fresh object protected at creation. A handle-relative replacement
+preserves the bytes while retiring the old object; retained old metadata rights
+cannot modify the admitted identity. Independent handles preserve the fresh file
+identity across publication and final pinning. The owner retains keepers across
+core/check cleanup, so concurrent checks reuse the same fresh identity; a new
+owner recreates it again and preserves contents. First admission needs a full
+copy, flush and temporary disk space. Sharing conflicts or unavailable extended
+atomic-rename/ReOpenFile support fail closed without an unsafe pathname fallback.
+Normal managed cache and temporary persistence remain enabled. An enabled-cache
+check can create an empty private file. Close the helper's storage owner before
+manually deleting or renaming managed cache files or directories.
 
 The Apple identifiers and Android notification title are not used on Windows. `checkConfig()` parses against
 the selected native registry and validates the engine before connecting.
 Configurations travel through an anonymous process pipe, never command-line
-arguments or a temporary config file. The underlying Windows stderr handle and
-Go's cached stderr handles are redirected before configuration is read, including
-runtime panic output; redirection failure exits before initialization. Platform
+arguments or a temporary config file. Stderr opens the trusted native
+`\Device\Null` object directly, without a DOS `NUL` lookup. The underlying Windows
+stderr handle and Go's cached handles are redirected before configuration is read,
+including runtime panic output; redirection failure exits before initialization. Platform
 errors and status events use fixed messages. Encoded UTF-8 requests,
 including JSON escaping and newline framing, must fit within 8 MiB. Oversized
 requests return `request_too_large` locally without closing an existing VPN.

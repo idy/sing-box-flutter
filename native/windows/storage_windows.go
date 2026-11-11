@@ -20,10 +20,12 @@ import (
 // One owner retains the verified hierarchy, all managed directory pins and
 // handle-relative core.lock until every core/check operation has closed.
 type windowsStorage struct {
-	mu           sync.RWMutex
+	mu           sync.Mutex
 	directories  *directoryHandles
 	rootPath     string
 	rootIdentity nativeFileIdentity
+	cacheFiles   map[nativeFileIdentity]struct{}
+	cacheKeepers []*directoryHandles
 	closed       bool
 }
 
@@ -31,6 +33,11 @@ func (s *windowsStorage) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+	for _, keeper := range s.cacheKeepers {
+		keeper.close()
+	}
+	s.cacheKeepers = nil
+	s.cacheFiles = nil
 	s.directories.close()
 	return nil
 }
@@ -159,9 +166,8 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 					return err
 				}
 			} else {
-				// Native IO may reopen safe regular files. The private policy was
-				// present at creation; no old lower-token metadata handle can have
-				// been acquired before an in-place privilege transition here.
+				// Current policy does not prove historical provenance. Cache
+				// admission recreates unknown identities before native database IO.
 				directories.release(child)
 			}
 		}
@@ -195,8 +201,10 @@ func prepareEngineStorage(ctx context.Context, options option.Options) (_ io.Clo
 	if !ok || owner == nil {
 		return nil, errDirectories
 	}
-	owner.mu.RLock()
-	defer owner.mu.RUnlock()
+	// Serializing per owner makes first admission and keeper registration one
+	// operation. Concurrent checks reuse the live fresh identity, never recopy it.
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
 	if owner.closed || owner.rootPath == "" {
 		return nil, errDirectories
 	}
@@ -237,8 +245,24 @@ func prepareEngineStorage(ctx context.Context, options option.Options) (_ io.Clo
 			return nil, err
 		}
 	}
-	if _, err = directories.pinNativeFile(parent, parts[len(parts)-1], descriptor); err != nil {
+	pin, err := directories.pinNativeFile(parent, parts[len(parts)-1], descriptor, owner.cacheFiles)
+	if err != nil {
 		return nil, err
+	}
+	identity, err = directories.nativeFileIdentity(pin)
+	if err != nil {
+		return nil, err
+	}
+	if _, known := owner.cacheFiles[identity]; !known {
+		keeper, err := directories.duplicate()
+		if err != nil {
+			return nil, err
+		}
+		if owner.cacheFiles == nil {
+			owner.cacheFiles = make(map[nativeFileIdentity]struct{})
+		}
+		owner.cacheKeepers = append(owner.cacheKeepers, keeper)
+		owner.cacheFiles[identity] = struct{}{}
 	}
 	return &windowsStorage{directories: directories}, nil
 }

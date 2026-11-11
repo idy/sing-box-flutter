@@ -4,7 +4,7 @@ package main
 import "os"
 
 func suppressStderr() error {
-	sink, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	sink, err := openProcessStderrSink()
 	if err != nil {
 		return err
 	}
