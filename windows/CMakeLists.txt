@@ -125,7 +125,7 @@ function(_sing_box_flutter_install_resources)
     COMMAND "${RESOURCE_PYTHON}" -I -X utf8 "${RESOURCE_RESOLVER}" configure
       --output "${RESOURCE_SETTINGS}" --build-dir "${CMAKE_BINARY_DIR}"
       --core-dir "${RESOURCE_CORE_DIR}" --fallback-prefix "${CMAKE_INSTALL_PREFIX}"
-      --guard-file "${RESOURCE_GUARD}"
+      --guard-file "${RESOURCE_GUARD}" "--host-binary=${BINARY_NAME}"
     RESULT_VARIABLE RESOURCE_RESULT ERROR_VARIABLE RESOURCE_ERROR ENCODING UTF-8)
   if(NOT RESOURCE_RESULT EQUAL 0)
     message(FATAL_ERROR "${RESOURCE_ERROR}")

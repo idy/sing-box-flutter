@@ -18,8 +18,19 @@ def read_reply(directory: Path, name: str) -> dict:
     return json.loads((directory / name).read_text(encoding="utf-8"))
 
 
+def manifest_contains(manifest: str, path: Path) -> bool:
+    # Compare a known structured path as one scalar. Never split arbitrary paths
+    # on semicolons: those characters may belong to a directory name.
+    record = path.as_posix()
+    manifest = manifest.replace("/./", "/")
+    if os.name == "nt":
+        record, manifest = record.casefold(), manifest.replace("\\", "/").casefold()
+    return ";" + record + ";" in ";" + manifest + ";"
+
+
 def install_directories(settings: dict, configuration: str, prefix: str, component: str, *,
-                        verify_copies: bool = False, fallback: bool = True) -> list[str]:
+                        verify_copies: bool = False, fallback: bool = True,
+                        manifest: str | None = None, host_only: bool = False) -> list[str]:
     build = Path(settings["build_dir"]).resolve()
     reply = build / ".cmake/api/v1/reply"
     indices = list(reply.glob("index-*.json"))
@@ -42,6 +53,12 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
         selected = configurations[0]
     if selected is None:
         raise ValueError("CMake install configuration does not match the generated codemodel")
+    host = next((item for item in selected.get("targets", [])
+                 if item["name"] == settings.get("host_binary")), None)
+    host_artifacts = []
+    if host_only and host is not None:
+        host_artifacts = [(build / item["path"]).resolve()
+                          for item in read_reply(reply, host["jsonFile"]).get("artifacts", [])]
     core = (Path(settings["core_dir"]) / HELPER).resolve()
     effective_prefix = settings["fallback_prefix"] if "$<" in prefix else prefix
     destinations: list[Path] = []
@@ -52,11 +69,20 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
         details = read_reply(reply, directory["jsonFile"])
         for installer in details.get("installers", []):
             kind = installer.get("type")
-            if kind not in ("file", "directory"):
+            if kind not in ("file", "directory", "target"):
                 continue
             if component and installer.get("component", "Unspecified") != component:
                 continue
             if not component and installer.get("isExcludeFromAll", False):
+                continue
+            root = Path(installer["destination"])
+            if not root.is_absolute():
+                root = Path(effective_prefix) / root
+            if kind == "target":
+                if host_only and host is not None and installer.get("targetId") == host["id"]:
+                    destination = root.resolve()
+                    if destination not in destinations:
+                        destinations.append(destination)
                 continue
             for item in installer.get("paths", []):
                 origin = item.get("from") if isinstance(item, dict) else item
@@ -66,9 +92,25 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
                 if not origin_path.is_absolute():
                     origin_path = source / origin_path
                 origin_path = origin_path.resolve()
-                destination = Path(installer["destination"])
-                if not destination.is_absolute():
-                    destination = Path(effective_prefix) / destination
+                destination = root
+                if host_only:
+                    for executable in host_artifacts:
+                        if kind == "file":
+                            if origin_path != executable:
+                                continue
+                            placed = destination
+                        else:
+                            try:
+                                relative_executable = executable.relative_to(origin_path)
+                            except ValueError:
+                                continue
+                            to = item.get("to", origin_path.name) if isinstance(item, dict) else origin_path.name
+                            placed = destination / to / relative_executable.parent
+                            if manifest is None or not manifest_contains(manifest, placed.resolve() / executable.name):
+                                continue
+                        if placed.resolve() not in destinations:
+                            destinations.append(placed.resolve())
+                    continue
                 if kind == "file":
                     if origin_path != core:
                         continue
@@ -83,8 +125,11 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
                     # a plain source string retains the source directory name.
                     target_name = item.get("to", origin_path.name) if isinstance(item, dict) else origin_path.name
                     destination /= Path(target_name) / relative_core.parent
-                    # Verification requires the expected path even when missing.
-                    # Resource placement may filter to actual verified copies.
+                    # File API omits directory filters. Require a complete actual
+                    # install record for a directory copy, including files removed
+                    # after copying; independently require helper beside each host.
+                    if manifest is not None and not manifest_contains(manifest, destination.resolve() / HELPER):
+                        continue
                     installed = Path(os.environ.get("DESTDIR", "") + destination.resolve().as_posix()) / HELPER
                     if not verify_copies:
                         if not installed.is_file():
@@ -104,10 +149,14 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
     return [path.as_posix() for path in destinations]
 
 
-def verify_installed(settings: dict, configuration: str, prefix: str, component: str) -> None:
+def verify_installed(settings: dict, configuration: str, prefix: str, component: str,
+                     manifest: str | None = None) -> None:
     guard = json.loads(Path(settings["guard_file"]).read_text(encoding="utf-8"))
     destinations = install_directories(settings, configuration, prefix, component,
-                                       verify_copies=True, fallback=False)
+                                       verify_copies=True, fallback=False, manifest=manifest)
+    destinations += install_directories(settings, configuration, prefix, component,
+                                        host_only=True, fallback=False, manifest=manifest)
+    destinations = list(dict.fromkeys(destinations))
     invalid = []
     for destination in destinations:
         installed = Path(os.environ.get("DESTDIR", "") + destination) / HELPER
@@ -143,6 +192,7 @@ def main() -> int:
     configure.add_argument("--core-dir", type=Path, required=True)
     configure.add_argument("--fallback-prefix", required=True)
     configure.add_argument("--guard-file", type=Path, required=True)
+    configure.add_argument("--host-binary", default="")
     guard = commands.add_parser("guard-settings")
     guard.add_argument("--output", type=Path, required=True)
     guard.add_argument("--project-dir", type=Path, required=True)
@@ -155,6 +205,9 @@ def main() -> int:
         resolve.add_argument("--configuration", default="")
         resolve.add_argument("--prefix", required=True)
         resolve.add_argument("--component", default="")
+        records = resolve.add_mutually_exclusive_group()
+        records.add_argument("--manifest")
+        records.add_argument("--manifest-file", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "configure":
@@ -163,7 +216,8 @@ def main() -> int:
                         "fallback_prefix": args.fallback_prefix,
                         "python": Path(sys.executable).as_posix(),
                         "resolver": Path(__file__).resolve().as_posix(),
-                        "guard_file": args.guard_file.resolve().as_posix()}
+                        "guard_file": args.guard_file.resolve().as_posix(),
+                        "host_binary": args.host_binary}
             args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
         elif args.command == "guard-settings":
             settings = {"project_dir": args.project_dir.resolve().as_posix(),
@@ -177,10 +231,12 @@ def main() -> int:
             args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
         else:
             settings = json.loads(args.settings.read_text(encoding="utf-8"))
+            manifest = args.manifest_file.read_text(encoding="utf-8") if args.manifest_file else args.manifest
             if args.command == "verify-copies":
-                verify_installed(settings, args.configuration, args.prefix, args.component)
+                verify_installed(settings, args.configuration, args.prefix, args.component, manifest)
             else:
-                print(json.dumps(install_directories(settings, args.configuration, args.prefix, args.component),
+                print(json.dumps(install_directories(settings, args.configuration, args.prefix, args.component,
+                                                      manifest=manifest),
                                  ensure_ascii=False))
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"Windows resource installation: {error}\n")

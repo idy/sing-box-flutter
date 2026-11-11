@@ -357,7 +357,7 @@ class WindowsCMake(WindowsFixture):
     def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None,
                   nested_host=False, discover_application=False, relative_install=False, bundle_subdir="",
                   directory_install="", install_mutation="", exclude_helper=False,
-                  helper_component="Runtime"):
+                  helper_component="Runtime", metadata_copy=False):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -454,6 +454,12 @@ except PermissionError:
                          '" COMPONENT ' + helper_component + ')\n')
             if install_mutation in ("copied", "remove"):
                 text += mutation_rule
+            if metadata_copy:
+                text += '''get_filename_component(METADATA_SOURCE "${bundle_path}" DIRECTORY)
+get_filename_component(METADATA_SOURCE "${METADATA_SOURCE}" DIRECTORY)
+install(DIRECTORY "${METADATA_SOURCE}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/metadata;files"
+  COMPONENT Runtime FILES_MATCHING PATTERN "*.json")
+'''
         if nested_host:
             host_source = self.host / "windows"
             host_source.mkdir(exist_ok=True)
@@ -612,7 +618,8 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
     def test_install_verifies_actual_copied_helper_bytes(self):
         self.assert_mutation_during_install("copied")
 
-    def assert_directory_helper_presence(self, *, exclude=False, remove=False, component="Runtime"):
+    def assert_directory_helper_presence(self, *, exclude=False, remove=False, component="Runtime",
+                                         metadata_copy=False):
         entry, _, _ = self.published()
         artifact = build_core.host_path(self.host, entry["path"])
         legal = artifact.parent / "Legal"
@@ -621,7 +628,7 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
         installed = self.root / "directory helper presence"
         result = self.configure(flutter_layout=True, install_prefix=installed, directory_install="contents",
                                 exclude_helper=exclude, install_mutation="remove" if remove else "",
-                                helper_component=component)
+                                helper_component=component, metadata_copy=metadata_copy)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
                                  "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
@@ -649,7 +656,7 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
     def assert_flutter_install(self, install_prefix=None, late_install_prefix=None,
                                nested_host=False, discover_application=False,
                                relative_install=False, override_prefix=None, bundle_subdir="",
-                               directory_install="", lower_config=False):
+                               directory_install="", lower_config=False, metadata_copy=False):
         entry, _, _ = self.published()
         artifact = build_core.host_path(self.host, entry["path"])
         legal = artifact.parent / "Legal"
@@ -662,7 +669,8 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                 result = self.configure(flutter_layout=True, install_prefix=install_prefix,
                                         late_install_prefix=late_install_prefix, nested_host=nested_host,
                                         discover_application=discover_application, relative_install=relative_install,
-                                        bundle_subdir=bundle_subdir, directory_install=directory_install)
+                                        bundle_subdir=bundle_subdir, directory_install=directory_install,
+                                        metadata_copy=metadata_copy)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 result = subprocess.run(["cmake", "--build", str(self.cmake_build),
                                          "--config", configuration, "--target", "fixture_runner",
@@ -752,6 +760,23 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
         self.assert_flutter_install(install_prefix=self.root / "parent configured bundle", relative_install=True,
                                     override_prefix=self.root / "parent staged bundle", bundle_subdir="bin;parent",
                                     directory_install="parent")
+
+    def test_mixed_filtered_metadata_and_file_helper_install(self):
+        installed = self.root / "mixed file bundle"
+        self.assert_flutter_install(install_prefix=installed, metadata_copy=True)
+        self.assertTrue((installed / "metadata;files/core-capabilities.json").is_file())
+        self.assertFalse((installed / "metadata;files/WindowsCore" / WINDOWS_EXECUTABLE).exists())
+        self.assertFalse((installed / "metadata;files/WindowsCore/sing_box_flutter").exists())
+
+    def test_mixed_filtered_metadata_and_nested_directory_helper_install(self):
+        self.assert_flutter_install(nested_host=True, directory_install="contents", metadata_copy=True,
+                                    late_install_prefix=self.root / "mixed directory bundle", bundle_subdir="bin;tools")
+
+    def test_mixed_filtered_metadata_resource_only_component(self):
+        self.assert_directory_helper_presence(component="Helper", metadata_copy=True)
+
+    def test_mixed_filtered_metadata_still_rejects_removed_helper(self):
+        self.assert_directory_helper_presence(remove=True, metadata_copy=True)
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         self.published()
