@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -118,9 +119,12 @@ func run() int {
 	dataDir := flag.String("data-dir", "", "private absolute state directory")
 	temporary := flag.Bool("temporary-state", false, "remove owned temporary state after shutdown")
 	worker := flag.Bool("temporary-state-worker", false, "internal supervised temporary-state worker")
+	supervisorPID := flag.Int("supervisor-pid", 0, "internal temporary-state supervisor identity")
 	flag.Parse()
-	if *worker && !*temporary {
-		return 2
+	if *worker {
+		if !*temporary || bindTemporaryWorker(*supervisorPID) != nil {
+			return 2
+		}
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -132,7 +136,7 @@ func run() int {
 	if *temporary && !*worker {
 		// Re-exec the same inode, including after an installation path update.
 		// Configuration continues to travel only through inherited pipes.
-		child := exec.Command("/proc/self/exe", "--data-dir", statePath, "--temporary-state", "--temporary-state-worker")
+		child := exec.Command("/proc/self/exe", "--data-dir", statePath, "--temporary-state", "--temporary-state-worker", "--supervisor-pid", strconv.Itoa(os.Getpid()))
 		child.Stdout, child.Stderr = os.Stdout, os.Stderr
 		return superviseTemporaryState(statePath, os.Stdin, signals, child)
 	}

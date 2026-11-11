@@ -9,9 +9,12 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Runs in a real child process, so Wait (rather than a mock channel) proves
@@ -19,6 +22,15 @@ import (
 func TestTemporaryWorkerProcess(t *testing.T) {
 	if os.Getenv("SINGBOX_TEST_STATE_WORKER") != "1" {
 		return
+	}
+	// A capability-bearing exec clears the pre-exec setting. Simulate that
+	// transition even on CI runners whose test binary has no file capabilities.
+	if unix.Prctl(unix.PR_SET_PDEATHSIG, 0, 0, 0, 0) != nil {
+		os.Exit(4)
+	}
+	parent, err := strconv.Atoi(os.Getenv("SINGBOX_TEST_SUPERVISOR_PID"))
+	if err != nil || bindTemporaryWorker(parent) != nil {
+		os.Exit(4)
 	}
 	path, scenario := os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]
 	if err := os.WriteFile(filepath.Join(path, "worker-identity"), []byte("active"), 0o600); err != nil {
@@ -36,7 +48,15 @@ func TestTemporaryWorkerProcess(t *testing.T) {
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM)
+	if os.WriteFile(filepath.Join(path, "worker-pid"), []byte(strconv.Itoa(os.Getpid())), 0o600) != nil {
+		os.Exit(4)
+	}
 	fmt.Fprintln(os.Stdout, "ready")
+	if scenario == "not-reading" {
+		for {
+			time.Sleep(time.Second)
+		}
+	}
 	if scenario == "signal" {
 		<-signals
 		os.Exit(0)
@@ -68,7 +88,7 @@ func TestTemporaryWorkerProcess(t *testing.T) {
 
 func temporaryWorkerCommand(path, scenario string, output io.Writer) *exec.Cmd {
 	command := exec.Command(os.Args[0], "-test.run=^TestTemporaryWorkerProcess$", "--", path, scenario)
-	command.Env = append(os.Environ(), "SINGBOX_TEST_STATE_WORKER=1")
+	command.Env = append(os.Environ(), "SINGBOX_TEST_STATE_WORKER=1", "SINGBOX_TEST_SUPERVISOR_PID="+strconv.Itoa(os.Getpid()))
 	// Do not promote bytes.Buffer.ReadFrom through lockedOutput: all child
 	// output must pass through its synchronized Write and readiness signal.
 	command.Stdout = struct{ io.Writer }{output}
@@ -81,7 +101,10 @@ func TestSupervisorReapsOnlyAfterWorkerExit(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			_, path := ownedShutdownState(t)
 			var output lockedOutput
-			input, writer := io.Pipe()
+			input, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
 			defer input.Close()
 			defer writer.Close()
 			signals := make(chan os.Signal, 1)
@@ -125,7 +148,10 @@ func TestSupervisorReapsOnlyAfterWorkerExit(t *testing.T) {
 func TestSupervisorRefusesReplacementAfterWorkerExit(t *testing.T) {
 	_, path := ownedShutdownState(t)
 	var output lockedOutput
-	input, writer := io.Pipe()
+	input, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer input.Close()
 	defer writer.Close()
 	command := temporaryWorkerCommand(path, "normal", &output)
@@ -163,7 +189,13 @@ func TestSupervisorRefusesReplacementAfterWorkerExit(t *testing.T) {
 
 func TestSupervisorCleansStateWhenWorkerCannotStart(t *testing.T) {
 	_, path := ownedShutdownState(t)
-	code := superviseTemporaryState(path, nil, nil, exec.Command(filepath.Join(path, "missing-worker")))
+	input, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer writer.Close()
+	code := superviseTemporaryState(path, input, nil, exec.Command(filepath.Join(path, "missing-worker")))
 	if code != 2 {
 		t.Fatalf("missing worker must fail startup: %d", code)
 	}

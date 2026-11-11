@@ -137,8 +137,12 @@ fails, the backend removes the unused empty directory. A replacement helper gets
 fresh fallback state after the supervisor finishes; normal stop/start reuses the
 same state. The worker's final drain is limited to two seconds, and the supervisor
 allows at most five seconds after EOF or a shutdown signal before terminating a
-stuck worker and reaping it. Killing the supervisor itself with SIGKILL can prevent
-cleanup. Persistent-state helpers run directly without a supervisor.
+stuck worker and reaping it. Upstream closure is monitored independently of writes
+to the worker, including when its input pipe is full. The worker is bound to the
+supervisor with an uncatchable parent-death signal, re-armed after a capability-bearing
+exec, so supervisor failure cannot leave the engine running. Killing the supervisor
+itself with SIGKILL can still prevent state-file cleanup. Persistent-state helpers
+run directly without a supervisor.
 This fallback does not provide persistence across helper replacements or
 application launches. Set a valid `HOME` or
 `XDG_DATA_HOME` when persistent caches or other state are required. State paths
