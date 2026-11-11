@@ -60,7 +60,8 @@ class Core:
         if not self.process.stdin.closed:
             self.process.stdin.close()
         try:
-            assert self.process.wait(timeout=15) == 0
+            code = self.process.wait(timeout=15)
+            assert code == 0, f"helper exited with status {code}"
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait()
@@ -151,6 +152,11 @@ def main():
             info = core.ok("getInfo")
             assert info["version"] == "1.14.4", info
             assert len(info["fingerprint"]) == 64, info
+            # The ordinary-user Dart observer must be able to track a worker
+            # even when its executable carries file capabilities.
+            assert int(info["process_id"]) != core.process.pid, "handshake identified the supervisor instead of its worker"
+            stat = Path(f'/proc/{int(info["process_id"])}/stat').read_bytes().decode('latin-1')
+            assert stat[stat.rfind(')') + 1:].split()[19] == info["process_start_time"], info
             core.ok("initialize")
             assert core.ok("getStatus")["state"] == "disconnected"
             invalid = core.request("checkConfig", {"outbounds": [{"type": "secret-auth-key"}]})

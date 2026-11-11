@@ -281,6 +281,69 @@ String _privateTemporaryDirectory(
   }
 }
 
+bool _linuxWorkerMissing(int processID) {
+  final libc = ffi.DynamicLibrary.process();
+  final kill = libc.lookupFunction<ffi.Int32 Function(ffi.Int32, ffi.Int32),
+      int Function(int, int)>('kill');
+  final errno = libc.lookupFunction<ffi.Pointer<ffi.Int32> Function(),
+      ffi.Pointer<ffi.Int32> Function()>('__errno_location');
+  if (kill(processID, 0) == 0) return false;
+  return errno().value == 3; // ESRCH, rather than EPERM or a hidden proc entry.
+}
+
+/// Waits for the exact worker to release its resources, even if its supervisor
+/// exits first. Uses proc start time to distinguish PID reuse. A zombie group
+/// leader is not enough: other threads can still be in uninterruptible I/O.
+/// Unreadable or malformed proc entries never authorize replacement.
+@visibleForTesting
+Future<void> linuxWaitForWorkerExit(
+  int processID,
+  String startTime, {
+  Future<String?> Function()? readStat,
+  Duration interval = const Duration(milliseconds: 100),
+}) async {
+  Future<String?> readNativeStat() async {
+    try {
+      return latin1.decode(await File('/proc/$processID/stat').readAsBytes());
+    } on FileSystemException catch (error) {
+      if (const [2, 3].contains(error.osError?.errorCode) &&
+          _linuxWorkerMissing(processID)) {
+        return null;
+      }
+      // hidepid or an unavailable proc mount can also report ENOENT. Only
+      // kernel-confirmed ESRCH authorizes replacement when stat is unreadable.
+      rethrow;
+    }
+  }
+
+  final read = readStat ?? readNativeStat;
+  while (true) {
+    try {
+      final stat = await read();
+      if (stat == null) return;
+      final opening = stat.indexOf('(');
+      final closing = stat.lastIndexOf(')');
+      if (opening > 0 &&
+          closing > opening &&
+          stat.substring(0, opening).trim() == processID.toString()) {
+        final fields = stat.substring(closing + 1).trim().split(RegExp(r'\s+'));
+        if (fields.length >= 20 &&
+            RegExp(r'^(0|[1-9][0-9]*)$').hasMatch(fields[19])) {
+          if (fields[19] != startTime ||
+              (fields[17] == '1' &&
+                  const ['Z', 'X', 'x'].contains(fields[0]))) {
+            return;
+          }
+        }
+      }
+    } on FileSystemException {
+      // An access failure does not prove death. initialize's existing timeout
+      // reports core_stopping while this barrier continues to protect resources.
+    }
+    await Future<void>.delayed(interval);
+  }
+}
+
 /// Linux backend using a bundled, source-built sing-box child process.
 ///
 /// The helper alone needs TUN capabilities. It cleans up on parent pipe closure;
@@ -307,6 +370,8 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
               ),
               temporaryDirectory: Directory.systemTemp.path,
             )),
+        _waitForWorkerExit = linuxWaitForWorkerExit,
+        _stoppingTimeout = const Duration(seconds: 15),
         _startProcess = Process.start;
 
   /// Supplies isolated paths and a process factory for protocol tests.
@@ -317,10 +382,14 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
     required Future<Process> Function(String, List<String>) startProcess,
     bool temporaryState = false,
     String Function()? createDataDirectory,
+    Future<void> Function(int, String)? waitForWorkerExit,
+    Duration stoppingTimeout = const Duration(seconds: 15),
   })  : _bundleDirectory = bundleDirectory,
         _dataDirectory = createDataDirectory == null ? dataDirectory : null,
         _temporaryState = temporaryState,
         _createDataDirectory = createDataDirectory ?? (() => dataDirectory),
+        _waitForWorkerExit = waitForWorkerExit ?? ((_, __) async {}),
+        _stoppingTimeout = stoppingTimeout,
         _startProcess = startProcess;
 
   /// Called by Flutter's generated Dart plugin registrant.
@@ -332,12 +401,15 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
   String? _dataDirectory;
   final bool _temporaryState;
   final String Function() _createDataDirectory;
+  final Future<void> Function(int, String) _waitForWorkerExit;
+  final Duration _stoppingTimeout;
   final Future<Process> Function(String, List<String>) _startProcess;
   final _updates = StreamController<SingBoxEvent>.broadcast();
   final _pending = <int, Completer<Object?>>{};
   Process? _process;
   Future<void>? _launching;
   Future<void>? _stopping;
+  Future<void> Function()? _workerExitBarrier;
   Future<void> _writes = Future<void>.value();
   bool _initialized = false;
   int _nextId = 0;
@@ -365,7 +437,7 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
     String? allocatedTemporaryDirectory;
     try {
       // Do not overlap a replacement core with one still removing its routes.
-      await _stopping?.timeout(const Duration(seconds: 15), onTimeout: () {
+      await _stopping?.timeout(_stoppingTimeout, onTimeout: () {
         throw _error(
             'core_stopping', 'The previous Linux core is still stopping.');
       });
@@ -410,6 +482,26 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
         throw _error('core_mismatch',
             'The bundled Linux core does not match its capabilities manifest.');
       }
+      final pidText = info['process_id'];
+      final pid = pidText is String ? int.tryParse(pidText) : null;
+      final startTime = info['process_start_time'];
+      if (pid == null ||
+          pid <= 0 ||
+          pid > 0x7fffffff ||
+          pid.toString() != pidText ||
+          startTime is! String ||
+          startTime.length > 20 ||
+          !RegExp(r'^(0|[1-9][0-9]*)$').hasMatch(startTime)) {
+        throw _error(
+            'core_identity', 'Could not identify the Linux core process.');
+      }
+      if (!identical(_process, child)) {
+        throw _error(
+            'core_exited', 'The Linux core exited during its handshake.');
+      }
+      // No initialize/start RPC can be sent until this identity is recorded.
+      // Retirement waits for this worker, not merely its supervising process.
+      _workerExitBarrier = () => _waitForWorkerExit(pid, startTime);
       _version = info['version'] as String;
     } catch (error) {
       if (child != null) {
@@ -472,7 +564,11 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
     if (!identical(_process, child)) return;
     _process = null;
     if (_temporaryState) _dataDirectory = null;
-    _stopping = child.exitCode.then((_) {});
+    final waitForWorker = _workerExitBarrier;
+    _workerExitBarrier = null;
+    _stopping = child.exitCode.then((_) async {
+      await waitForWorker?.call();
+    });
     _initialized = false;
     _version = null;
     // Closing stdin and SIGTERM both trigger orderly TUN/route cleanup.

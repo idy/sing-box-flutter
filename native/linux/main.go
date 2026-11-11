@@ -128,7 +128,8 @@ func run() int {
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
+	// Keep shutdown signals registered until main's os.Exit. A late SIGTERM
+	// racing EOF cleanup must not regain its default action after run returns.
 	statePath, err := prepareStateDirectory(*dataDir)
 	if err != nil {
 		return 2
@@ -525,7 +526,15 @@ func (s *server) handle(ctx context.Context, r request) {
 		return
 	}
 	if r.Method == "getInfo" {
-		s.reply(r, map[string]string{"version": libbox.Version(), "fingerprint": libbox.CoreFingerprint()})
+		pid, start, err := coreProcessIdentity()
+		if err != nil {
+			s.fail(r, "core_identity", "Could not identify the Linux core process.")
+			return
+		}
+		s.reply(r, map[string]string{
+			"version": libbox.Version(), "fingerprint": libbox.CoreFingerprint(),
+			"process_id": pid, "process_start_time": start,
+		})
 		return
 	}
 	if r.Method == "initialize" {

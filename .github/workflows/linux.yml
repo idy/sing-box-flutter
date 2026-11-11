@@ -34,7 +34,7 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: Test Linux protocol portability without POSIX filesystem calls
-        run: flutter test --no-pub test/sing_box_flutter_linux_test.dart
+        run: flutter test --no-pub test/sing_box_flutter_linux_test.dart test/linux_worker_exit_test.dart
   linux:
     strategy:
       fail-fast: false

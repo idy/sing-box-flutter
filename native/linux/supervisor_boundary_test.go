@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -102,6 +103,10 @@ func TestSupervisorDeathKillsItsWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	pidfd, err := unix.PidfdOpen(pid, 0)
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) ||
+		errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+		t.Skipf("pidfd assertion unavailable on this kernel or seccomp policy: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

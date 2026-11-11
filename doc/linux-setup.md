@@ -194,8 +194,15 @@ exit closes its control pipe, then the helper closes the core, TUN and routes.
 The helper also cleans up on SIGINT/SIGTERM. A core process crash is reported as an
 error and requires initialization again before reconnecting. A failed native
 cleanup also retires the helper: later start/stop requests cannot report a clean
-disconnect or reuse that process. The backend waits for it to exit before a new
-initialization can launch a replacement. The example keeps Disconnect available
+disconnect or reuse that process. The handshake records the worker's PID and
+start time from the inherited `/proc` mount, which must match its PID namespace.
+After retiring a helper, the backend
+waits for both the supervisor and that exact worker to exit before launching a
+replacement. PID reuse is distinguished by start time. A terminal group leader is
+accepted only after its other threads have exited. An unreadable or malformed proc
+entry keeps reconnection blocked, and a wait beyond
+15 seconds reports `core_stopping` without lifting the barrier. This observation
+uses `/proc` and does not require kernel pidfd support. The example keeps Disconnect available
 while connecting, so a pending startup can be cancelled. Initialization
 refreshes and broadcasts the helper's current status; initializing an already
 connected helper preserves its connection. This integration is not a persistent

@@ -52,7 +52,10 @@ Linux implements the same Dart platform API with `LinuxSingBoxFlutter`, register
 as a Dart plugin with native CMake bundling. It uses JSON-line requests/responses
 on inherited pipes to a source-built `sing-box-core`; it opens no command socket.
 Configurations never appear in command-line arguments. The bundled capabilities
-fingerprint must match the helper handshake before initialization.
+fingerprint must match the helper handshake before initialization. That handshake
+also identifies the actual engine worker by its proc PID and start time. Retiring
+a supervisor does not release the reconnection barrier until that exact worker
+has exited; unreadable proc state cannot authorize another worker.
 
 Linux uses the generated registry with no mobile `PlatformInterface`, preserving
 upstream Linux TUN, routing and network monitors. `checkConfig` uses native engine

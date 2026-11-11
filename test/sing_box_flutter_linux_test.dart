@@ -48,7 +48,12 @@ class FakeCoreProcess implements Process {
         Object? result;
         switch (request['method']) {
           case 'getInfo':
-            result = {'version': '1.14.4', 'fingerprint': coreFingerprint};
+            result = {
+              'version': '1.14.4',
+              'fingerprint': coreFingerprint,
+              'process_id': '42',
+              'process_start_time': processStartTime,
+            };
           case 'requestPermission':
             result = permission;
           case 'getStatus':
@@ -102,6 +107,7 @@ class FakeCoreProcess implements Process {
   final _exit = Completer<int>();
   final requests = <Map<String, dynamic>>[];
   String coreFingerprint = fingerprint;
+  String processStartTime = '100';
   String state = 'disconnected';
   bool permission = true;
   bool rejectConfig = false;
@@ -800,6 +806,65 @@ void main() {
     await failure;
     expect(child.kills, 1);
     await expectLater(plugin.getStatus(), throwsA(isA<PlatformException>()));
+  });
+
+  test('replacement waits for actual worker exit after supervisor death',
+      () async {
+    final workerExited = Completer<void>();
+    addTearDown(() {
+      if (!workerExited.isCompleted) workerExited.complete();
+    });
+    var launches = 0;
+    var allocations = 0;
+    plugin = LinuxSingBoxFlutter.forTesting(
+      bundleDirectory: bundle.path,
+      dataDirectory: 'unused',
+      temporaryState: true,
+      createDataDirectory: () =>
+          p.join(bundle.path, 'private-${++allocations}'),
+      stoppingTimeout: const Duration(milliseconds: 20),
+      waitForWorkerExit: (pid, start) {
+        expect(pid, 42);
+        expect(start, '100');
+        return workerExited.future;
+      },
+      startProcess: (_, __) async {
+        launches++;
+        return child;
+      },
+    );
+    await plugin.initialize(notificationTitle: 'Test');
+    final failed = plugin.events.firstWhere((event) =>
+        event is VpnStatus && event.state == VpnConnectionState.error);
+    child
+        .exit(); // Supervisor gone; worker can still be in uninterruptible I/O.
+    await failed;
+    child = FakeCoreProcess();
+    await expectLater(
+        plugin.initialize(notificationTitle: 'Test'),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'core_stopping')));
+    expect(launches, 1);
+    expect(allocations, 1);
+    workerExited.complete();
+    await plugin.initialize(notificationTitle: 'Test');
+    expect(launches, 2);
+    expect(allocations, 2);
+    await plugin.start(config: '{}', name: 'Test');
+    expect((await plugin.getStatus()).isConnected, isTrue);
+  });
+
+  test('invalid worker identity fails before any native initialization',
+      () async {
+    child.processStartTime = 'private-invalid-token';
+    await expectLater(
+        plugin.getVersion(),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'core_identity')
+            .having((error) => error.toString(), 'message',
+                isNot(contains('private-invalid-token')))));
+    expect(child.requests.map((request) => request['method']), ['getInfo']);
+    expect(child.kills, 1);
   });
 
   test('core exit rejects in-flight requests and requires reinitialization',
