@@ -12,6 +12,7 @@ on:
       - 'native/**'
       - 'tool/**'
       - 'tests/**'
+      - 'test/**'
       - 'example/**'
       - 'pubspec.yaml'
       - 'native-core.json'
@@ -21,6 +22,19 @@ permissions:
   contents: read
 
 jobs:
+  windows-protocol:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Test Linux protocol portability without POSIX filesystem calls
+        run: flutter test --no-pub test/sing_box_flutter_linux_test.dart
   linux:
     strategy:
       fail-fast: false

@@ -83,12 +83,19 @@ type server struct {
 	service        *ownedService
 	startup        *startOperation
 	stopGeneration uint64
+	cleanupFailed  bool // Terminal: only replacing this helper can make cleanup trustworthy.
+	shuttingDown   bool
+	workers        sync.WaitGroup // Includes cancelled and retired startup workers.
 	state          string
 	create         func(context.Context, *libbox.DesktopConfig) (coreService, error)
 	prepare        func(string) (startConfig, error)
 	permission     func() bool
 	initialized    bool
 }
+
+const cleanupFailureMessage = "Could not fully close the Linux core. Replace the helper before reconnecting."
+
+var errCleanupFailed = errors.New(cleanupFailureMessage)
 
 func newCoreService(ctx context.Context, config *libbox.DesktopConfig) (coreService, error) {
 	instance, err := libbox.NewDesktopServiceWithConfig(ctx, config)
@@ -100,28 +107,54 @@ func newCoreService(ctx context.Context, config *libbox.DesktopConfig) (coreServ
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() (exitCode int) {
 	// A parent can close stdout while startup is in progress. A broken pipe
 	// must reach the EOF cleanup path instead of terminating Go via SIGPIPE.
 	signal.Ignore(syscall.SIGPIPE)
 	dataDir := flag.String("data-dir", "", "private absolute state directory")
+	temporary := flag.Bool("temporary-state", false, "remove owned temporary state after shutdown")
 	flag.Parse()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
 	statePath, err := prepareStateDirectory(*dataDir)
 	if err != nil {
-		os.Exit(2)
+		return 2
+	}
+	if *temporary {
+		state, err := pinTemporaryStateDirectory(statePath)
+		if err != nil {
+			return 2
+		}
+		defer func() {
+			// run returns only after service shutdown and all startup workers.
+			// Pinned identities prevent removal of a replacement directory.
+			if state.Remove() != nil {
+				exitCode = 2
+			}
+		}()
 	}
 	if err := libbox.Setup(&libbox.SetupOptions{
 		BasePath: statePath, WorkingPath: statePath, TempPath: filepath.Join(statePath, "tmp"),
 	}); err != nil {
-		os.Exit(2)
+		return 2
 	}
 	s := &server{
 		output: json.NewEncoder(os.Stdout), state: "disconnected",
 		create: newCoreService, prepare: prepareStartConfig, permission: tunPermission,
 	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
 	s.serve(os.Stdin, signals)
+	if *temporary {
+		// Retired constructors and Start calls can still own files after a
+		// cancelled RPC. Never erase their state while those workers run.
+		if s.waitForWorkers() != nil {
+			return 2
+		}
+	}
+	return 0
 }
 
 func (s *server) serve(input io.Reader, signals <-chan os.Signal) {
@@ -187,18 +220,33 @@ func (s *server) serve(input io.Reader, signals <-chan os.Signal) {
 	}
 }
 
-// Only the serialized request handler writes the protocol. Workers and the
-// control loop commit startup outcomes under access, then wake that handler.
-// A blocked parent output pipe must not prevent EOF/SIGTERM resource cleanup.
+// Replies remain serialized. A retired worker can additionally notify the parent
+// of terminal cleanup failure; its notification must never block worker exit or
+// EOF/SIGTERM cleanup on the parent's output pipe.
 func (s *server) emit(state string) {
 	s.outputAccess.Lock()
 	defer s.outputAccess.Unlock()
-	_ = s.output.Encode(map[string]any{"type": "status", "state": state})
+	_ = s.output.Encode(s.status(state))
+}
+
+func (s *server) status(state string) map[string]string {
+	s.access.Lock()
+	defer s.access.Unlock()
+	if state == "" {
+		state = s.state
+	}
+	status := map[string]string{"type": "status", "state": state}
+	if s.cleanupFailed {
+		status["state"], status["code"], status["message"] = "error", "cleanup_failed", cleanupFailureMessage
+	}
+	return status
 }
 
 func (s *server) setState(state string) {
 	s.access.Lock()
-	s.state = state
+	if !s.cleanupFailed {
+		s.state = state
+	}
 	s.access.Unlock()
 	s.emit(state)
 }
@@ -206,13 +254,55 @@ func (s *server) setState(state string) {
 func (s *server) reply(r request, result any) {
 	s.outputAccess.Lock()
 	defer s.outputAccess.Unlock()
+	if r.Method == "start" || r.Method == "stop" || r.Method == "initialize" {
+		s.access.Lock()
+		failed := s.cleanupFailed
+		s.access.Unlock()
+		if failed {
+			_ = s.output.Encode(map[string]any{"id": r.ID, "error": map[string]string{"code": "cleanup_failed", "message": cleanupFailureMessage}})
+			return
+		}
+	}
 	_ = s.output.Encode(map[string]any{"id": r.ID, "result": result})
 }
 
 func (s *server) fail(r request, code, message string) {
 	s.outputAccess.Lock()
 	defer s.outputAccess.Unlock()
+	s.access.Lock()
+	if s.cleanupFailed {
+		code, message = "cleanup_failed", cleanupFailureMessage
+	}
+	s.access.Unlock()
 	_ = s.output.Encode(map[string]any{"id": r.ID, "error": map[string]string{"code": code, "message": message}})
+}
+
+// closeService only relinquishes a successfully closed current instance. A
+// failure, including one owned by a retired startup, poisons the whole helper:
+// another connection cannot safely coexist with resources it failed to release.
+func (s *server) closeService(instance *ownedService) {
+	err := instance.Close()
+	s.access.Lock()
+	firstFailure := err != nil && !s.cleanupFailed
+	if firstFailure {
+		s.cleanupFailed, s.state = true, "error"
+		if op := s.startup; op != nil {
+			op.cancel()
+			if !op.completed {
+				op.completed = true
+				close(op.done)
+			}
+		}
+	} else if err == nil && s.service == instance {
+		s.service = nil
+	}
+	s.access.Unlock()
+	if firstFailure {
+		// The failure may arrive after the cancelled RPC and stop have already
+		// completed. Notify Dart even with no request pending so it can retire
+		// the helper, without making cleanup depend on a writable output pipe.
+		go s.emit("error")
+	}
 }
 
 func (s *server) close() error {
@@ -227,16 +317,10 @@ func (s *server) close() error {
 		}
 	}
 	s.access.Unlock()
-	var err error
 	if instance != nil {
-		// Retain ownership until Close finishes: a simultaneous EOF/SIGTERM
-		// cleanup must wait for the same resource closure, not exit early.
-		err = instance.Close()
-		s.access.Lock()
-		if s.service == instance {
-			s.service = nil
-		}
-		s.access.Unlock()
+		// Retain ownership until Close succeeds: simultaneous EOF/SIGTERM
+		// cleanup must observe the same closure and its cached failure.
+		s.closeService(instance)
 	}
 	if op != nil {
 		// Give cancellable upstream operations time to finish their deferred
@@ -250,7 +334,29 @@ func (s *server) close() error {
 		case <-timer.C:
 		}
 	}
-	return err
+	s.access.Lock()
+	defer s.access.Unlock()
+	if s.cleanupFailed {
+		return errCleanupFailed
+	}
+	return nil
+}
+
+// waitForWorkers is for final shutdown after serve has cancelled its parent and
+// closed the active service. Unlike stop's bounded wait, this includes retired
+// workers, so their state directory cannot be removed while they still use it.
+// Failed cleanup leaves resource lifetime uncertain even after all workers exit.
+func (s *server) waitForWorkers() error {
+	s.access.Lock()
+	s.shuttingDown = true
+	s.access.Unlock()
+	s.workers.Wait()
+	s.access.Lock()
+	defer s.access.Unlock()
+	if s.cleanupFailed {
+		return errCleanupFailed
+	}
+	return nil
 }
 
 func (s *server) interruptStartup() {
@@ -271,8 +377,13 @@ func (s *server) interruptStartupLocked() {
 
 func (s *server) beginStart(parent context.Context, r request) *startOperation {
 	s.access.Lock()
-	if parent.Err() != nil {
+	if parent.Err() != nil || s.shuttingDown {
 		s.access.Unlock()
+		return nil
+	}
+	if s.cleanupFailed {
+		s.access.Unlock()
+		s.fail(r, "cleanup_failed", cleanupFailureMessage)
 		return nil
 	}
 	if r.generation != s.stopGeneration {
@@ -291,12 +402,15 @@ func (s *server) beginStart(parent context.Context, r request) *startOperation {
 		done: make(chan struct{}), finished: make(chan struct{}),
 	}
 	s.startup, s.state = op, "connecting"
+	// Admission and shutdown's Wait barrier use the same lock. Add happens
+	// before the worker can be launched or retired by a concurrent stop.
+	s.workers.Add(1)
 	s.access.Unlock()
 	return op
 }
 
 func (s *server) currentStartLocked(op *startOperation) bool {
-	return s.startup == op && !op.completed && op.request.generation == s.stopGeneration && op.ctx.Err() == nil
+	return !s.cleanupFailed && s.startup == op && !op.completed && op.request.generation == s.stopGeneration && op.ctx.Err() == nil
 }
 
 func (s *server) publish(op *startOperation, instance *ownedService) bool {
@@ -314,7 +428,7 @@ func (s *server) publish(op *startOperation, instance *ownedService) bool {
 func (s *server) finishStart(op *startOperation, err error) bool {
 	s.access.Lock()
 	defer s.access.Unlock()
-	if s.startup != op || op.completed || op.request.generation != s.stopGeneration || op.parent.Err() != nil {
+	if s.cleanupFailed || s.startup != op || op.completed || op.request.generation != s.stopGeneration || op.parent.Err() != nil {
 		return false
 	}
 	if err == nil {
@@ -323,7 +437,9 @@ func (s *server) finishStart(op *startOperation, err error) bool {
 	op.completed, op.succeeded = true, err == nil
 	s.startup = nil
 	if err != nil {
-		s.service, s.state = nil, "error"
+		// closeService has already released successful cleanup by identity, or
+		// latched a terminal failure without discarding the failed owner.
+		s.state = "error"
 		op.cancel()
 	} else {
 		s.state = "connected"
@@ -351,8 +467,13 @@ func (s *server) replyStart(op *startOperation) {
 	}
 }
 
+func (s *server) finishWorker(op *startOperation) {
+	close(op.finished)
+	s.workers.Done()
+}
+
 func (s *server) runStart(op *startOperation, config startConfig) {
-	defer close(op.finished)
+	defer s.finishWorker(op)
 	if op.ctx.Err() != nil {
 		return
 	}
@@ -372,12 +493,12 @@ func (s *server) runStart(op *startOperation, config startConfig) {
 	}
 	if err != nil || op.ctx.Err() != nil {
 		if owned != nil {
-			_ = owned.Close()
+			s.closeService(owned)
 		}
 	}
 	if !s.finishStart(op, err) && owned != nil {
 		// This instance belongs only to op, even if a newer service is active.
-		_ = owned.Close()
+		s.closeService(owned)
 	}
 }
 
@@ -391,7 +512,9 @@ func (s *server) handle(ctx context.Context, r request) {
 	}
 	if r.Method == "initialize" {
 		s.access.Lock()
-		s.initialized = true
+		if !s.cleanupFailed {
+			s.initialized = true
+		}
 		s.access.Unlock()
 		s.reply(r, nil)
 		return
@@ -413,14 +536,15 @@ func (s *server) handle(ctx context.Context, r request) {
 			s.reply(r, nil)
 		}
 	case "getStatus":
-		s.access.Lock()
-		state := s.state
-		s.access.Unlock()
-		s.reply(r, map[string]string{"type": "status", "state": state})
+		s.reply(r, s.status(""))
 	case "start":
 		s.access.Lock()
-		hasService := s.service != nil || s.startup != nil
+		failed, hasService := s.cleanupFailed, s.service != nil || s.startup != nil
 		s.access.Unlock()
+		if failed {
+			s.fail(r, "cleanup_failed", cleanupFailureMessage)
+			return
+		}
 		if hasService {
 			s.fail(r, "already_started", "Stop the active connection before starting another.")
 			return
@@ -437,8 +561,10 @@ func (s *server) handle(ctx context.Context, r request) {
 		if op := s.beginStart(ctx, r); op != nil {
 			// Completion belongs to the coordinator, not the engine call. Stop
 			// can release this handler even if an upstream Start ignores ctx.
-			s.emit("connecting")
+			// Launch before pipe I/O: final shutdown must be able to drain
+			// every admitted worker even if the parent stops reading replies.
 			go s.runStart(op, config)
+			s.emit("connecting")
 			<-op.done
 			s.replyStart(op)
 		}
@@ -449,7 +575,7 @@ func (s *server) handle(ctx context.Context, r request) {
 		s.setState("disconnecting")
 		if s.close() != nil {
 			s.setState("error")
-			s.fail(r, "stop_failed", "Could not fully close the Linux core.")
+			s.fail(r, "cleanup_failed", cleanupFailureMessage)
 		} else {
 			s.setState("disconnected")
 			s.reply(r, nil)

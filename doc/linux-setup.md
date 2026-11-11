@@ -125,10 +125,15 @@ are allowed; nonsticky group/other-writable ancestors and foreign-owned ancestor
 are rejected before any directory is created. A safe symlinked temporary parent is
 supported. The newly created child is passed to the helper without resolving it,
 so replacing that child with a symlink cannot hide the replacement from the helper.
-It reuses that directory for helper restarts within the same backend, but a new
-engine/backend gets a new one.
-This fallback does not provide persistence across application launches and may be
-removed by the operating system's temporary-file cleanup. Set a valid `HOME` or
+The directory is allocated lazily when launching the helper. The helper tracks
+its identity and removes its contents and the directory after parent EOF or
+SIGINT/SIGTERM, once native shutdown and all startup workers finish. Symlink
+targets outside the directory are preserved. If launching the helper fails, the
+backend removes the unused empty directory. A replacement helper gets fresh
+fallback state after the old process exits; normal stop/start on the same helper
+reuses its state. Forced termination such as SIGKILL can prevent cleanup.
+This fallback does not provide persistence across helper replacements or
+application launches. Set a valid `HOME` or
 `XDG_DATA_HOME` when persistent caches or other state are required. State paths
 never resolve relative to the application's working directory, and environment
 variables such as `USER` and `UID` do not establish ownership.
@@ -176,7 +181,11 @@ a status subscription or disposing a widget does not stop the core. Unlike the
 mobile VPN services, the Linux helper belongs to the Flutter engine: engine/app
 exit closes its control pipe, then the helper closes the core, TUN and routes.
 The helper also cleans up on SIGINT/SIGTERM. A core process crash is reported as an
-error and requires initialization again before reconnecting. Initialization
+error and requires initialization again before reconnecting. A failed native
+cleanup also retires the helper: later start/stop requests cannot report a clean
+disconnect or reuse that process. The backend waits for it to exit before a new
+initialization can launch a replacement. The example keeps Disconnect available
+while connecting, so a pending startup can be cancelled. Initialization
 refreshes and broadcasts the helper's current status; initializing an already
 connected helper preserves its connection. This integration is not a persistent
 system daemon or a systemd service.

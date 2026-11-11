@@ -59,7 +59,11 @@ upstream Linux TUN, routing and network monitors. `checkConfig` uses native engi
 validation. `requestPermission` probes actual TUN creation and returns a boolean;
 it does not elevate the process or display a consent dialog. Only the helper needs
 TUN capabilities. Start/stop requests are serialized in the helper, and connected
-is emitted only after the engine starts.
+is emitted only after the engine starts. The Linux start future remains pending
+until startup succeeds or is cancelled; hosts must keep stop available while
+connecting. A native close failure permanently marks that helper unusable with
+`cleanup_failed`; the Dart backend retires it and requires initialization of a
+replacement after process exit.
 
 Subscriptions and widgets do not own the Linux connection. Flutter engine/app
 exit closes stdin, which stops the helper and releases the TUN/routes. This differs

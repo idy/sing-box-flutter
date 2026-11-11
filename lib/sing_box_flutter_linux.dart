@@ -44,8 +44,8 @@ String _validatedApplicationId(String? applicationId) {
 
 /// Resolves Linux state storage using the stable host application identity.
 ///
-/// With no valid data home, allocates a private directory for this backend. This
-/// fallback survives helper restarts but does not persist across engine launches.
+/// With no valid data home, allocates a private directory for a helper launch.
+/// The backend creates it lazily and the helper removes it after shutdown.
 @visibleForTesting
 String linuxDataDirectory({
   required Map<String, String> environment,
@@ -293,17 +293,20 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
           'lib',
           'sing_box_flutter',
         ),
-        _dataDirectory = linuxDataDirectory(
-          environment: Platform.environment,
-          applicationId: linuxApplicationId(
-            applicationIdOverride:
-                const bool.hasEnvironment('SING_BOX_FLUTTER_APPLICATION_ID')
-                    ? const String.fromEnvironment(
-                        'SING_BOX_FLUTTER_APPLICATION_ID')
-                    : null,
-          ),
-          temporaryDirectory: Directory.systemTemp.path,
-        ),
+        _temporaryState =
+            !p.posix.isAbsolute(Platform.environment['XDG_DATA_HOME'] ?? '') &&
+                !p.posix.isAbsolute(Platform.environment['HOME'] ?? ''),
+        _createDataDirectory = (() => linuxDataDirectory(
+              environment: Platform.environment,
+              applicationId: linuxApplicationId(
+                applicationIdOverride:
+                    const bool.hasEnvironment('SING_BOX_FLUTTER_APPLICATION_ID')
+                        ? const String.fromEnvironment(
+                            'SING_BOX_FLUTTER_APPLICATION_ID')
+                        : null,
+              ),
+              temporaryDirectory: Directory.systemTemp.path,
+            )),
         _startProcess = Process.start;
 
   /// Supplies isolated paths and a process factory for protocol tests.
@@ -312,8 +315,12 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
     required String bundleDirectory,
     required String dataDirectory,
     required Future<Process> Function(String, List<String>) startProcess,
+    bool temporaryState = false,
+    String Function()? createDataDirectory,
   })  : _bundleDirectory = bundleDirectory,
-        _dataDirectory = dataDirectory,
+        _dataDirectory = createDataDirectory == null ? dataDirectory : null,
+        _temporaryState = temporaryState,
+        _createDataDirectory = createDataDirectory ?? (() => dataDirectory),
         _startProcess = startProcess;
 
   /// Called by Flutter's generated Dart plugin registrant.
@@ -322,7 +329,9 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
   }
 
   final String _bundleDirectory;
-  final String _dataDirectory;
+  String? _dataDirectory;
+  final bool _temporaryState;
+  final String Function() _createDataDirectory;
   final Future<Process> Function(String, List<String>) _startProcess;
   final _updates = StreamController<SingBoxEvent>.broadcast();
   final _pending = <int, Completer<Object?>>{};
@@ -353,6 +362,7 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
   Future<void> _launch() async {
     if (_process != null) return;
     Process? child;
+    String? allocatedTemporaryDirectory;
     try {
       // Do not overlap a replacement core with one still removing its routes.
       await _stopping?.timeout(const Duration(seconds: 15), onTimeout: () {
@@ -367,9 +377,18 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
           !RegExp(r'^[a-f0-9]{64}$').hasMatch(fingerprint)) {
         throw const FormatException('Invalid core fingerprint.');
       }
+      // Allocate fallback state only once a helper can actually be launched.
+      // The helper owns its removal on parent EOF/SIGTERM; a replacement gets
+      // a fresh directory after the previous helper has fully exited.
+      final dataDirectory = _dataDirectory ??= _createDataDirectory();
+      if (_temporaryState) allocatedTemporaryDirectory = dataDirectory;
       child = await _startProcess(
         p.join(_bundleDirectory, 'sing-box-core'),
-        ['--data-dir', p.absolute(_dataDirectory)],
+        [
+          '--data-dir',
+          p.absolute(dataDirectory),
+          if (_temporaryState) '--temporary-state',
+        ],
       );
       _process = child;
       final current = child;
@@ -393,7 +412,18 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
       }
       _version = info['version'] as String;
     } catch (error) {
-      if (child != null) _failed(child);
+      if (child != null) {
+        _failed(child);
+      } else if (allocatedTemporaryDirectory != null) {
+        // Process.start failed: no helper can own or populate this fresh path.
+        // Nonrecursive deletion refuses to traverse any replacement contents.
+        _dataDirectory = null;
+        try {
+          await Directory(allocatedTemporaryDirectory).delete();
+        } on FileSystemException {
+          // Preserve the sanitized launch failure.
+        }
+      }
       if (error is PlatformException) rethrow;
       throw _error('missing_native_core',
           'Build and bundle the Linux core with dart run sing_box_flutter build --target linux.');
@@ -405,7 +435,11 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
     try {
       final value = jsonDecode(line) as Map<String, dynamic>;
       if (value['type'] == 'status') {
-        _updateStatus(VpnStatus.fromMap(value));
+        if (value['code'] == 'cleanup_failed') {
+          _failed(child);
+        } else {
+          _updateStatus(VpnStatus.fromMap(value));
+        }
         return;
       }
       final completion = _pending.remove(value['id']);
@@ -416,6 +450,7 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
           failure['message'] is String) {
         completion.completeError(
             _error(failure['code'] as String, failure['message'] as String));
+        if (failure['code'] == 'cleanup_failed') _failed(child);
       } else if (value.containsKey('result')) {
         completion.complete(value['result']);
       } else {
@@ -431,6 +466,7 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
   void _failed(Process child) {
     if (!identical(_process, child)) return;
     _process = null;
+    if (_temporaryState) _dataDirectory = null;
     _stopping = child.exitCode.then((_) {});
     _initialized = false;
     _version = null;

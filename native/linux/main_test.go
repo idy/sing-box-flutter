@@ -22,6 +22,7 @@ import (
 
 type fakeService struct {
 	startErr   error
+	closeErr   error
 	start      func() error
 	onClose    func()
 	closed     atomic.Bool
@@ -43,7 +44,7 @@ func (s *fakeService) Close() error {
 			s.onClose()
 		}
 	})
-	return nil
+	return s.closeErr
 }
 
 func testServer(output io.Writer, service *fakeService) *server {
@@ -83,6 +84,78 @@ func TestLifecycleAndDuplicateStart(t *testing.T) {
 	s.handle(context.Background(), request{ID: 3, Method: "stop"})
 	if !service.closed.Load() || s.service != nil || s.state != "disconnected" {
 		t.Fatal("stop must release the active service")
+	}
+}
+
+func TestStopCleanupFailureRequiresHelperReplacement(t *testing.T) {
+	var output lockedOutput
+	service := &fakeService{closeErr: errors.New("secret-close-error")}
+	s := testServer(&output, service)
+	s.handle(context.Background(), request{ID: 1, Method: "start"})
+	s.access.Lock()
+	owner := s.service
+	s.access.Unlock()
+	s.handle(context.Background(), request{ID: 2, Method: "stop"})
+	afterStop := len(output.text())
+	s.handle(context.Background(), request{ID: 3, Method: "stop"})
+	s.handle(context.Background(), request{ID: 4, Method: "initialize"})
+	s.prepare = func(string) (startConfig, error) {
+		t.Fatal("terminal helper attempted to prepare another connection")
+		return startConfig{}, nil
+	}
+	s.handle(context.Background(), request{ID: 5, Method: "start"})
+	s.handle(context.Background(), request{ID: 6, Method: "getStatus"})
+	if err := s.close(); !errors.Is(err, errCleanupFailed) {
+		t.Fatalf("repeated shutdown forgot cleanup failure: %v", err)
+	}
+	if err := s.waitForWorkers(); !errors.Is(err, errCleanupFailed) {
+		t.Fatalf("worker drain forgot cleanup failure: %v", err)
+	}
+	s.access.Lock()
+	retained := s.cleanupFailed && s.state == "error" && s.service == owner && owner != nil
+	s.access.Unlock()
+	if !retained || service.closeCalls.Load() != 1 {
+		t.Fatal("failed owner must remain terminal without retrying its cached Close")
+	}
+	text := output.text()
+	requireCleanupFailure(t, text, 2, 3, 4, 5)
+	if strings.Contains(text[afterStop:], `"state":"disconnected"`) || strings.Contains(text[afterStop:], `"state":"disconnecting"`) ||
+		!strings.Contains(text, `"id":6,"result":{"code":"cleanup_failed"`) {
+		t.Fatalf("terminal helper reverted state or hid its failure from status:\n%s", text)
+	}
+}
+
+func TestFailedStartupCleanupRequiresHelperReplacement(t *testing.T) {
+	for _, construction := range []bool{false, true} {
+		t.Run(fmt.Sprintf("construction=%v", construction), func(t *testing.T) {
+			var output lockedOutput
+			service := &fakeService{
+				startErr: errors.New("secret-start-error"),
+				closeErr: errors.New("secret-close-error"),
+			}
+			s := testServer(&output, service)
+			var creates atomic.Int32
+			s.create = func(context.Context, *libbox.DesktopConfig) (coreService, error) {
+				creates.Add(1)
+				if construction {
+					return service, errors.New("secret-construction-error")
+				}
+				return service, nil
+			}
+			s.handle(context.Background(), request{ID: 1, Method: "start"})
+			s.handle(context.Background(), request{ID: 2, Method: "stop"})
+			s.handle(context.Background(), request{ID: 3, Method: "start"})
+			if err := s.waitForWorkers(); !errors.Is(err, errCleanupFailed) {
+				t.Fatalf("failed startup cleanup was not terminal: %v", err)
+			}
+			requireCleanupFailure(t, output.text(), 1, 2, 3)
+			s.access.Lock()
+			failed := s.cleanupFailed && s.state == "error"
+			s.access.Unlock()
+			if !failed || creates.Load() != 1 || service.closeCalls.Load() != 1 || strings.Contains(output.text(), `"state":"connected"`) {
+				t.Fatal("failed startup cleanup allowed false success, recreation or duplicate Close")
+			}
+		})
 	}
 }
 
@@ -208,6 +281,34 @@ func awaitOutput(t *testing.T, output *lockedOutput, contains string) {
 	}
 }
 
+func awaitCleanupReply(t *testing.T, output *lockedOutput, id int) {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for {
+		text, changed := output.snapshot()
+		for _, line := range strings.Split(text, "\n") {
+			var message struct {
+				ID    int `json:"id"`
+				Error *struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if json.Unmarshal([]byte(line), &message) == nil && message.ID == id {
+				if message.Error == nil || message.Error.Code != "cleanup_failed" {
+					t.Fatalf("request %d must fail cleanup: %s", id, line)
+				}
+				return
+			}
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatalf("missing cleanup failure reply %d:\n%s", id, text)
+		}
+	}
+}
+
 func replyIDs(t *testing.T, text string) []int {
 	t.Helper()
 	decoder := json.NewDecoder(strings.NewReader(text))
@@ -224,6 +325,41 @@ func replyIDs(t *testing.T, text string) []int {
 		if message.ID != 0 {
 			ids = append(ids, message.ID)
 		}
+	}
+}
+
+func requireCleanupFailure(t *testing.T, text string, ids ...int) {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(text))
+	seen := make(map[int]int)
+	for {
+		var message struct {
+			ID    int `json:"id"`
+			Error *struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := decoder.Decode(&message); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("invalid protocol output: %v", err)
+		}
+		if !slices.Contains(ids, message.ID) {
+			continue
+		}
+		seen[message.ID]++
+		if message.Error == nil || message.Error.Code != "cleanup_failed" || message.Error.Message != cleanupFailureMessage {
+			t.Fatalf("request %d must require helper replacement:\n%s", message.ID, text)
+		}
+	}
+	for _, id := range ids {
+		if seen[id] != 1 {
+			t.Fatalf("request %d has %d replies:\n%s", id, seen[id], text)
+		}
+	}
+	if strings.Contains(text, "secret-") {
+		t.Fatalf("raw cleanup/start diagnostics escaped onto the protocol:\n%s", text)
 	}
 }
 
@@ -339,6 +475,53 @@ func TestStopCancelsStartupAndReturnsSerializedReply(t *testing.T) {
 	await(t, stopped, "helper did not exit after EOF")
 }
 
+func TestCancelledStartupCleanupFailureRequiresHelperReplacement(t *testing.T) {
+	for _, construction := range []bool{false, true} {
+		t.Run(fmt.Sprintf("construction=%v", construction), func(t *testing.T) {
+			var output lockedOutput
+			entered := make(chan struct{})
+			service := &fakeService{closeErr: errors.New("secret-cancel-close-error")}
+			s := testServer(&output, service)
+			var creates atomic.Int32
+			s.create = func(ctx context.Context, _ *libbox.DesktopConfig) (coreService, error) {
+				creates.Add(1)
+				if construction {
+					close(entered)
+					<-ctx.Done()
+					return service, ctx.Err()
+				}
+				service.start = func() error { close(entered); <-ctx.Done(); return ctx.Err() }
+				return service, nil
+			}
+			input, writer := io.Pipe()
+			stopped := make(chan struct{})
+			t.Cleanup(func() {
+				_ = writer.Close()
+				_ = input.Close()
+				await(t, stopped, "helper did not exit after EOF")
+			})
+			go func() { s.serve(input, make(chan os.Signal)); close(stopped) }()
+			_, _ = fmt.Fprintln(writer, `{"id":1,"method":"start"}`)
+			await(t, entered, "startup did not reach the cancellable operation")
+			_, _ = fmt.Fprintln(writer, `{"id":2,"method":"stop"}`)
+			awaitCleanupReply(t, &output, 2)
+			_, _ = fmt.Fprintln(writer, `{"id":3,"method":"start"}`)
+			awaitCleanupReply(t, &output, 3)
+			_ = writer.Close()
+			await(t, stopped, "helper did not exit after EOF")
+			if err := s.waitForWorkers(); !errors.Is(err, errCleanupFailed) {
+				t.Fatalf("cancelled startup lost cleanup failure: %v", err)
+			}
+			text := output.text()
+			requireCleanupFailure(t, text, 2, 3)
+			if creates.Load() != 1 || service.closeCalls.Load() != 1 || strings.Contains(text, `"state":"connected"`) ||
+				!slices.Equal(replyIDs(t, text), []int{1, 2, 3}) {
+				t.Fatalf("cancelled startup broke ordered terminal cleanup:\n%s", text)
+			}
+		})
+	}
+}
+
 func TestStopBeforeStartSuccessCommit(t *testing.T) {
 	var output bytes.Buffer
 	service := &fakeService{}
@@ -359,7 +542,7 @@ func TestStopBeforeStartSuccessCommit(t *testing.T) {
 	}
 	await(t, op.done, "cancelled startup RPC was not released")
 	s.replyStart(op)
-	close(op.finished)
+	s.finishWorker(op)
 	s.handle(context.Background(), request{ID: 2, Method: "stop", stopRecorded: true})
 	text := output.String()
 	if strings.Contains(text, `"state":"connected"`) || strings.Contains(text, `"id":1,"result"`) {
@@ -475,6 +658,196 @@ func TestStopDuringBlockedStartupAllowsControlAndReconnect(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRetiredCleanupFailurePoisonsReplacement(t *testing.T) {
+	for _, replacementStarting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replacementStarting=%v", replacementStarting), func(t *testing.T) {
+			var output lockedOutput
+			entered, release := make(chan struct{}), make(chan struct{})
+			replacementEntered := make(chan struct{})
+			var releaseOnce sync.Once
+			first := &fakeService{closeErr: errors.New("secret-retired-close-error")}
+			second := &fakeService{}
+			s := testServer(&output, first)
+			var creates atomic.Int32
+			s.create = func(ctx context.Context, _ *libbox.DesktopConfig) (coreService, error) {
+				if creates.Add(1) == 1 {
+					close(entered)
+					<-release // A constructor that ignores cancellation and returns resources late.
+					return first, nil
+				}
+				if replacementStarting {
+					second.start = func() error { close(replacementEntered); <-ctx.Done(); return ctx.Err() }
+				}
+				return second, nil
+			}
+			input, writer := io.Pipe()
+			stopped := make(chan struct{})
+			t.Cleanup(func() {
+				releaseOnce.Do(func() { close(release) })
+				_ = writer.Close()
+				_ = input.Close()
+				await(t, stopped, "helper did not exit after EOF")
+				_ = s.waitForWorkers()
+			})
+			go func() { s.serve(input, make(chan os.Signal)); close(stopped) }()
+			_, _ = fmt.Fprintln(writer, `{"id":1,"method":"start"}`)
+			await(t, entered, "old constructor did not block")
+			s.access.Lock()
+			oldOp := s.startup
+			s.access.Unlock()
+			_, _ = fmt.Fprintln(writer, `{"id":2,"method":"stop"}`)
+			awaitOutput(t, &output, `"id":2,"result":null`)
+			_, _ = fmt.Fprintln(writer, `{"id":3,"method":"start"}`)
+			if replacementStarting {
+				await(t, replacementEntered, "replacement startup did not block")
+			} else {
+				awaitOutput(t, &output, `"id":3,"result":null`)
+			}
+			s.access.Lock()
+			replacement, replacementOp := s.service, s.startup
+			s.access.Unlock()
+			if replacement == nil || replacement.coreService != second {
+				t.Fatal("replacement service was not published")
+			}
+			releaseOnce.Do(func() { close(release) })
+			await(t, oldOp.finished, "retired constructor did not finish cleanup")
+			// With an already connected replacement there is no pending RPC: the
+			// asynchronous status alone must tell Dart to retire this helper.
+			awaitOutput(t, &output, `{"code":"cleanup_failed","message":"`+cleanupFailureMessage+`","state":"error","type":"status"}`)
+			if replacementStarting {
+				await(t, replacementOp.finished, "terminal failure did not cancel replacement startup")
+				awaitCleanupReply(t, &output, 3)
+				requireCleanupFailure(t, output.text(), 3)
+			} else {
+				s.access.Lock()
+				preserved := s.service == replacement && s.cleanupFailed && s.state == "error"
+				s.access.Unlock()
+				if !preserved || second.closed.Load() {
+					t.Fatal("stale cleanup silently discarded or closed the active replacement")
+				}
+			}
+			afterFailure := len(output.text())
+			_, _ = fmt.Fprintln(writer, `{"id":4,"method":"stop"}`)
+			_, _ = fmt.Fprintln(writer, `{"id":5,"method":"start"}`)
+			_, _ = fmt.Fprintln(writer, `{"id":6,"method":"initialize"}`)
+			_, _ = fmt.Fprintln(writer, `{"id":7,"method":"getStatus"}`)
+			awaitOutput(t, &output, `"id":7,"result":{"code":"cleanup_failed"`)
+			text := output.text()
+			requireCleanupFailure(t, text, 4, 5, 6)
+			if strings.Contains(text[afterFailure:], `"state":"connected"`) || strings.Contains(text[afterFailure:], `"state":"disconnected"`) ||
+				creates.Load() != 2 || first.closeCalls.Load() != 1 || second.closeCalls.Load() != 1 {
+				t.Fatalf("retired cleanup allowed another live connection or false recovery:\n%s", text)
+			}
+		})
+	}
+}
+
+func TestShutdownWaitsForRetiredWorkers(t *testing.T) {
+	for _, construction := range []bool{false, true} {
+		t.Run(fmt.Sprintf("construction=%v", construction), func(t *testing.T) {
+			var output lockedOutput
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			first := &fakeService{start: func() error { close(entered); <-release; return nil }}
+			second := &fakeService{}
+			s := testServer(&output, first)
+			var creates atomic.Int32
+			s.create = func(context.Context, *libbox.DesktopConfig) (coreService, error) {
+				if creates.Add(1) == 1 {
+					if construction {
+						close(entered)
+						<-release
+					}
+					return first, nil
+				}
+				return second, nil
+			}
+			input, writer := io.Pipe()
+			stopped := make(chan struct{})
+			t.Cleanup(func() {
+				releaseOnce.Do(func() { close(release) })
+				_ = writer.Close()
+				_ = input.Close()
+				await(t, stopped, "helper did not exit after EOF")
+				_ = s.waitForWorkers()
+			})
+			go func() { s.serve(input, make(chan os.Signal)); close(stopped) }()
+			_, _ = fmt.Fprintln(writer, `{"id":1,"method":"start"}`)
+			await(t, entered, "old startup did not block")
+			_, _ = fmt.Fprintln(writer, `{"id":2,"method":"stop"}`)
+			awaitOutput(t, &output, `"id":2,"result":null`)
+			_, _ = fmt.Fprintln(writer, `{"id":3,"method":"start"}`)
+			awaitOutput(t, &output, `"id":3,"result":null`)
+			_ = writer.Close()
+			await(t, stopped, "serve did not return before the retired worker")
+			if !second.closed.Load() {
+				t.Fatal("serve did not close the active replacement before final worker drain")
+			}
+			drained := make(chan error, 1)
+			go func() { drained <- s.waitForWorkers() }()
+			select {
+			case err := <-drained:
+				t.Fatalf("shutdown forgot the retired worker: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			releaseOnce.Do(func() { close(release) })
+			select {
+			case err := <-drained:
+				if err != nil {
+					t.Fatalf("successful worker cleanup failed: %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("final shutdown did not finish after retired worker cleanup")
+			}
+			if first.closeCalls.Load() != 1 || second.closeCalls.Load() != 1 {
+				t.Fatal("worker drain did not retain independent cleanup ownership")
+			}
+			s.access.Lock()
+			generation := s.stopGeneration
+			s.access.Unlock()
+			if op := s.beginStart(context.Background(), request{ID: 4, Method: "start", generation: generation}); op != nil {
+				op.cancel()
+				s.finishWorker(op)
+				t.Fatal("final worker drain admitted a new startup")
+			}
+		})
+	}
+}
+
+func TestCleanupFailureWorkerDrainDoesNotDependOnOutput(t *testing.T) {
+	output := &blockedOutput{entered: make(chan struct{}), release: make(chan struct{})}
+	closed := make(chan struct{})
+	service := &fakeService{
+		startErr: errors.New("secret-start-error"), closeErr: errors.New("secret-close-error"),
+		onClose: func() { close(closed) },
+	}
+	s := testServer(output, service)
+	input, writer := io.Pipe()
+	stopped := make(chan struct{})
+	t.Cleanup(func() {
+		close(output.release)
+		_ = writer.Close()
+		_ = input.Close()
+		await(t, stopped, "helper did not exit after releasing output")
+	})
+	go func() { s.serve(input, make(chan os.Signal)); close(stopped) }()
+	_, _ = fmt.Fprintln(writer, `{"id":1,"method":"start"}`)
+	await(t, output.entered, "startup did not reach blocked output")
+	await(t, closed, "blocked output prevented startup cleanup")
+	_ = writer.Close()
+	await(t, stopped, "terminal cleanup blocked on its notification output")
+	drained := make(chan error, 1)
+	go func() { drained <- s.waitForWorkers() }()
+	select {
+	case err := <-drained:
+		if !errors.Is(err, errCleanupFailed) {
+			t.Fatalf("blocked output hid cleanup failure: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("failure notification blocked the worker drain")
 	}
 }
 

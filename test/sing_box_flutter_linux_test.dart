@@ -5,6 +5,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:sing_box_flutter/sing_box_flutter.dart';
 import 'package:sing_box_flutter/sing_box_flutter_linux.dart'
     show linuxApplicationId, linuxDataDirectory;
@@ -57,6 +58,16 @@ class FakeCoreProcess implements Process {
             state = 'connected';
             emit({'type': 'status', 'state': state});
           case 'stop':
+            if (failCleanup) {
+              emit({
+                'id': request['id'],
+                'error': {
+                  'code': 'cleanup_failed',
+                  'message': 'Replace the helper before reconnecting.',
+                },
+              });
+              return;
+            }
             state = 'disconnected';
             emit({'type': 'status', 'state': state});
           case 'checkConfig':
@@ -86,6 +97,7 @@ class FakeCoreProcess implements Process {
   String state = 'disconnected';
   bool permission = true;
   bool rejectConfig = false;
+  bool failCleanup = false;
   bool holdRequests = false;
   int kills = 0;
 
@@ -202,7 +214,7 @@ void main() {
     expect(firstDirectory, isNot(directory('dev.vendor_b.Vpn')));
     expect(firstDirectory, startsWith('${bundle.path}/user-data/'));
     expect(await Directory('${bundle.path}/user-data').exists(), isFalse);
-  });
+  }, skip: Platform.isWindows);
 
   test('application override takes precedence over GTK identity', () {
     expect(
@@ -332,7 +344,7 @@ void main() {
       ),
       throwsArgumentError,
     );
-  });
+  }, skip: Platform.isWindows);
 
   test('private temporary fallback preserves UTF-8 directory paths', () async {
     final parent = await Directory('${bundle.path}/tmp-空间-\u{10400}').create();
@@ -345,7 +357,7 @@ void main() {
         startsWith('${await parent.resolveSymbolicLinks()}/sing-box-flutter-'));
     expect(await Directory(directory).exists(), isTrue);
     expect((await Directory(directory).stat()).mode & 0x1ff, 0x1c0);
-  });
+  }, skip: Platform.isWindows);
 
   test('fallback rejects nonsticky writable temporary ancestry before creation',
       () async {
@@ -369,7 +381,7 @@ void main() {
         expect(await parent.list().length, before);
       }
     }
-  });
+  }, skip: Platform.isWindows);
 
   test('fallback supports a safe symlinked temporary parent', () async {
     final target = await Directory('${bundle.path}/temporary-parent').create();
@@ -384,7 +396,7 @@ void main() {
         startsWith('${await target.resolveSymbolicLinks()}/sing-box-flutter-'));
     expect(directory, isNot(startsWith('${alias.path}/')));
     expect((await Directory(directory).stat()).mode & 0x1ff, 0x1c0);
-  });
+  }, skip: Platform.isWindows);
 
   test('fallback works under the real system temporary directory', () async {
     final directory = linuxDataDirectory(
@@ -394,7 +406,7 @@ void main() {
     );
     addTearDown(() => Directory(directory).delete(recursive: true));
     expect((await Directory(directory).stat()).mode & 0x1ff, 0x1c0);
-  });
+  }, skip: Platform.isWindows);
 
   test('fallback never follows a replaced child after mkdtemp', () async {
     final target =
@@ -417,7 +429,7 @@ void main() {
     expect(await FileSystemEntity.type(directory, followLinks: false),
         FileSystemEntityType.link);
     expect(await marker.readAsString(), 'untouched');
-  });
+  }, skip: Platform.isWindows);
 
   test('temporary fallback rejects NUL paths before native path truncation',
       () async {
@@ -434,7 +446,7 @@ void main() {
               isNot(contains('private-path-secret')))),
     );
     expect(await bundle.list().length, entries);
-  });
+  }, skip: Platform.isWindows);
 
   test('fallback ignores precreated predictable paths and symlinks', () async {
     final target = await Directory('${bundle.path}/other-user').create();
@@ -453,7 +465,7 @@ void main() {
     expect(await Directory(directory).list().isEmpty, isTrue);
     expect(await marker.readAsString(), 'unchanged');
     expect(await target.list().length, 1);
-  });
+  }, skip: Platform.isWindows);
 
   test('temporary fallback failures report sanitized errors', () async {
     final invalidTemp = await File('${bundle.path}/private-path-secret')
@@ -469,25 +481,27 @@ void main() {
           .having((error) => error.toString(), 'message',
               isNot(contains('private-path-secret')))),
     );
-  });
+  }, skip: Platform.isWindows);
 
-  test('a backend reuses its private fallback after helper replacement',
+  test('fallback allocation is lazy and a replacement gets fresh owned state',
       () async {
-    final dataDirectory = linuxDataDirectory(
-      environment: {},
-      applicationId: 'dev.test.Vpn',
-      temporaryDirectory: bundle.path,
-    );
+    var allocations = 0;
     final launches = <List<String>>[];
     plugin = LinuxSingBoxFlutter.forTesting(
       bundleDirectory: bundle.path,
-      dataDirectory: dataDirectory,
+      dataDirectory: 'unused',
+      temporaryState: true,
+      createDataDirectory: () =>
+          p.join(bundle.path, 'private-${++allocations}'),
       startProcess: (_, args) async {
         launches.add(args);
         return child;
       },
     );
+    expect(allocations, 0);
     await plugin.initialize(notificationTitle: 'Test');
+    await plugin.getVersion();
+    expect(allocations, 1);
     final failure = plugin.events.firstWhere(
       (event) => event is VpnStatus && event.state == VpnConnectionState.error,
     );
@@ -495,20 +509,54 @@ void main() {
     await failure;
     child = FakeCoreProcess();
     await plugin.initialize(notificationTitle: 'Test');
+    expect(allocations, 2);
     expect(launches, [
-      ['--data-dir', dataDirectory],
-      ['--data-dir', dataDirectory],
+      ['--data-dir', p.join(bundle.path, 'private-1'), '--temporary-state'],
+      ['--data-dir', p.join(bundle.path, 'private-2'), '--temporary-state'],
     ]);
-    expect(await Directory(dataDirectory).exists(), isTrue);
   });
+
+  test('fallback allocation waits until the manifest is valid', () async {
+    var allocated = false;
+    plugin = LinuxSingBoxFlutter.forTesting(
+      bundleDirectory: bundle.path,
+      dataDirectory: 'unused',
+      temporaryState: true,
+      createDataDirectory: () {
+        allocated = true;
+        return p.join(bundle.path, 'private');
+      },
+      startProcess: (_, __) async => child,
+    );
+    await File(p.join(bundle.path, 'core-capabilities.json')).delete();
+    await expectLater(plugin.getVersion(), throwsA(isA<PlatformException>()));
+    expect(allocated, isFalse);
+  });
+
+  test('failed helper launch removes its unused temporary state', () async {
+    late String directory;
+    plugin = LinuxSingBoxFlutter.forTesting(
+      bundleDirectory: bundle.path,
+      dataDirectory: 'unused',
+      temporaryState: true,
+      createDataDirectory: () => directory = linuxDataDirectory(
+        environment: {},
+        applicationId: 'dev.test.Vpn',
+        temporaryDirectory: bundle.path,
+      ),
+      startProcess: (_, __) async => throw const ProcessException('helper', []),
+    );
+    await expectLater(plugin.getVersion(), throwsA(isA<PlatformException>()));
+    expect(await Directory(directory).exists(), isFalse);
+  }, skip: Platform.isWindows);
 
   test('handshake verifies the bundled core before initialization', () async {
     expect(await plugin.getVersion(), '1.14.4');
     expect(child.requests.map((r) => r['method']), ['getInfo']);
     expect(() => plugin.stop(), throwsA(isA<PlatformException>()));
     await plugin.initialize(notificationTitle: 'Test');
-    expect(executable, '${bundle.path}/sing-box-core');
-    expect(arguments, ['--data-dir', '${bundle.path}/state']);
+    expect(executable, p.join(bundle.path, 'sing-box-core'));
+    expect(arguments, ['--data-dir', p.join(bundle.path, 'state')]);
     expect(await plugin.requestPermission(), isTrue);
   });
 
@@ -686,6 +734,41 @@ void main() {
       expect(child.kills, 0);
     });
   }
+
+  test('cleanup failure retires the helper before reconnecting', () async {
+    await plugin.initialize(notificationTitle: 'Test');
+    child.failCleanup = true;
+    await expectLater(
+      plugin.stop(),
+      throwsA(isA<PlatformException>()
+          .having((error) => error.code, 'code', 'cleanup_failed')),
+    );
+    expect(child.kills, 1);
+    expect((await plugin.events.first as VpnStatus).state,
+        VpnConnectionState.error);
+    await expectLater(plugin.start(config: '{}', name: 'Test'),
+        throwsA(isA<PlatformException>()));
+    child = FakeCoreProcess();
+    await plugin.initialize(notificationTitle: 'Test');
+    await plugin.start(config: '{}', name: 'Test');
+    expect((await plugin.getStatus()).isConnected, isTrue);
+  });
+
+  test('late cleanup failure status retires a helper with no pending RPC',
+      () async {
+    await plugin.initialize(notificationTitle: 'Test');
+    final failure = plugin.events.firstWhere((event) =>
+        event is VpnStatus && event.state == VpnConnectionState.error);
+    child.emit({
+      'type': 'status',
+      'state': 'error',
+      'code': 'cleanup_failed',
+      'message': 'Replace the helper before reconnecting.',
+    });
+    await failure;
+    expect(child.kills, 1);
+    await expectLater(plugin.getStatus(), throwsA(isA<PlatformException>()));
+  });
 
   test('core exit rejects in-flight requests and requires reinitialization',
       () async {

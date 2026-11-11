@@ -14,9 +14,9 @@ import time
 
 
 class Core:
-    def __init__(self, helper: str, data: str):
+    def __init__(self, helper: str, data: str, *, temporary: bool = False):
         self.process = subprocess.Popen(
-            [helper, "--data-dir", data], stdin=subprocess.PIPE,
+            [helper, "--data-dir", data, *(["--temporary-state"] if temporary else [])], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0,
         )
         self.sequence = 0
@@ -107,14 +107,46 @@ def wait_routing_restored(expected: dict[str, list[str]]):
         time.sleep(0.05)
 
 
+def check_temporary_state_cleanup(helper: str):
+    # Test actual helper exit paths rather than having Python's fixture cleanup
+    # hide leaked cache/auth state. Persistent state must survive the same EOF.
+    with tempfile.TemporaryDirectory(prefix="sing-box-state-lifetime-") as parent:
+        outside = Path(parent, "persistent")
+        outside.mkdir(mode=0o700)
+        sentinel = outside / "identity"
+        sentinel.write_text("persistent")
+        persistent = Core(helper, str(outside))
+        persistent.ok("getInfo")
+        persistent.close()
+        assert sentinel.read_text() == "persistent"
+        for shutdown in ("eof", "sigterm"):
+            state = Path(tempfile.mkdtemp(prefix="temporary-", dir=parent))
+            core = Core(helper, str(state), temporary=True)
+            try:
+                core.ok("getInfo")
+                cache = state / "cache"
+                cache.mkdir()
+                (cache / "tailscale-state").write_text("private-auth-state")
+                (state / "outside-link").symlink_to(outside, target_is_directory=True)
+                if shutdown == "sigterm":
+                    core.process.terminate()
+                core.close()
+                assert not state.exists(), f"temporary state leaked after {shutdown}"
+                assert sentinel.read_text() == "persistent"
+            finally:
+                core.close()
+    print("Temporary state removed after EOF/SIGTERM; persistent/outside state preserved")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--helper", required=True)
     parser.add_argument("--tun", action="store_true")
     args = parser.parse_args()
     helper = str(Path(args.helper).resolve(strict=True))
+    check_temporary_state_cleanup(helper)
     with tempfile.TemporaryDirectory(prefix="sing-box-linux-smoke-") as data:
-        core = Core(helper, data)
+        core = Core(helper, data, temporary=True)
         try:
             info = core.ok("getInfo")
             assert info["version"] == "1.14.4", info
@@ -175,6 +207,7 @@ def main():
             print("Linux TUN startup, packet capture, stop and parent-exit cleanup passed")
         finally:
             core.close()
+            assert not Path(data).exists(), "temporary state leaked after helper exit"
 
 
 if __name__ == "__main__":
