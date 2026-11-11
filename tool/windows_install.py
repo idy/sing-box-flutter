@@ -83,12 +83,12 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
                     # a plain source string retains the source directory name.
                     target_name = item.get("to", origin_path.name) if isinstance(item, dict) else origin_path.name
                     destination /= Path(target_name) / relative_core.parent
-                    # Directory filters may exclude the helper. Only accompany
-                    # an actual copy of the verified binary, including DESTDIR.
+                    # Verification requires the expected path even when missing.
+                    # Resource placement may filter to actual verified copies.
                     installed = Path(os.environ.get("DESTDIR", "") + destination.resolve().as_posix()) / HELPER
-                    if not installed.is_file():
-                        continue
                     if not verify_copies:
+                        if not installed.is_file():
+                            continue
                         if core_digest is None:
                             with core.open("rb") as stream:
                                 core_digest = hashlib.file_digest(stream, "sha256").digest()

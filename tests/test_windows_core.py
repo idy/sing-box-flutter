@@ -356,7 +356,8 @@ class WindowsIntegrity(WindowsFixture):
 class WindowsCMake(WindowsFixture):
     def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None,
                   nested_host=False, discover_application=False, relative_install=False, bundle_subdir="",
-                  directory_install="", install_mutation=""):
+                  directory_install="", install_mutation="", exclude_helper=False,
+                  helper_component="Runtime"):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -414,7 +415,7 @@ get_filename_component(CORE_BUNDLE_PARENT "${CORE_BUNDLE_DIRECTORY}" DIRECTORY)
                     (self.host / build_core.WINDOWS_RECEIPT).read_text(encoding="utf-8"))["artifacts"]["windows"]["path"])
                 target = (self.host / build_core.WINDOWS_RECEIPT if install_mutation == "receipt"
                           else artifact / WINDOWS_EXECUTABLE)
-                if install_mutation == "copied":
+                if install_mutation in ("copied", "remove"):
                     target = install_prefix / WINDOWS_EXECUTABLE
                 mutator = harness / "mutate_install.py"
                 mutator.write_text('''import json, pathlib, sys
@@ -424,6 +425,8 @@ try:
         document = json.loads(path.read_text())
         document["fingerprint"] = "0" * 64
         path.write_text(json.dumps(document))
+    elif mode == "remove":
+        path.unlink()
     else:
         path.write_bytes(path.read_bytes() + b"unverified concurrent mutation")
     record.write_text("modified")
@@ -436,16 +439,20 @@ except PermissionError:
                     "[==[" + (value.as_posix() if isinstance(value, Path) else str(value)) + "]==]"
                     for value in values) + ")\n", encoding="utf-8")
                 mutation_rule = 'install(SCRIPT "' + mutation_script.as_posix() + '" COMPONENT Runtime)\n'
-                if install_mutation != "copied":
+                if install_mutation not in ("copied", "remove"):
                     text += mutation_rule
-            text += 'install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "' + runner_destination + '" COMPONENT Runtime)\n'
+            text += ('install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "' + runner_destination +
+                     '" COMPONENT ' + helper_component + ')\n')
             if directory_install:
                 source = {"contents": "${CORE_BUNDLE_DIRECTORY}/", "named": "${CORE_BUNDLE_DIRECTORY}",
                           "parent": "${CORE_BUNDLE_PARENT}/"}[directory_install]
-                text += 'install(DIRECTORY "' + source + '" DESTINATION "' + destination + '" COMPONENT Runtime)\n'
+                exclusion = ' PATTERN "' + WINDOWS_EXECUTABLE + '" EXCLUDE' if exclude_helper else ''
+                text += ('install(DIRECTORY "' + source + '" DESTINATION "' + destination +
+                         '" COMPONENT ' + helper_component + exclusion + ')\n')
             else:
-                text += 'install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "' + destination + '" COMPONENT Runtime)\n'
-            if install_mutation == "copied":
+                text += ('install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "' + destination +
+                         '" COMPONENT ' + helper_component + ')\n')
+            if install_mutation in ("copied", "remove"):
                 text += mutation_rule
         if nested_host:
             host_source = self.host / "windows"
@@ -562,6 +569,9 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
     def assert_mutation_during_install(self, mutation):
         entry, _, _ = self.published()
         artifact = build_core.host_path(self.host, entry["path"])
+        legal = artifact.parent / "Legal"
+        legal.mkdir(exist_ok=True)
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
         helper = artifact / WINDOWS_EXECUTABLE
         receipt = self.host / build_core.WINDOWS_RECEIPT
         before, receipt_before = helper.read_bytes(), receipt.read_bytes()
@@ -601,6 +611,40 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
 
     def test_install_verifies_actual_copied_helper_bytes(self):
         self.assert_mutation_during_install("copied")
+
+    def assert_directory_helper_presence(self, *, exclude=False, remove=False, component="Runtime"):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        legal = artifact.parent / "Legal"
+        legal.mkdir()
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
+        installed = self.root / "directory helper presence"
+        result = self.configure(flutter_layout=True, install_prefix=installed, directory_install="contents",
+                                exclude_helper=exclude, install_mutation="remove" if remove else "",
+                                helper_component=component)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                 "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = subprocess.run(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                                 "--component", "Runtime"], capture_output=True, text=True, encoding="utf-8")
+        if component == "Runtime":
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Installed Windows helper failed byte verification", result.stdout + result.stderr)
+        else:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((installed / "sing_box_flutter/core-capabilities.json").is_file())
+            self.assertEqual((installed / "sing_box_flutter/Legal/LICENSE.wintun").read_bytes(), self.contents["license"])
+        self.assertFalse((installed / WINDOWS_EXECUTABLE).exists())
+
+    def test_directory_install_rejects_excluded_helper(self):
+        self.assert_directory_helper_presence(exclude=True)
+
+    def test_directory_install_rejects_removed_helper(self):
+        self.assert_directory_helper_presence(remove=True)
+
+    def test_directory_resource_only_component_keeps_installing_resources(self):
+        self.assert_directory_helper_presence(component="Helper")
 
     def assert_flutter_install(self, install_prefix=None, late_install_prefix=None,
                                nested_host=False, discover_application=False,
