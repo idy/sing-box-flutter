@@ -82,7 +82,9 @@ void DescriptorTests() {
           "untrusted group owner rejected");
   auto null_dacl = Parse(L"O:BAD:NO_ACCESS_CONTROL");
   Require(!IsTrustedLaunchDescriptor(null_dacl.get(), false), "NULL DACL rejected");
-  for (const auto* rights : {L"GA", L"GW", L"WD", L"WO", L"SD", L"DC",
+  // SDDL DC is directory-service DELETE_CHILD (0x2), which means
+  // FILE_ADD_FILE for a filesystem object. Use FILE_DELETE_CHILD's real 0x40.
+  for (const auto* rights : {L"GA", L"GW", L"WD", L"WO", L"SD", L"0x00000040",
                               L"0x00000010", L"0x00000100", L"0x01000000"}) {
     auto descriptor = Parse(std::wstring(L"O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;") +
                             rights + L";;;WD)");
@@ -221,7 +223,7 @@ void FilesystemTests() {
   Require(CoreLaunchLease::Acquire(executable) == nullptr,
           "medium-writable helper rejected before execution");
   ApplyDescriptor(executable, kTrusted);
-  ApplyDescriptor(app, L"O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;DC;;;BU)");
+  ApplyDescriptor(app, L"O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x00000040;;;BU)");
   Require(CoreLaunchLease::Acquire(executable) == nullptr,
           "ancestor delete-child grant rejected");
   ApplyDescriptor(app, kTrusted);

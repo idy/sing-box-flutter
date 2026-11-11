@@ -63,7 +63,13 @@ recipe fingerprint and all artifact file hashes. Full recipe and file identities
 remain in the receipt and build metadata. CMake validates the path and digest in
 one read-only invocation, then rechecks the configured pair before every build.
 Installation verifies the configured receipt, path and digest before copying the
-helper, including when invoked directly through `cmake --install`.
+helper, including when invoked directly through `cmake --install`. On Windows,
+read-only handles pin source files, directory ancestors, the receipt and host
+pubspec in the invoking CMake process until it exits. These handles deny write
+and delete sharing while CMake copies the inputs. The installed helper bytes and
+current selection are also checked after copying; a mismatched helper is removed
+and installation fails. Non-Windows packaging checks use the same final byte
+validation.
 It bundles `sing_box_flutter_core.exe` beside the host executable and installs
 capabilities, build provenance, and notices under `sing_box_flutter/`. The exact
 official driver license is package-owned at `native/windows/LICENSE.wintun` and
@@ -192,8 +198,12 @@ An explicit `experimental.cache_file.path` outside application storage must also
 have a verified local hierarchy without reparse points. Its immediate parent and
 existing file must already be private at the required integrity, or be created
 atomically with that policy. Unsafe writable external paths are rejected without
-repair. The cache file's identity remains pinned through all core/check cleanup;
-checking a configuration with the cache enabled can create an empty private file.
+repair. First admission uses an exclusive-sharing metadata probe to reject
+pre-existing read/write/delete handles, then overlaps that probe with the retained
+file pin. Concurrent checks can reuse the current core's admitted file. The cache
+identity remains pinned through all core/check cleanup; checking a configuration
+with the cache enabled can create an empty private file. Do not harden untrusted
+external caches in place; historical metadata rights are not revoked by ACL changes.
 Deleting and recreating a corrupt cache is blocked while its file is leased: stop
 and exit the helper before manually cleaning it up.
 

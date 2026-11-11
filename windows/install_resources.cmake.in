@@ -6,6 +6,15 @@ block(PROPAGATE CMAKE_INSTALL_MANIFEST_FILES)
   string(JSON _sbf_resolver GET "${_sbf_data}" resolver)
   string(JSON _sbf_core GET "${_sbf_data}" core_dir)
   get_filename_component(_sbf_parent "${_sbf_core}" DIRECTORY)
+  # Authenticate the bytes copied by host rules, not only the pre-copy source.
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_resolver}" verify-copies
+      --settings "${_sbf_settings}" --configuration "${CMAKE_INSTALL_CONFIG_NAME}"
+      --prefix "${CMAKE_INSTALL_PREFIX}" --component "${CMAKE_INSTALL_COMPONENT}"
+    RESULT_VARIABLE _sbf_result ERROR_VARIABLE _sbf_error ENCODING UTF-8)
+  if(NOT _sbf_result EQUAL 0)
+    message(FATAL_ERROR "Windows installed-byte verification failed: ${_sbf_error}")
+  endif()
   execute_process(
     COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_resolver}" resolve
       --settings "${_sbf_settings}" --configuration "${CMAKE_INSTALL_CONFIG_NAME}"

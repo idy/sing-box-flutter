@@ -6,6 +6,7 @@ package main
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -177,15 +178,29 @@ func secureDirectoryPath(path string) (string, []string, error) {
 // rename/reparse swaps. All private policy is supplied at FILE_CREATE;
 // existing objects are verified without any security mutation.
 type directoryHandles struct {
-	handles []windows.Handle
+	handles     []windows.Handle
+	nativeFiles map[windows.Handle]nativeFileIdentity
 }
+
+type nativeFileIdentity struct {
+	volume string
+	id     uint64
+}
+
+// Active admissions allow checks to reuse a file already pinned by this
+// process while its trusted native database has data handles open. A count is
+// removed before the final pin closes; no admission survives its owning leases.
+var nativeFileAdmissions = struct {
+	sync.Mutex
+	files map[nativeFileIdentity]int
+}{files: make(map[nativeFileIdentity]int)}
 
 func (d *directoryHandles) last() windows.Handle { return d.handles[len(d.handles)-1] }
 
 func (d *directoryHandles) close() {
 	for i := len(d.handles) - 1; i >= 0; i-- {
 		if d.handles[i] != 0 {
-			windows.CloseHandle(d.handles[i])
+			d.closeHandle(d.handles[i])
 		}
 	}
 	d.handles = nil
@@ -194,11 +209,25 @@ func (d *directoryHandles) close() {
 func (d *directoryHandles) release(handle windows.Handle) {
 	for i, owned := range d.handles {
 		if owned == handle {
-			windows.CloseHandle(handle)
+			d.closeHandle(handle)
 			d.handles[i] = 0
 			return
 		}
 	}
+}
+
+func (d *directoryHandles) closeHandle(handle windows.Handle) {
+	if identity, ok := d.nativeFiles[handle]; ok {
+		nativeFileAdmissions.Lock()
+		defer nativeFileAdmissions.Unlock()
+		delete(d.nativeFiles, handle)
+		if nativeFileAdmissions.files[identity] <= 1 {
+			delete(nativeFileAdmissions.files, identity)
+		} else {
+			nativeFileAdmissions.files[identity]--
+		}
+	}
+	windows.CloseHandle(handle)
 }
 
 func openDirectoryHierarchy(path string) (_ *directoryHandles, err error) {
@@ -290,14 +319,65 @@ func (d *directoryHandles) openFile(parent windows.Handle, name string, create, 
 // native database to reopen it for data IO. The parent must already be private;
 // both new and existing files must satisfy the same immutable private policy.
 func (d *directoryHandles) pinNativeFile(parent windows.Handle, name string, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
-	if parent == 0 || !safeDirectoryComponent(name) || descriptor == nil {
+	if parent == 0 || !safeDirectoryComponent(name) || descriptor == nil || len(d.handles) == 0 {
 		return 0, errDirectories
 	}
-	return d.openObject(parent, name, true, descriptor, storageObjectOptions{nativeIO: true})
+	nativeFileAdmissions.Lock()
+	defer nativeFileAdmissions.Unlock()
+	// A current high label/DACL cannot revoke an old data handle granted
+	// before an administrator hardened a file. share=0 detects retained
+	// read/write/delete access, without requesting any data access itself.
+	probe, err := d.openObject(parent, name, true, descriptor, storageObjectOptions{nativeIO: true, exclusive: true})
+	if err != nil && err != windows.STATUS_SHARING_VIOLATION {
+		return 0, err
+	}
+	if probe != 0 {
+		defer d.release(probe)
+	}
+	pin, err := d.openObject(parent, name, false, descriptor, storageObjectOptions{nativeIO: true})
+	if err != nil {
+		return 0, err
+	}
+	identity, err := d.nativeFileIdentity(pin)
+	if err != nil {
+		return 0, err
+	}
+	if probe != 0 {
+		probeIdentity, err := d.nativeFileIdentity(probe)
+		if err != nil || probeIdentity != identity {
+			return 0, errDirectories
+		}
+		// Both opens request metadata only, so they overlap even with share=0.
+		// The final no-delete pin and private parent remain held when the probe
+		// closes: there is no unpinned close/reopen gap for a path substitution.
+	} else if nativeFileAdmissions.files[identity] == 0 {
+		return 0, errDirectories // A data handle exists without an active admission.
+	}
+	if d.nativeFiles == nil {
+		d.nativeFiles = make(map[windows.Handle]nativeFileIdentity)
+	}
+	d.nativeFiles[pin] = identity
+	nativeFileAdmissions.files[identity]++
+	return pin, nil
+}
+
+func (d *directoryHandles) nativeFileIdentity(handle windows.Handle) (nativeFileIdentity, error) {
+	// Volume serial numbers can be duplicated on cloned volumes. Key active
+	// admissions by the verified volume root's GUID and stable file ID instead.
+	var volume [64]uint16
+	n, err := windows.GetFinalPathNameByHandle(d.handles[0], &volume[0], uint32(len(volume)), 0x1)
+	if err != nil || n == 0 || n >= uint32(len(volume)) {
+		return nativeFileIdentity{}, errDirectories
+	}
+	id, err := storageFileID(handle)
+	if err != nil {
+		return nativeFileIdentity{}, err
+	}
+	return nativeFileIdentity{volume: windows.UTF16ToString(volume[:n]), id: id}, nil
 }
 
 type storageObjectOptions struct {
-	directory, write, readSACL, nativeIO bool
+	directory, write, readSACL, nativeIO, exclusive bool
 }
 
 func (d *directoryHandles) openObject(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR, mode storageObjectOptions) (windows.Handle, error) {
@@ -354,6 +434,9 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 	if mode.nativeIO {
 		access = windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL | windows.SYNCHRONIZE
 		share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+	}
+	if mode.exclusive {
+		share = 0
 	}
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK

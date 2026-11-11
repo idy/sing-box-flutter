@@ -356,7 +356,7 @@ class WindowsIntegrity(WindowsFixture):
 class WindowsCMake(WindowsFixture):
     def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None,
                   nested_host=False, discover_application=False, relative_install=False, bundle_subdir="",
-                  directory_install=""):
+                  directory_install="", install_mutation=""):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -408,6 +408,36 @@ get_filename_component(CORE_BUNDLE_PARENT "${CORE_BUNDLE_DIRECTORY}" DIRECTORY)
 '''
                 if directory_install in ("named", "parent"):
                     runner_destination += "/${CORE_BUNDLE_NAME}"
+            mutation_rule = ""
+            if install_mutation:
+                artifact = build_core.host_path(self.host, json.loads(
+                    (self.host / build_core.WINDOWS_RECEIPT).read_text(encoding="utf-8"))["artifacts"]["windows"]["path"])
+                target = (self.host / build_core.WINDOWS_RECEIPT if install_mutation == "receipt"
+                          else artifact / WINDOWS_EXECUTABLE)
+                if install_mutation == "copied":
+                    target = install_prefix / WINDOWS_EXECUTABLE
+                mutator = harness / "mutate_install.py"
+                mutator.write_text('''import json, pathlib, sys
+path, record, mode = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+try:
+    if mode == "receipt":
+        document = json.loads(path.read_text())
+        document["fingerprint"] = "0" * 64
+        path.write_text(json.dumps(document))
+    else:
+        path.write_bytes(path.read_bytes() + b"unverified concurrent mutation")
+    record.write_text("modified")
+except PermissionError:
+    record.write_text("blocked")
+''', encoding="utf-8")
+                mutation_script = harness / "mutate_install.cmake"
+                values = (sys.executable, "-I", mutator, target, self.root / "mutation-status", install_mutation)
+                mutation_script.write_text("execute_process(COMMAND " + " ".join(
+                    "[==[" + (value.as_posix() if isinstance(value, Path) else str(value)) + "]==]"
+                    for value in values) + ")\n", encoding="utf-8")
+                mutation_rule = 'install(SCRIPT "' + mutation_script.as_posix() + '" COMPONENT Runtime)\n'
+                if install_mutation != "copied":
+                    text += mutation_rule
             text += 'install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "' + runner_destination + '" COMPONENT Runtime)\n'
             if directory_install:
                 source = {"contents": "${CORE_BUNDLE_DIRECTORY}/", "named": "${CORE_BUNDLE_DIRECTORY}",
@@ -415,6 +445,8 @@ get_filename_component(CORE_BUNDLE_PARENT "${CORE_BUNDLE_DIRECTORY}" DIRECTORY)
                 text += 'install(DIRECTORY "' + source + '" DESTINATION "' + destination + '" COMPONENT Runtime)\n'
             else:
                 text += 'install(FILES ${sing_box_flutter_bundled_libraries} DESTINATION "' + destination + '" COMPONENT Runtime)\n'
+            if install_mutation == "copied":
+                text += mutation_rule
         if nested_host:
             host_source = self.host / "windows"
             host_source.mkdir(exist_ok=True)
@@ -527,6 +559,49 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                     (self.bundle / WINDOWS_EXECUTABLE).write_bytes(pe("amd64"))
                     self.published()
 
+    def assert_mutation_during_install(self, mutation):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        helper = artifact / WINDOWS_EXECUTABLE
+        receipt = self.host / build_core.WINDOWS_RECEIPT
+        before, receipt_before = helper.read_bytes(), receipt.read_bytes()
+        installed = self.root / "concurrent install"
+        try:
+            result = self.configure(flutter_layout=True, install_prefix=installed, install_mutation=mutation)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                     "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = subprocess.run(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                                     "--component", "Runtime"], capture_output=True, text=True, encoding="utf-8")
+            status = (self.root / "mutation-status").read_text()
+            copied = installed / WINDOWS_EXECUTABLE
+            if os.name == "nt" and mutation != "copied":
+                self.assertEqual(status, "blocked", result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(copied.read_bytes(), before)
+            else:
+                self.assertEqual(status, "modified", result.stdout + result.stderr)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("verification", result.stdout + result.stderr)
+                if copied.exists():
+                    self.assertEqual(copied.read_bytes(), before)
+            # Mandatory sharing pins must be gone when the CMake process exits.
+            helper.write_bytes(before)
+            receipt.write_bytes(receipt_before)
+        finally:
+            helper.write_bytes(before)
+            receipt.write_bytes(receipt_before)
+
+    def test_install_rejects_source_mutation_between_verification_and_copy(self):
+        self.assert_mutation_during_install("source")
+
+    def test_install_keeps_receipt_stable_during_copy(self):
+        self.assert_mutation_during_install("receipt")
+
+    def test_install_verifies_actual_copied_helper_bytes(self):
+        self.assert_mutation_during_install("copied")
+
     def assert_flutter_install(self, install_prefix=None, late_install_prefix=None,
                                nested_host=False, discover_application=False,
                                relative_install=False, override_prefix=None, bundle_subdir="",
@@ -635,6 +710,7 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                                     directory_install="parent")
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
+        self.published()
         script = self.plugin / "tool/core_recipe.py"
         script.write_text('''import sys
 assert sys.flags.isolated and sys.flags.utf8_mode

@@ -113,16 +113,19 @@ set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_VERIFIED_CORE "${CO
 set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_INSTALL_PYTHON "${Python3_EXECUTABLE}")
 set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_INSTALL_RESOLVER "${PLUGIN_ROOT}/tool/windows_install.py")
 set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_INSTALL_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/install_resources.cmake.in")
+set_property(TARGET ${PLUGIN_NAME} PROPERTY SING_BOX_FLUTTER_INSTALL_GUARD "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-guard.json")
 function(_sing_box_flutter_install_resources)
   get_target_property(RESOURCE_CORE_DIR sing_box_flutter_plugin SING_BOX_FLUTTER_VERIFIED_CORE)
   get_target_property(RESOURCE_PYTHON sing_box_flutter_plugin SING_BOX_FLUTTER_INSTALL_PYTHON)
   get_target_property(RESOURCE_RESOLVER sing_box_flutter_plugin SING_BOX_FLUTTER_INSTALL_RESOLVER)
   get_target_property(RESOURCE_TEMPLATE sing_box_flutter_plugin SING_BOX_FLUTTER_INSTALL_TEMPLATE)
+  get_target_property(RESOURCE_GUARD sing_box_flutter_plugin SING_BOX_FLUTTER_INSTALL_GUARD)
   set(RESOURCE_SETTINGS "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-input.json")
   execute_process(
     COMMAND "${RESOURCE_PYTHON}" -I -X utf8 "${RESOURCE_RESOLVER}" configure
       --output "${RESOURCE_SETTINGS}" --build-dir "${CMAKE_BINARY_DIR}"
       --core-dir "${RESOURCE_CORE_DIR}" --fallback-prefix "${CMAKE_INSTALL_PREFIX}"
+      --guard-file "${RESOURCE_GUARD}"
     RESULT_VARIABLE RESOURCE_RESULT ERROR_VARIABLE RESOURCE_ERROR ENCODING UTF-8)
   if(NOT RESOURCE_RESULT EQUAL 0)
     message(FATAL_ERROR "${RESOURCE_ERROR}")

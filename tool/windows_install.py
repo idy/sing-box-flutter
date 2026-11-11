@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 HELPER = "sing_box_flutter_core.exe"
@@ -17,7 +18,8 @@ def read_reply(directory: Path, name: str) -> dict:
     return json.loads((directory / name).read_text(encoding="utf-8"))
 
 
-def install_directories(settings: dict, configuration: str, prefix: str, component: str) -> list[str]:
+def install_directories(settings: dict, configuration: str, prefix: str, component: str, *,
+                        verify_copies: bool = False, fallback: bool = True) -> list[str]:
     build = Path(settings["build_dir"]).resolve()
     reply = build / ".cmake/api/v1/reply"
     indices = list(reply.glob("index-*.json"))
@@ -86,19 +88,50 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
                     installed = Path(os.environ.get("DESTDIR", "") + destination.resolve().as_posix()) / HELPER
                     if not installed.is_file():
                         continue
-                    if core_digest is None:
-                        with core.open("rb") as stream:
-                            core_digest = hashlib.file_digest(stream, "sha256").digest()
-                    with installed.open("rb") as stream:
-                        if hashlib.file_digest(stream, "sha256").digest() != core_digest:
-                            continue
+                    if not verify_copies:
+                        if core_digest is None:
+                            with core.open("rb") as stream:
+                                core_digest = hashlib.file_digest(stream, "sha256").digest()
+                        with installed.open("rb") as stream:
+                            if hashlib.file_digest(stream, "sha256").digest() != core_digest:
+                                continue
                 destination = destination.resolve()
                 if destination not in destinations:
                     destinations.append(destination)
     # Resource-only components have no helper installation in this invocation.
-    if not destinations:
+    if not destinations and fallback:
         destinations.append(Path(effective_prefix).resolve())
     return [path.as_posix() for path in destinations]
+
+
+def verify_installed(settings: dict, configuration: str, prefix: str, component: str) -> None:
+    guard = json.loads(Path(settings["guard_file"]).read_text(encoding="utf-8"))
+    destinations = install_directories(settings, configuration, prefix, component,
+                                       verify_copies=True, fallback=False)
+    invalid = []
+    for destination in destinations:
+        installed = Path(os.environ.get("DESTDIR", "") + destination) / HELPER
+        if installed.is_symlink() or not installed.is_file():
+            invalid.append(installed)
+            continue
+        with installed.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if digest != guard["file_digests"][HELPER]:
+            invalid.append(installed)
+    if invalid:
+        # Never report successful installation of unverified executable bytes.
+        for path in invalid:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+        raise ValueError("Installed Windows helper failed byte verification")
+    result = subprocess.run([
+        guard["python"], "-I", "-X", "utf8", guard["validator"],
+        "--project-dir", guard["project_dir"], "--target", "windows",
+        "--windows-arch", guard["architecture"], "--installed-artifact", guard["core_dir"],
+        "--installed-sha256", guard["core_digest"],
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise ValueError("Windows core selection changed before installation completed")
 
 
 def main() -> int:
@@ -109,17 +142,19 @@ def main() -> int:
     configure.add_argument("--build-dir", type=Path, required=True)
     configure.add_argument("--core-dir", type=Path, required=True)
     configure.add_argument("--fallback-prefix", required=True)
+    configure.add_argument("--guard-file", type=Path, required=True)
     guard = commands.add_parser("guard-settings")
     guard.add_argument("--output", type=Path, required=True)
     guard.add_argument("--project-dir", type=Path, required=True)
     guard.add_argument("--core-dir", type=Path, required=True)
     guard.add_argument("--core-digest", required=True)
     guard.add_argument("--architecture", choices=("amd64", "arm64"), required=True)
-    resolve = commands.add_parser("resolve")
-    resolve.add_argument("--settings", type=Path, required=True)
-    resolve.add_argument("--configuration", default="")
-    resolve.add_argument("--prefix", required=True)
-    resolve.add_argument("--component", default="")
+    for name in ("resolve", "verify-copies"):
+        resolve = commands.add_parser(name)
+        resolve.add_argument("--settings", type=Path, required=True)
+        resolve.add_argument("--configuration", default="")
+        resolve.add_argument("--prefix", required=True)
+        resolve.add_argument("--component", default="")
     args = parser.parse_args()
     try:
         if args.command == "configure":
@@ -127,19 +162,26 @@ def main() -> int:
                         "core_dir": args.core_dir.resolve().as_posix(),
                         "fallback_prefix": args.fallback_prefix,
                         "python": Path(sys.executable).as_posix(),
-                        "resolver": Path(__file__).resolve().as_posix()}
+                        "resolver": Path(__file__).resolve().as_posix(),
+                        "guard_file": args.guard_file.resolve().as_posix()}
             args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
         elif args.command == "guard-settings":
             settings = {"project_dir": args.project_dir.resolve().as_posix(),
                         "core_dir": args.core_dir.resolve().as_posix(),
                         "core_digest": args.core_digest, "architecture": args.architecture,
                         "python": Path(sys.executable).as_posix(),
-                        "validator": Path(__file__).with_name("core_recipe.py").resolve().as_posix()}
+                        "validator": Path(__file__).with_name("core_recipe.py").resolve().as_posix(),
+                        "guard": Path(__file__).with_name("windows_install_guard.py").resolve().as_posix(),
+                        "file_digests": json.loads((args.project_dir / ".dart_tool/sing_box_flutter/windows.json")
+                                                   .read_text(encoding="utf-8"))["artifacts"]["windows"]["sha256"]}
             args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
         else:
             settings = json.loads(args.settings.read_text(encoding="utf-8"))
-            print(json.dumps(install_directories(settings, args.configuration, args.prefix, args.component),
-                             ensure_ascii=False))
+            if args.command == "verify-copies":
+                verify_installed(settings, args.configuration, args.prefix, args.component)
+            else:
+                print(json.dumps(install_directories(settings, args.configuration, args.prefix, args.component),
+                                 ensure_ascii=False))
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"Windows resource installation: {error}\n")
     return 0
