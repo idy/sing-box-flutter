@@ -144,6 +144,27 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
             'location such as Program Files, then run it as administrator.',
       );
 
+  static bool _isPinnedExecutablePath(String value) {
+    // This exact Win32 device form reaches the verified NT volume through the
+    // protected namespace links retained by native code. Bare GLOBALROOT can be
+    // shadowed locally; accept only the image-path spelling selected natively.
+    final root = RegExp(
+            r'^\\\\\.\\Global\\GLOBALROOT\\Device\\HarddiskVolume[0-9]+\\')
+        .firstMatch(value);
+    if (root == null || value.length >= 260) return false;
+    final parts = value.substring(root.end).split(r'\');
+    if (parts.length < 2 || parts.last != 'sing_box_flutter_core.exe') {
+      return false;
+    }
+    return parts.every((part) =>
+        part.isNotEmpty &&
+        part != '.' &&
+        part != '..' &&
+        !part.endsWith('.') &&
+        !part.endsWith(' ') &&
+        !RegExp(r'[/:*?"<>|\x00-\x1f]').hasMatch(part));
+  }
+
   Future<Process> _startVerifiedCore() async {
     var executable = _executable ??
         p.join(p.dirname(Platform.resolvedExecutable),
@@ -157,16 +178,13 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
         final id = authorization?['lease'];
         if (id is int && id > 0) lease = id;
         final nativePath = authorization?['executable'];
-        final paths = p.Context(style: p.Style.windows);
         if (lease == null ||
             nativePath is! String ||
-            !nativePath.startsWith(r'\\?\Volume{') ||
-            !paths.isAbsolute(nativePath) ||
-            paths.basename(nativePath) != 'sing_box_flutter_core.exe') {
+            !_isPinnedExecutablePath(nativePath)) {
           throw _untrustedCore();
         }
-        // Use the native volume-GUID path, not an app-adjacent Dart path that a
-        // DOS drive remap could redirect after validation.
+        // Native code derives the device path from the open volume root and pins
+        // its namespace links, directories and image through process creation.
         executable = nativePath;
       } catch (_) {
         if (lease != null) {

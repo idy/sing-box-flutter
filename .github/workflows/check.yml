@@ -43,16 +43,6 @@ jobs:
       - name: Detect Windows native inputs
         id: windows-inputs
         run: python -X utf8 tool/windows_ci.py
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-      - name: Resolve packages
-        run: flutter pub get
-      - name: Windows backend tests
-        run: flutter test test/sing_box_flutter_windows_test.dart
-      - name: Windows build tool tests
-        run: python -m unittest discover -s tests -p test_windows_core.py -v
       - name: Secure helper launch policy tests
         if: steps.windows-inputs.outputs.build == 'true'
         shell: pwsh
@@ -63,6 +53,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Secure launch test compilation failed' }
           & .build/secure-helper-launch/Release/secure_core_launch_test.exe
           if ($LASTEXITCODE -ne 0) { throw 'Secure launch policy tests failed' }
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve packages
+        run: flutter pub get
+      - name: Windows backend tests
+        run: flutter test test/sing_box_flutter_windows_test.dart
+      - name: Windows build tool tests
+        run: python -m unittest discover -s tests -p test_windows_core.py -v
       - name: Build Windows core and smoke-test native Wintun
         if: steps.windows-inputs.outputs.build == 'true'
         working-directory: example

@@ -134,6 +134,6 @@ function(_sing_box_flutter_install_resources)
     INPUT "${RESOURCE_SETTINGS}")
   file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-$<CONFIG>.cmake"
     INPUT "${RESOURCE_TEMPLATE}")
-  install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-$<CONFIG>.cmake" COMPONENT Runtime)
+  install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-$<CONFIG>.cmake" ALL_COMPONENTS)
 endfunction()
 cmake_language(DEFER DIRECTORY "${FLUTTER_HOST_DIRECTORY}" CALL _sing_box_flutter_install_resources)

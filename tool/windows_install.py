@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 HELPER = "sing_box_flutter_core.exe"
 
@@ -28,9 +29,7 @@ def manifest_contains(manifest: str, path: Path) -> bool:
     return ";" + record + ";" in ";" + manifest + ";"
 
 
-def install_directories(settings: dict, configuration: str, prefix: str, component: str, *,
-                        verify_copies: bool = False, fallback: bool = True,
-                        manifest: str | None = None, host_only: bool = False) -> list[str]:
+def installation_model(settings: dict, configuration: str) -> tuple[Path, Path, Path, dict]:
     build = Path(settings["build_dir"]).resolve()
     reply = build / ".cmake/api/v1/reply"
     indices = list(reply.glob("index-*.json"))
@@ -53,6 +52,40 @@ def install_directories(settings: dict, configuration: str, prefix: str, compone
         selected = configurations[0]
     if selected is None:
         raise ValueError("CMake install configuration does not match the generated codemodel")
+    return build, reply, source, selected
+
+
+def helper_components(settings: dict, configuration: str) -> tuple[set[str], set[str]]:
+    _, reply, source, selected = installation_model(settings, configuration)
+    core = (Path(settings["core_dir"]) / HELPER).resolve()
+    definite: set[str] = set()
+    possible: set[str] = set()
+    for directory in selected["directories"]:
+        details = read_reply(reply, directory["jsonFile"])
+        for installer in details.get("installers", []):
+            kind = installer.get("type")
+            if kind not in ("file", "directory"):
+                continue
+            for item in installer.get("paths", []):
+                origin = item.get("from") if isinstance(item, dict) else item
+                if not isinstance(origin, str):
+                    continue
+                path = Path(origin)
+                path = (path if path.is_absolute() else source / path).resolve()
+                component = installer.get("component", "Unspecified")
+                if kind == "file" and path == core:
+                    if not isinstance(item, dict) or item.get("to", HELPER) == HELPER:
+                        definite.add(component)
+                        possible.add(component)
+                elif kind == "directory" and core.is_relative_to(path):
+                    possible.add(component)
+    return definite, possible
+
+
+def install_directories(settings: dict, configuration: str, prefix: str, component: str, *,
+                        verify_copies: bool = False, fallback: bool = True,
+                        manifest: str | None = None, host_only: bool = False) -> list[str]:
+    build, reply, source, selected = installation_model(settings, configuration)
     host = next((item for item in selected.get("targets", [])
                  if item["name"] == settings.get("host_binary")), None)
     host_artifacts = []
@@ -154,8 +187,14 @@ def verify_installed(settings: dict, configuration: str, prefix: str, component:
     guard = json.loads(Path(settings["guard_file"]).read_text(encoding="utf-8"))
     destinations = install_directories(settings, configuration, prefix, component,
                                        verify_copies=True, fallback=False, manifest=manifest)
-    destinations += install_directories(settings, configuration, prefix, component,
-                                        host_only=True, fallback=False, manifest=manifest)
+    definite_components, possible_components = helper_components(settings, configuration)
+    # An individual component may intentionally stage the host before its helper.
+    # Require colocation for whole installs or a component that owns the helper;
+    # defer ambiguous directory-filter cases that span other components.
+    if (not component or component in definite_components or
+            possible_components.issubset({component})):
+        destinations += install_directories(settings, configuration, prefix, component,
+                                            host_only=True, fallback=False, manifest=manifest)
     destinations = list(dict.fromkeys(destinations))
     invalid = []
     for destination in destinations:
@@ -186,6 +225,8 @@ def verify_installed(settings: dict, configuration: str, prefix: str, component:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    records = commands.add_parser("create-records")
+    records.add_argument("--directory", type=Path, required=True)
     configure = commands.add_parser("configure")
     configure.add_argument("--output", type=Path, required=True)
     configure.add_argument("--build-dir", type=Path, required=True)
@@ -210,7 +251,12 @@ def main() -> int:
         records.add_argument("--manifest-file", type=Path)
     args = parser.parse_args()
     try:
-        if args.command == "configure":
+        if args.command == "create-records":
+            descriptor, path = tempfile.mkstemp(prefix="sing_box_flutter-installed-", suffix=".txt",
+                                               dir=args.directory)
+            os.close(descriptor)
+            print(json.dumps({"path": Path(path).as_posix()}, ensure_ascii=False))
+        elif args.command == "configure":
             settings = {"build_dir": args.build_dir.resolve().as_posix(),
                         "core_dir": args.core_dir.resolve().as_posix(),
                         "fallback_prefix": args.fallback_prefix,
@@ -235,9 +281,14 @@ def main() -> int:
             if args.command == "verify-copies":
                 verify_installed(settings, args.configuration, args.prefix, args.component, manifest)
             else:
-                print(json.dumps(install_directories(settings, args.configuration, args.prefix, args.component,
-                                                      manifest=manifest),
-                                 ensure_ascii=False))
+                directories = install_directories(settings, args.configuration, args.prefix, args.component,
+                                                   manifest=manifest, fallback=False)
+                directories += install_directories(settings, args.configuration, args.prefix, args.component,
+                                                    manifest=manifest, host_only=True, fallback=False)
+                if not directories:
+                    prefix = settings["fallback_prefix"] if "$<" in args.prefix else args.prefix
+                    directories = [Path(prefix).resolve().as_posix()]
+                print(json.dumps(list(dict.fromkeys(directories)), ensure_ascii=False))
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"Windows resource installation: {error}\n")
     return 0

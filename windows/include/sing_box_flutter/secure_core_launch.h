@@ -10,7 +10,9 @@
 namespace sing_box_flutter {
 
 // Read-only, no-write/no-delete-sharing handles pin every path component until
-// Process.start completes. Destruction releases the lease, including on failure.
+// Process.start completes. Protected Global/GLOBALROOT object-manager links are
+// retained too. executable() is a Win32 device path to the pinned NT volume, with
+// no DOS drive-letter lookup. Destruction releases the lease, including on failure.
 class CoreLaunchLease {
  public:
   ~CoreLaunchLease();

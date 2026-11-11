@@ -69,7 +69,11 @@ pubspec in the invoking CMake process until it exits. These handles deny write
 and delete sharing while CMake copies the inputs. The installed helper bytes and
 current selection are also checked after copying; a mismatched helper is removed
 and installation fails. Non-Windows packaging checks use the same final byte
-validation.
+validation. Every install invocation has an atomically allocated record handoff,
+so concurrent prefixes or components do not share mutable record files. Components
+can stage the host before a separately owned helper; Runtime resources follow the
+host, and each helper installation is verified in its own component. Whole-bundle
+installation requires the helper beside the host.
 It bundles `sing_box_flutter_core.exe` beside the host executable and installs
 capabilities, build provenance, and notices under `sing_box_flutter/`. The exact
 official driver license is package-owned at `native/windows/LICENSE.wintun` and
@@ -107,12 +111,30 @@ implicit permission to change the DACL.
 
 The plugin retains read-only handles denying write/delete sharing on the entire
 chain until Dart's `Process.start` completes. Existing incompatible write/delete
-handles cause validation to fail. Dart launches the pinned volume-GUID path so a
-drive-letter remap cannot redirect the launch, and sends configuration through its
-pipe only after the native lease is released successfully. Missing native validation,
-unsafe deployment or uncertain lease handling fails closed with a fixed
-`core_untrusted` error, without starting an unverified helper or sending it VPN
-configuration. The plugin does not repair permissions, alter token privileges,
+handles cause validation to fail. Native code obtains the pinned volume's NT
+device name with `GetFinalPathNameByHandleW(VOLUME_NAME_NT)` and returns a Win32
+device image path such as
+`\\.\Global\GLOBALROOT\Device\HarddiskVolume3\Program Files\VPN\sing_box_flutter_core.exe`.
+It verifies and retains the `Global` link in the effective device directory and the
+global `GLOBALROOT` link, requiring trusted owners, read/query-only untrusted
+grants, and their expected targets. A global-fallback `Global` link is rejected
+when a new local alias could shadow it. Launch therefore does not resolve the
+original DOS drive letter or an untrusted local `GLOBALROOT` alias. The source
+volume is also checked against the already-running host's native image path,
+rejecting a drive remap that happened before acquisition.
+
+The [Windows namespace documentation](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#nt-namespaces)
+explains `GLOBALROOT` and the distinction between Win32 device and extended file
+paths. The extended `\\?\Volume{GUID}\...` image form fails `CreateProcessW` with
+error 87 and is not used. Native code enforces
+[CreateProcessW's documented `MAX_PATH` image-name limit](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw)
+because [Dart's Windows process launcher](https://github.com/dart-lang/sdk/blob/main/runtime/bin/process_win.cc)
+passes a quoted command line with a null `lpApplicationName`; the helper directory
+is passed explicitly as the working directory. Configuration is sent through the
+pipe only after process creation and successful native lease release. Missing
+native validation, unsafe deployment or uncertain lease handling fails closed with
+a fixed `core_untrusted` error, without starting an unverified helper or sending it
+VPN configuration. The plugin does not repair permissions, alter token privileges,
 or provide an unsafe development/CI override.
 
 Ordinary checkout, Downloads, temporary and user-owned Flutter build directories
@@ -235,8 +257,12 @@ It runs helper protocol/lifecycle tests on the build host and cross-compiles the
 selected Windows core. Windows CI compiles and runs standalone native launch-policy tests without a
 Flutter framework build. These cover trusted and untrusted owners, mutation ACLs,
 no-follow path validation, retained write/delete handles, directory replacement,
-hard links, reparse points, DOS aliases and an actual launch through the pinned
-volume-GUID path. The tests require elevation and fail if their secure fixtures
+hard links, reparse points, DOS aliases, and actual launches through the pinned
+global device path after a DOS drive remap. Both explicit image names and Dart's
+null-application-name/explicit-working-directory call shape are exercised, and the
+mapped child's file identity is checked before it runs. These are Windows runtime
+checks; passing Dart tests on another platform does not establish compatibility.
+The tests require elevation and fail if their secure fixtures
 cannot be created; they do not bypass the production policy for CI.
 Windows CI also packages the Flutter example and enables
 `SING_BOX_FLUTTER_WINTUN_SMOKE=1` for a real Wintun adapter lifecycle test. That test

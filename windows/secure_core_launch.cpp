@@ -22,6 +22,25 @@ constexpr ULONG kFileOpen = 1;
 using NtOpen = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
                                PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG,
                                ULONG, ULONG, PVOID, ULONG);
+using NtOpenLink = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+using NtQueryLink = NTSTATUS(NTAPI*)(HANDLE, PUNICODE_STRING, PULONG);
+using NtQueryName = NTSTATUS(NTAPI*)(HANDLE, OBJECT_INFORMATION_CLASS, PVOID,
+                                    ULONG, PULONG);
+constexpr ACCESS_MASK kLinkQuery = 1;
+constexpr ACCESS_MASK kLinkSet = 2;
+constexpr ACCESS_MASK kDirectoryQuery = 1;
+
+template <typename Function>
+Function NativeFunction(HMODULE module, const char* name) {
+  const auto address = GetProcAddress(module, name);
+  Function function = nullptr;
+  static_assert(sizeof(function) == sizeof(address), "Windows function pointer size");
+  std::memcpy(&function, &address, sizeof(function));
+  return function;
+}
+
+bool TrustedDescriptor(PSECURITY_DESCRIPTOR descriptor, GENERIC_MAPPING mapping,
+                       DWORD harmless);
 
 struct LocalFreeDeleter {
   void operator()(void* value) const { LocalFree(value); }
@@ -140,10 +159,65 @@ bool VerifyPinned(HANDLE handle, bool directory, bool allow_sibling_creation) {
          IsTrustedLaunchDescriptor(descriptor, allow_sibling_creation);
 }
 
+std::wstring ObjectName(NtQueryName query, HANDLE handle) {
+  std::vector<BYTE> buffer(65536);
+  if (query(handle, static_cast<OBJECT_INFORMATION_CLASS>(1), buffer.data(),
+            static_cast<ULONG>(buffer.size()), nullptr) < 0) {
+    return {};
+  }
+  const auto* name = reinterpret_cast<const UNICODE_STRING*>(buffer.data());
+  if (!name->Buffer || !name->Length || name->Length % sizeof(wchar_t) != 0) {
+    return {};
+  }
+  return std::wstring(name->Buffer, name->Length / sizeof(wchar_t));
+}
+
+bool PinNamespaceLink(NtOpenLink open, NtQueryLink query,
+                      const std::wstring& name, const std::wstring& expected,
+                      std::vector<HANDLE>& handles) {
+  UNICODE_STRING object_name{};
+  object_name.Buffer = const_cast<PWSTR>(name.data());
+  object_name.Length = static_cast<USHORT>(name.size() * sizeof(wchar_t));
+  object_name.MaximumLength = object_name.Length;
+  OBJECT_ATTRIBUTES attributes{};
+  attributes.Length = sizeof(attributes);
+  attributes.ObjectName = &object_name;
+  attributes.Attributes = OBJ_CASE_INSENSITIVE;
+  HANDLE handle = nullptr;
+  if (open(&handle, READ_CONTROL | kLinkQuery, &attributes) < 0) return false;
+  handles.push_back(handle);
+
+  std::array<wchar_t, 64> buffer{};
+  UNICODE_STRING target{};
+  target.Buffer = buffer.data();
+  target.MaximumLength = static_cast<USHORT>(sizeof(buffer));
+  if (query(handle, &target, nullptr) < 0 ||
+      target.Length != expected.size() * sizeof(wchar_t) ||
+      _wcsnicmp(buffer.data(), expected.data(), expected.size()) != 0) {
+    return false;
+  }
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  const auto result = GetSecurityInfo(handle, SE_KERNEL_OBJECT,
+                                      OWNER_SECURITY_INFORMATION |
+                                          DACL_SECURITY_INFORMATION,
+                                      nullptr, nullptr, nullptr, nullptr,
+                                      &descriptor);
+  LocalMemory memory(descriptor);
+  // Symbolic-link targets are immutable through a query handle. A replacement
+  // requires DELETE; changing the descriptor requires WRITE_DAC/WRITE_OWNER.
+  // Only trusted owners/grants may have those rights (or the link's SET right).
+  GENERIC_MAPPING mapping{STANDARD_RIGHTS_READ | kLinkQuery,
+                          STANDARD_RIGHTS_WRITE | kLinkSet,
+                          STANDARD_RIGHTS_EXECUTE | kLinkQuery,
+                          STANDARD_RIGHTS_REQUIRED | kLinkQuery | kLinkSet};
+  return result == ERROR_SUCCESS &&
+         TrustedDescriptor(descriptor, mapping, READ_CONTROL | kLinkQuery);
+}
+
 std::wstring VolumeRoot(HANDLE handle) {
   // Reject UNC, mapped network drives and SUBST aliases (which hide ancestors).
-  // Return the opened volume's stable GUID namespace for the actual launch, so
-  // a DOS drive-letter remap after validation cannot redirect Process.start.
+  // A GUID is useful for verifying the root, but CreateProcessW rejects the
+  // extended \\?\Volume{GUID} image form with ERROR_INVALID_PARAMETER.
   std::array<wchar_t, 64> name{};
   const DWORD size = GetFinalPathNameByHandleW(
       handle, name.data(), static_cast<DWORD>(name.size()), VOLUME_NAME_GUID);
@@ -171,13 +245,30 @@ std::wstring VolumeRoot(HANDLE handle) {
       GetDriveTypeW(root.c_str()) != DRIVE_FIXED) {
     return {};
   }
-  return root;
+  // Get the actual device from the pinned root, never QueryDosDevice on the
+  // original drive letter. GLOBALROOT reaches the NT object-manager root; Global
+  // first bypasses a writable local GLOBALROOT alias. Both links are checked and
+  // retained by Acquire. The Win32 device (\\.\) spelling uses normal Win32 path
+  // processing rather than assuming CreateProcess accepts every extended file-I/O
+  // namespace. Its image and current-directory compatibility is tested on Windows.
+  std::array<wchar_t, 128> device{};
+  const DWORD length = GetFinalPathNameByHandleW(
+      handle, device.data(), static_cast<DWORD>(device.size()), VOLUME_NAME_NT);
+  if (!length || length >= device.size()) return {};
+  const std::wstring native(device.data(), length);
+  const std::wstring prefix = L"\\Device\\HarddiskVolume";
+  if (native.compare(0, prefix.size(), prefix) != 0 ||
+      native.size() <= prefix.size() + 1 || native.back() != L'\\') {
+    return {};
+  }
+  for (size_t index = prefix.size(); index + 1 < native.size(); ++index) {
+    if (native[index] < L'0' || native[index] > L'9') return {};
+  }
+  return L"\\\\.\\Global\\GLOBALROOT" + native;
 }
 
-}  // namespace
-
-bool IsTrustedLaunchDescriptor(PSECURITY_DESCRIPTOR descriptor,
-                               bool allow_sibling_creation) {
+bool TrustedDescriptor(PSECURITY_DESCRIPTOR descriptor, GENERIC_MAPPING mapping,
+                       DWORD harmless) {
   if (!descriptor || !IsValidSecurityDescriptor(descriptor)) return false;
   PSID owner = nullptr;
   BOOL defaulted = FALSE;
@@ -191,10 +282,6 @@ bool IsTrustedLaunchDescriptor(PSECURITY_DESCRIPTOR descriptor,
       !present || !dacl || !IsValidAcl(dacl)) {
     return false;
   }
-  GENERIC_MAPPING mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-                          FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
-  DWORD harmless = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
-  if (allow_sibling_creation) harmless |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
   for (DWORD index = 0; index < dacl->AceCount; ++index) {
     void* raw_ace = nullptr;
     if (!GetAce(dacl, index, &raw_ace)) return false;
@@ -223,6 +310,17 @@ bool IsTrustedLaunchDescriptor(PSECURITY_DESCRIPTOR descriptor,
   return true;
 }
 
+}  // namespace
+
+bool IsTrustedLaunchDescriptor(PSECURITY_DESCRIPTOR descriptor,
+                               bool allow_sibling_creation) {
+  GENERIC_MAPPING mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+                          FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
+  DWORD harmless = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE;
+  if (allow_sibling_creation) harmless |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+  return TrustedDescriptor(descriptor, mapping, harmless);
+}
+
 CoreLaunchLease::~CoreLaunchLease() {
   for (auto handle = handles_.rbegin(); handle != handles_.rend(); ++handle) {
     CloseHandle(*handle);
@@ -237,13 +335,34 @@ std::unique_ptr<CoreLaunchLease> CoreLaunchLease::AcquireForHost() {
   const std::wstring host(path.data(), size);
   const auto separator = host.find_last_of(L'\\');
   if (separator == std::wstring::npos) return nullptr;
-  return Acquire(host.substr(0, separator + 1) + kHelperName);
+  auto lease = Acquire(host.substr(0, separator + 1) + kHelperName);
+  if (!lease) return nullptr;
+  // Bind the source drive to the already-running host image as well. A drive
+  // remap before acquisition must not select another otherwise trusted volume.
+  DWORD native_size = static_cast<DWORD>(path.size());
+  if (!QueryFullProcessImageNameW(GetCurrentProcess(), PROCESS_NAME_NATIVE,
+                                  path.data(), &native_size)) {
+    return nullptr;
+  }
+  const std::wstring native_host(path.data(), native_size);
+  const std::wstring prefix = L"\\Device\\HarddiskVolume";
+  const auto root_end = native_host.find(L'\\', prefix.size());
+  if (native_host.compare(0, prefix.size(), prefix) != 0 ||
+      root_end == std::wstring::npos) {
+    return nullptr;
+  }
+  const auto actual_root = L"\\\\.\\Global\\GLOBALROOT" + native_host.substr(0, root_end + 1);
+  if (lease->executable_.size() < actual_root.size() ||
+      _wcsnicmp(lease->executable_.c_str(), actual_root.c_str(), actual_root.size()) != 0) {
+    return nullptr;
+  }
+  return lease;
 }
 
 std::unique_ptr<CoreLaunchLease> CoreLaunchLease::Acquire(
     const std::wstring& path) {
   // Do not normalize aliases: reject them. Only a local drive-absolute path is
-  // accepted as input; the output is a volume-GUID path bound to pinned handles.
+  // accepted as input; the output names the pinned device in the global namespace.
   if (path.size() < 4 ||
       !((path[0] >= L'A' && path[0] <= L'Z') ||
         (path[0] >= L'a' && path[0] <= L'z')) ||
@@ -264,12 +383,47 @@ std::unique_ptr<CoreLaunchLease> CoreLaunchLease::Acquire(
   if (parts.size() < 2 || parts.back() != kHelperName) return nullptr;
   const auto module = GetModuleHandleW(L"ntdll.dll");
   if (!module) return nullptr;
-  const auto address = GetProcAddress(module, "NtCreateFile");
-  if (!address) return nullptr;
-  NtOpen open = nullptr;
-  static_assert(sizeof(open) == sizeof(address), "Windows function pointer size");
-  std::memcpy(&open, &address, sizeof(open));
+  const auto open = NativeFunction<NtOpen>(module, "NtCreateFile");
+  const auto open_link =
+      NativeFunction<NtOpenLink>(module, "NtOpenSymbolicLinkObject");
+  const auto query_link =
+      NativeFunction<NtQueryLink>(module, "NtQuerySymbolicLinkObject");
+  const auto open_directory =
+      NativeFunction<NtOpenLink>(module, "NtOpenDirectoryObject");
+  const auto query_name = NativeFunction<NtQueryName>(module, "NtQueryObject");
+  if (!open || !open_link || !query_link || !open_directory || !query_name) {
+    return nullptr;
+  }
   auto lease = std::unique_ptr<CoreLaunchLease>(new CoreLaunchLease());
+  wchar_t map_path[] = L"\\??";
+  UNICODE_STRING map_name{};
+  map_name.Buffer = map_path;
+  map_name.Length = static_cast<USHORT>(sizeof(map_path) - sizeof(wchar_t));
+  map_name.MaximumLength = static_cast<USHORT>(sizeof(map_path));
+  OBJECT_ATTRIBUTES map_attributes{};
+  map_attributes.Length = sizeof(map_attributes);
+  map_attributes.ObjectName = &map_name;
+  map_attributes.Attributes = OBJ_CASE_INSENSITIVE;
+  HANDLE device_map = nullptr;
+  if (open_directory(&device_map, kDirectoryQuery, &map_attributes) < 0) {
+    return nullptr;
+  }
+  lease->handles_.push_back(device_map);
+  const auto map = ObjectName(query_name, device_map);
+  // Checking a drive symlink alone is insufficient: a new local alias can shadow
+  // a pinned global C: link. Global must be an existing protected entry in this
+  // exact device directory, not global fallback that a new local Global can hide.
+  // Object directories have no filesystem-style DELETE_CHILD right: their owner
+  // cannot replace an existing protected link without DELETE on that link.
+  if (map.empty() ||
+      !PinNamespaceLink(open_link, query_link, L"\\??\\Global", L"\\GLOBAL??",
+                        lease->handles_) ||
+      _wcsicmp(ObjectName(query_name, lease->handles_.back()).c_str(),
+               (map + L"\\Global").c_str()) != 0 ||
+      !PinNamespaceLink(open_link, query_link, L"\\GLOBAL??\\GLOBALROOT", L"",
+                        lease->handles_)) {
+    return nullptr;
+  }
   HANDLE current = OpenPinned(open, nullptr, L"\\??\\" + path.substr(0, 3), true);
   if (current == INVALID_HANDLE_VALUE) return nullptr;
   lease->handles_.push_back(current);
@@ -287,6 +441,9 @@ std::unique_ptr<CoreLaunchLease> CoreLaunchLease::Acquire(
     lease->executable_ += parts[index];
     if (directory) lease->executable_ += L'\\';
   }
+  // Dart supplies a quoted command line with a NULL lpApplicationName, for which
+  // CreateProcessW documents a MAX_PATH limit on the image name.
+  if (lease->executable_.size() >= MAX_PATH) return nullptr;
   return lease;
 }
 

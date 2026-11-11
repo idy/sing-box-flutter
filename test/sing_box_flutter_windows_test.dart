@@ -152,8 +152,9 @@ void main() {
 
   group('secure native launch authorization', () {
     const channel = MethodChannel('sing_box_flutter/test_windows_launch');
+    const verifiedRoot = r'\\.\Global\GLOBALROOT\Device\HarddiskVolume3';
     const verifiedPath =
-        r'\\?\Volume{00112233-4455-6677-8899-aabbccddeeff}\Program Files\VPN\sing_box_flutter_core.exe';
+        '$verifiedRoot\\Program Files\\VPN\\sing_box_flutter_core.exe';
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
@@ -241,6 +242,42 @@ void main() {
       {'lease': 71},
       {'lease': 71, 'executable': 'sing_box_flutter_core.exe'},
       {'lease': 71, 'executable': r'C:\untrusted\sing_box_flutter_core.exe'},
+      {
+        'lease': 71,
+        'executable':
+            r'\\?\Volume{00112233-4455-6677-8899-aabbccddeeff}\VPN\sing_box_flutter_core.exe',
+      },
+      {
+        'lease': 71,
+        'executable':
+            r'\\?\Global\GLOBALROOT\Device\HarddiskVolume3\VPN\sing_box_flutter_core.exe',
+      },
+      {
+        'lease': 71,
+        'executable':
+            r'\\.\GLOBALROOT\Device\HarddiskVolume3\VPN\sing_box_flutter_core.exe',
+      },
+      {
+        'lease': 71,
+        'executable': r'\\.\Global\C:\VPN\sing_box_flutter_core.exe',
+      },
+      {
+        'lease': 71,
+        'executable':
+            r'\\.\Global\GLOBALROOT\Device\HarddiskVolumeX\VPN\sing_box_flutter_core.exe',
+      },
+      {'lease': 71, 'executable': '$verifiedRoot\\sing_box_flutter_core.exe'},
+      for (final directory in ['', '.', '..', 'VPN.', 'VPN ', 'VPN/Other'])
+        {
+          'lease': 71,
+          'executable': '$verifiedRoot\\$directory\\sing_box_flutter_core.exe',
+        },
+      {'lease': 71, 'executable': '$verifiedPath:stream'},
+      {'lease': 71, 'executable': '$verifiedPath\u0000'},
+      {
+        'lease': 71,
+        'executable': '$verifiedRoot\\${'a' * 260}\\sing_box_flutter_core.exe',
+      },
       {'lease': 71, 'executable': '$verifiedPath.other.exe'},
     ]) {
       test('malformed authorization fails closed: $authorization', () async {
@@ -262,6 +299,16 @@ void main() {
         }
       });
     }
+
+    test('device image paths preserve spaces and Unicode directories', () async {
+      const path =
+          r'\\.\Global\GLOBALROOT\Device\HarddiskVolume123\Program Files\VPN 中\sing_box_flutter_core.exe';
+      messenger.setMockMethodCallHandler(channel, (call) async =>
+          call.method == 'acquire' ? {'lease': 71, 'executable': path} : null);
+      process.onRequest = process.respondNormally;
+      expect(await verified().getVersion(), '1.14.4');
+      expect(launches, [path]);
+    });
 
     test('process creation failure releases the lease and sanitizes the error',
         () async {

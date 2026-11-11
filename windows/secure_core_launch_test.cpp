@@ -141,22 +141,78 @@ void RemoveHelper(const std::wstring& directory) {
           "remove fixture executable");
 }
 
-void LaunchProbe(const std::wstring& executable) {
-  std::wstring command = L"\"" + executable + L"\" --probe";
+BY_HANDLE_FILE_INFORMATION ImageIdentity(const std::wstring& path) {
+  HANDLE image = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT,
+                             nullptr);
+  Require(image != INVALID_HANDLE_VALUE, "open probe image identity");
+  BY_HANDLE_FILE_INFORMATION identity{};
+  Require(GetFileInformationByHandle(image, &identity) != FALSE,
+          "query probe image identity");
+  CloseHandle(image);
+  return identity;
+}
+
+void LaunchProbe(const std::wstring& executable, const std::wstring& expected) {
+  const auto expected_image = ImageIdentity(expected);
+  const auto directory = executable.substr(0, executable.find_last_of(L'\\'));
+  for (const bool explicit_application : {true, false}) {
+    std::wstring command = L"\"" + executable + L"\" --probe";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    // Dart uses NULL lpApplicationName, a quoted image token, and the image's
+    // directory as lpCurrentDirectory. Cover that and the explicit-image API.
+    // Suspend only so the test can check the actual mapped image before it exits.
+    Require(CreateProcessW(explicit_application ? executable.c_str() : nullptr,
+                            command.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr,
+                            directory.c_str(), &startup, &process) != FALSE,
+            explicit_application ? "launch pinned device path with explicit image"
+                                 : "launch pinned device path with Dart API shape");
+    std::vector<wchar_t> native_image(32768);
+    DWORD length = static_cast<DWORD>(native_image.size());
+    Require(QueryFullProcessImageNameW(process.hProcess, PROCESS_NAME_NATIVE,
+                                       native_image.data(), &length) != FALSE,
+            "query actual child native image");
+    const auto actual_image = ImageIdentity(
+        L"\\\\.\\Global\\GLOBALROOT" + std::wstring(native_image.data(), length));
+    Require(actual_image.dwVolumeSerialNumber == expected_image.dwVolumeSerialNumber &&
+                actual_image.nFileIndexHigh == expected_image.nFileIndexHigh &&
+                actual_image.nFileIndexLow == expected_image.nFileIndexLow,
+            "created child maps the pinned file identity");
+    Require(ResumeThread(process.hThread) != static_cast<DWORD>(-1), "resume probe child");
+    Require(WaitForSingleObject(process.hProcess, 15000) == WAIT_OBJECT_0,
+            "probe child exits");
+    DWORD result = 1;
+    Require(GetExitCodeProcess(process.hProcess, &result) && result == 0,
+            "probe child executed expected code");
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+  }
+}
+
+void HostFactoryProbe(const std::wstring& directory) {
+  const auto host = directory + L"\\host.exe";
+  Require(CopyFileW(TestExecutable().c_str(), host.c_str(), TRUE) != FALSE,
+          "create trusted host factory fixture");
+  ApplyDescriptor(host, kTrusted);
+  std::wstring command = L"\"" + host + L"\" --host-probe";
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
-  Require(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr,
-                          FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup,
-                          &process) != FALSE,
-          "launch the pinned image using volume GUID path");
+  Require(CreateProcessW(host.c_str(), command.data(), nullptr, nullptr, FALSE,
+                         CREATE_NO_WINDOW, nullptr, directory.c_str(), &startup,
+                         &process) != FALSE,
+          "launch trusted host factory fixture");
   Require(WaitForSingleObject(process.hProcess, 15000) == WAIT_OBJECT_0,
-          "probe child exits");
+          "host factory probe exits");
   DWORD result = 1;
   Require(GetExitCodeProcess(process.hProcess, &result) && result == 0,
-          "probe child executed expected code");
+          "host-bound helper admission uses the running image volume");
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);
+  Require(DeleteFileW(host.c_str()) != FALSE, "remove host factory fixture");
 }
 
 void FilesystemTests() {
@@ -169,14 +225,15 @@ void FilesystemTests() {
                             std::to_wstring(GetCurrentProcessId()) + L"-" +
                             std::to_wstring(GetTickCount64());
   MakeDirectory(root);
-  const auto app = root + L"\\app";
+  const auto app = root + L"\\app space";
   MakeDirectory(app);
   CopyHelper(app);
   const auto executable = app + kHelper;
   auto lease = CoreLaunchLease::Acquire(executable);
   Require(lease != nullptr, "secure installed helper accepted");
-  Require(lease->executable().compare(0, 11, L"\\\\?\\Volume{") == 0,
-          "launch path uses stable volume GUID");
+  const std::wstring launch_prefix = L"\\\\.\\Global\\GLOBALROOT";
+  Require(lease->executable().compare(0, launch_prefix.size(), launch_prefix) == 0,
+          "launch path uses protected global namespace and pinned native device");
   HANDLE writer = CreateFileW(executable.c_str(), FILE_WRITE_DATA,
                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                               nullptr, OPEN_EXISTING, 0, nullptr);
@@ -191,7 +248,8 @@ void FilesystemTests() {
                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   Require(writer == INVALID_HANDLE_VALUE, "pinned directory blocks reparse mutation");
-  LaunchProbe(lease->executable());
+  LaunchProbe(lease->executable(), executable);
+  HostFactoryProbe(app);
   lease.reset();
   writer = CreateFileW(executable.c_str(), FILE_WRITE_DATA,
                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -254,13 +312,32 @@ void FilesystemTests() {
     unused_drive[0] = drive;
     const std::wstring drive_root = std::wstring(unused_drive) + L"\\";
     if (GetDriveTypeW(drive_root.c_str()) != DRIVE_NO_ROOT_DIR) continue;
+    // A whole-volume DOS alias does not hide ancestors and can be authorized.
+    // Remap it after acquisition: the returned launch path must still execute the
+    // original pinned image, including with Dart's NULL application-name form.
+    auto original = CoreLaunchLease::Acquire(executable);
+    Require(original != nullptr, "acquire source volume for alias test");
+    const auto native = original->executable().substr(launch_prefix.size());
+    const auto native_volume =
+        native.substr(0, native.find(L'\\', std::wstring(L"\\Device\\").size()));
+    Require(DefineDosDeviceW(DDD_RAW_TARGET_PATH, unused_drive, native_volume.c_str()) != FALSE,
+            "create whole-volume DOS alias fixture");
+    auto remapped = CoreLaunchLease::Acquire(std::wstring(unused_drive) + executable.substr(2));
+    Require(remapped != nullptr, "whole-volume DOS alias verifies all ancestors");
     Require(DefineDosDeviceW(0, unused_drive, root.c_str()) != FALSE,
-            "create SUBST-style DOS alias fixture");
-    Require(CoreLaunchLease::Acquire(std::wstring(unused_drive) + L"\\app" + kHelper) == nullptr,
+            "remap the authorized DOS drive to a directory");
+    Require(CoreLaunchLease::Acquire(std::wstring(unused_drive) + app.substr(root.size()) + kHelper) == nullptr,
             "DOS alias hiding ancestors rejected");
+    LaunchProbe(remapped->executable(), executable);
+    remapped.reset();
+    original.reset();
     Require(DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE,
                              unused_drive, root.c_str()) != FALSE,
-            "remove DOS alias fixture");
+            "remove remapped DOS alias fixture");
+    Require(DefineDosDeviceW(DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE |
+                                 DDD_RAW_TARGET_PATH,
+                             unused_drive, native_volume.c_str()) != FALSE,
+            "remove whole-volume DOS alias fixture");
     mapped = true;
     break;
   }
@@ -285,6 +362,9 @@ void FilesystemTests() {
 
 int wmain(int argc, wchar_t** argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--probe") return 0;
+  if (argc == 2 && std::wstring(argv[1]) == L"--host-probe") {
+    return sing_box_flutter::CoreLaunchLease::AcquireForHost() ? 0 : 1;
+  }
   DescriptorTests();
   FilesystemTests();
   std::puts("Secure Windows core launch policy tests passed.");

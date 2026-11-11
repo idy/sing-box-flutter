@@ -357,7 +357,8 @@ class WindowsCMake(WindowsFixture):
     def configure(self, *, flutter_layout=False, install_prefix=None, late_install_prefix=None,
                   nested_host=False, discover_application=False, relative_install=False, bundle_subdir="",
                   directory_install="", install_mutation="", exclude_helper=False,
-                  helper_component="Runtime", metadata_copy=False):
+                  helper_component="Runtime", metadata_copy=False, runner_component=None,
+                  extra_helper_copy=False):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -442,7 +443,7 @@ except PermissionError:
                 if install_mutation not in ("copied", "remove"):
                     text += mutation_rule
             text += ('install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "' + runner_destination +
-                     '" COMPONENT ' + helper_component + ')\n')
+                     '" COMPONENT ' + (runner_component or helper_component) + ')\n')
             if directory_install:
                 source = {"contents": "${CORE_BUNDLE_DIRECTORY}/", "named": "${CORE_BUNDLE_DIRECTORY}",
                           "parent": "${CORE_BUNDLE_PARENT}/"}[directory_install]
@@ -454,6 +455,11 @@ except PermissionError:
                          '" COMPONENT ' + helper_component + ')\n')
             if install_mutation in ("copied", "remove"):
                 text += mutation_rule
+            if extra_helper_copy:
+                assert directory_install
+                text += '''install(DIRECTORY "${CORE_BUNDLE_DIRECTORY}/" DESTINATION "secondary;tools"
+  COMPONENT Runtime)
+'''
             if metadata_copy:
                 text += '''get_filename_component(METADATA_SOURCE "${bundle_path}" DIRECTORY)
 get_filename_component(METADATA_SOURCE "${METADATA_SOURCE}" DIRECTORY)
@@ -777,6 +783,93 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
 
     def test_mixed_filtered_metadata_still_rejects_removed_helper(self):
         self.assert_directory_helper_presence(remove=True, metadata_copy=True)
+
+    def test_concurrent_installs_keep_distinct_records_and_destinations(self):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        legal = artifact.parent / "Legal"
+        legal.mkdir()
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
+        result = self.configure(flutter_layout=True, relative_install=True,
+                                install_prefix=self.root / "configured concurrent bundle",
+                                directory_install="contents", bundle_subdir="bin;tools", extra_helper_copy=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                 "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        script = self.plugin / "tool/windows_install.py"
+        barrier_hook = r'''
+    if args.command == "verify-copies" and os.environ.get("SBF_TEST_INSTALL_BARRIER"):
+        import time
+        barrier = Path(os.environ["SBF_TEST_INSTALL_BARRIER"])
+        barrier.mkdir(exist_ok=True)
+        key = hashlib.sha256((args.prefix + args.component).encode()).hexdigest()
+        (barrier / ("arrived-" + key)).write_text(args.prefix)
+        deadline = time.monotonic() + 30
+        while len(list(barrier.glob("arrived-*"))) < 2:
+            if time.monotonic() > deadline:
+                raise RuntimeError("Concurrent install barrier timed out")
+            time.sleep(0.01)
+'''
+        text = script.read_text(encoding="utf-8")
+        marker = "    args = parser.parse_args()\n"
+        self.assertEqual(text.count(marker), 1)
+        script.write_text(text.replace(marker, marker + barrier_hook), encoding="utf-8")
+        prefixes = [self.root / "first; stage", self.root / "second stage"]
+        environment = dict(os.environ, SBF_TEST_INSTALL_BARRIER=str(self.root / "install barrier"))
+        processes = [subprocess.Popen(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                                       "--component", "Runtime", "--prefix", str(prefix)], env=environment,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+                     for prefix in prefixes]
+        try:
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=60)
+                self.assertEqual(process.returncode, 0, stdout + stderr)
+            for prefix in prefixes:
+                for subdirectory in ("bin;tools", "secondary;tools"):
+                    installed = prefix / subdirectory
+                    self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
+                    self.assertTrue((installed / "sing_box_flutter/core-capabilities.json").is_file())
+                    self.assertEqual((installed / "sing_box_flutter/Legal/LICENSE.wintun").read_bytes(), self.contents["license"])
+            self.assertEqual(list(self.cmake_build.rglob("sing_box_flutter-installed-*.txt")), [])
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+    def test_staged_host_then_helper_components_complete_the_bundle(self):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        legal = artifact.parent / "Legal"
+        legal.mkdir()
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
+        for kind in ("", "contents"):
+            with self.subTest(directory_install=kind):
+                prefix = self.root / ("staged " + (kind or "file"))
+                result = self.configure(flutter_layout=True, relative_install=True,
+                                        install_prefix=self.root / "configured staged bundle",
+                                        directory_install=kind, bundle_subdir="bin;tools", metadata_copy=True,
+                                        runner_component="Runtime", helper_component="Helper")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                         "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                installed = prefix / "bin;tools"
+                for component in ("Runtime", "Helper"):
+                    result = subprocess.run(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                                             "--component", component, "--prefix", str(prefix)],
+                                            capture_output=True, text=True, encoding="utf-8")
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    if component == "Runtime":
+                        runner = "fixture_runner.exe" if os.name == "nt" else "fixture_runner"
+                        self.assertTrue((installed / runner).is_file())
+                        self.assertFalse((installed / WINDOWS_EXECUTABLE).exists())
+                    else:
+                        self.assertEqual((installed / WINDOWS_EXECUTABLE).read_bytes(), self.contents["amd64"])
+                    self.assertTrue((installed / "sing_box_flutter/core-capabilities.json").is_file())
+                    self.assertEqual((installed / "sing_box_flutter/Legal/LICENSE.wintun").read_bytes(), self.contents["license"])
+                self.assertEqual(list(self.cmake_build.rglob("sing_box_flutter-installed-*.txt")), [])
 
     def test_pair_parser_keeps_windows_backslashes_semicolons_and_crlf(self):
         self.published()
