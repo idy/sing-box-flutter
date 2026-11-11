@@ -4,11 +4,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
 	"unsafe"
 
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/service/filemanager"
 	"golang.org/x/sys/windows"
 )
 
@@ -154,6 +157,48 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 		return nil
 	}
 	if err = walk(working, 0); err != nil {
+		return nil, err
+	}
+	return &windowsStorage{directories: directories}, nil
+}
+
+// The core owns this additional lease, independent of the controller's working
+// storage lease. External cache paths never become the filemanager base/temp
+// directory or authorize other native IO outside managed storage.
+func prepareEngineStorage(ctx context.Context, options option.Options) (_ io.Closer, err error) {
+	if options.Experimental == nil || options.Experimental.CacheFile == nil || !options.Experimental.CacheFile.Enabled {
+		return nil, nil
+	}
+	path := options.Experimental.CacheFile.Path
+	if path == "" {
+		path = "cache.db"
+	}
+	path = filemanager.BasePath(ctx, path) // Preserve the core's exact resolution.
+	if _, parts, err := secureDirectoryPath(path); err != nil || len(parts) < 2 {
+		return nil, errDirectories
+	}
+	descriptor, err := privateDirectorySecurity()
+	if err != nil {
+		return nil, errDirectories
+	}
+	parentPath := filepath.Dir(path)
+	directories, err := openDirectoryHierarchy(filepath.Dir(parentPath))
+	if err != nil {
+		return nil, errDirectories
+	}
+	defer func() {
+		if err != nil {
+			directories.close()
+			err = errDirectories
+		}
+	}()
+	// Never seal an arbitrary existing directory/file in place: a Medium
+	// process's pre-opened WRITE_DAC handle would survive that transition.
+	parent, err := directories.openChild(directories.last(), filepath.Base(parentPath), false, descriptor)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = directories.pinNativeFile(parent, filepath.Base(path), descriptor); err != nil {
 		return nil, err
 	}
 	return &windowsStorage{directories: directories}, nil

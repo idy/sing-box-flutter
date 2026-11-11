@@ -58,8 +58,11 @@ class _VpnExampleState extends State<VpnExample> {
     }
   }
 
-  Future<void> _initialize() async {
-    if (_initialized) return;
+  Future<void> _initialize({bool reconnect = false}) async {
+    if (_initialized &&
+        !(reconnect && defaultTargetPlatform == TargetPlatform.windows)) {
+      return;
+    }
     if (defaultTargetPlatform == TargetPlatform.iOS &&
         (appGroup.isEmpty || provider.isEmpty)) {
       throw StateError(
@@ -73,9 +76,17 @@ class _VpnExampleState extends State<VpnExample> {
       providerBundleIdentifier: provider.isEmpty ? null : provider,
       notificationTitle: 'sing_box_flutter example',
     );
-    _subscription = _plugin.status.listen(
+    _subscription ??= _plugin.status.listen(
       (status) {
-        if (mounted) setState(() => _status = status);
+        if (mounted) {
+          setState(() {
+            _status = status;
+            if (defaultTargetPlatform == TargetPlatform.windows &&
+                status.state == VpnConnectionState.error) {
+              _initialized = false;
+            }
+          });
+        }
       },
       onError: (Object error) {
         if (mounted) setState(() => _error = 'Native status unavailable.');
@@ -93,7 +104,9 @@ class _VpnExampleState extends State<VpnExample> {
   }
 
   Future<void> _connect() async {
-    await _initialize();
+    // Windows helpers can exit independently of the widget. Reinitialize before
+    // reconnecting so cached UI state cannot authorize an uninitialized helper.
+    await _initialize(reconnect: true);
     await _plugin.checkConfig(_config.text);
     if (!await _plugin.requestPermission()) {
       throw StateError('VPN permission was not granted.');

@@ -1,0 +1,16 @@
+# Run before host install rules copy the selected Windows helper.
+block()
+  file(READ "${CMAKE_CURRENT_LIST_DIR}/sing_box_flutter-install-guard.json" _sbf_guard)
+  foreach(_sbf_key IN ITEMS python validator project_dir core_dir core_digest architecture)
+    string(JSON _sbf_${_sbf_key} GET "${_sbf_guard}" ${_sbf_key})
+  endforeach()
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_validator}"
+      --project-dir "${_sbf_project_dir}" --target windows
+      --windows-arch "${_sbf_architecture}" --installed-artifact "${_sbf_core_dir}"
+      --installed-sha256 "${_sbf_core_digest}"
+    RESULT_VARIABLE _sbf_status ERROR_VARIABLE _sbf_error ENCODING UTF-8)
+  if(NOT _sbf_status EQUAL 0)
+    message(FATAL_ERROR "Selected Windows core failed install-time verification: ${_sbf_error}")
+  endif()
+endblock()

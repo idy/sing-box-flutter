@@ -109,6 +109,12 @@ def main() -> int:
     configure.add_argument("--build-dir", type=Path, required=True)
     configure.add_argument("--core-dir", type=Path, required=True)
     configure.add_argument("--fallback-prefix", required=True)
+    guard = commands.add_parser("guard-settings")
+    guard.add_argument("--output", type=Path, required=True)
+    guard.add_argument("--project-dir", type=Path, required=True)
+    guard.add_argument("--core-dir", type=Path, required=True)
+    guard.add_argument("--core-digest", required=True)
+    guard.add_argument("--architecture", choices=("amd64", "arm64"), required=True)
     resolve = commands.add_parser("resolve")
     resolve.add_argument("--settings", type=Path, required=True)
     resolve.add_argument("--configuration", default="")
@@ -122,6 +128,13 @@ def main() -> int:
                         "fallback_prefix": args.fallback_prefix,
                         "python": Path(sys.executable).as_posix(),
                         "resolver": Path(__file__).resolve().as_posix()}
+            args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+        elif args.command == "guard-settings":
+            settings = {"project_dir": args.project_dir.resolve().as_posix(),
+                        "core_dir": args.core_dir.resolve().as_posix(),
+                        "core_digest": args.core_digest, "architecture": args.architecture,
+                        "python": Path(sys.executable).as_posix(),
+                        "validator": Path(__file__).with_name("core_recipe.py").resolve().as_posix()}
             args.output.write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
         else:
             settings = json.loads(args.settings.read_text(encoding="utf-8"))

@@ -107,6 +107,7 @@ class _CoreProcess implements Process {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late _CoreProcess process;
   late List<_CoreProcess> processes;
   late SingBoxFlutterWindows plugin;
@@ -147,6 +148,162 @@ void main() {
     expect(process.requests.map((request) => request['method']),
         containsAll(['initialize', 'getVersion', 'checkConfig']));
     expect(process.requests.last['arguments'], {'config': config});
+  });
+
+  group('secure native launch authorization', () {
+    const channel = MethodChannel('sing_box_flutter/test_windows_launch');
+    const verifiedPath =
+        r'\\?\Volume{00112233-4455-6677-8899-aabbccddeeff}\Program Files\VPN\sing_box_flutter_core.exe';
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+
+    SingBoxFlutterWindows verified({
+      Future<Process> Function(String)? launcher,
+    }) =>
+        SingBoxFlutterWindows.withLauncher(
+          launcher: launcher ??
+              (executable) async {
+                launches.add(executable);
+                return process;
+              },
+          executable: r'C:\untrusted-build\sing_box_flutter_core.exe',
+          workingPath: r'C:\Users\Test\AppData\Local\app\sing_box_flutter',
+          launchChannel: channel,
+        );
+
+    tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    test('pins through actual process creation and sends no early requests',
+        () async {
+      final creating = Completer<Process>();
+      final releasing = Completer<void>();
+      final calls = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call.method);
+        if (call.method == 'acquire') {
+          expect(call.arguments, isNull);
+          return {'lease': 71, 'executable': verifiedPath};
+        }
+        expect(call.arguments, 71);
+        await releasing.future;
+        return null;
+      });
+      final backend = verified(launcher: (path) {
+        launches.add(path);
+        calls.add('start');
+        return creating.future;
+      });
+      process.onRequest = process.respondNormally;
+      final pending = backend.initialize(
+          applicationId: 'test.app', notificationTitle: 'Example');
+      final concurrent = backend.getVersion();
+      await Future<void>.delayed(Duration.zero);
+      expect(calls, ['acquire', 'start']);
+      expect(launches, [verifiedPath]);
+      expect(process.requests, isEmpty);
+      creating.complete(process);
+      await Future<void>.delayed(Duration.zero);
+      expect(calls, ['acquire', 'start', 'release']);
+      expect(process.requests, isEmpty);
+      releasing.complete();
+      await pending;
+      expect(await concurrent, '1.14.4');
+      expect(process.requests, isNotEmpty);
+    });
+
+    for (final failure in <Object>[
+      PlatformException(
+          code: 'acl_failure',
+          message: 'secret installed path and diagnostics'),
+      MissingPluginException('secret missing validator'),
+    ]) {
+      test(
+          'authorization failure never starts a helper: ${failure.runtimeType}',
+          () async {
+        messenger.setMockMethodCallHandler(channel, (_) async => throw failure);
+        await expectLater(
+          verified().initialize(
+              applicationId: 'test.app', notificationTitle: 'Example'),
+          throwsA(isA<PlatformException>()
+              .having((error) => error.code, 'code', 'core_untrusted')
+              .having((error) => error.toString(), 'safe error',
+                  isNot(contains('secret')))),
+        );
+        expect(launches, isEmpty);
+        expect(process.requests, isEmpty);
+      });
+    }
+
+    for (final authorization in <Object?>[
+      null,
+      {'lease': 0, 'executable': verifiedPath},
+      {'lease': '71', 'executable': verifiedPath},
+      {'lease': 71},
+      {'lease': 71, 'executable': 'sing_box_flutter_core.exe'},
+      {'lease': 71, 'executable': r'C:\untrusted\sing_box_flutter_core.exe'},
+      {'lease': 71, 'executable': '$verifiedPath.other.exe'},
+    ]) {
+      test('malformed authorization fails closed: $authorization', () async {
+        final calls = <MethodCall>[];
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return call.method == 'acquire' ? authorization : null;
+        });
+        await expectLater(
+          verified().getVersion(),
+          throwsA(isA<PlatformException>()
+              .having((error) => error.code, 'code', 'core_untrusted')),
+        );
+        expect(launches, isEmpty);
+        expect(process.requests, isEmpty);
+        if (authorization is Map && authorization['lease'] == 71) {
+          expect(calls.map((call) => call.method), ['acquire', 'release']);
+          expect(calls.last.arguments, 71);
+        }
+      });
+    }
+
+    test('process creation failure releases the lease and sanitizes the error',
+        () async {
+      final calls = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call.method);
+        return call.method == 'acquire'
+            ? {'lease': 71, 'executable': verifiedPath}
+            : null;
+      });
+      await expectLater(
+        verified(
+                launcher: (_) async => throw StateError('secret OS diagnostic'))
+            .getVersion(),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'core_unavailable')
+            .having((error) => error.toString(), 'safe error',
+                isNot(contains('secret')))),
+      );
+      expect(calls, ['acquire', 'release']);
+      expect(process.requests, isEmpty);
+    });
+
+    test('release failure retires the unused child without sending credentials',
+        () async {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'acquire') {
+          return {'lease': 71, 'executable': verifiedPath};
+        }
+        throw PlatformException(code: 'secret-release-error');
+      });
+      await expectLater(
+        verified().initialize(
+            applicationId: 'test.app', notificationTitle: 'Example'),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'core_untrusted')
+            .having((error) => error.toString(), 'safe error',
+                isNot(contains('secret')))),
+      );
+      expect(process.killed, isTrue);
+      expect(process.requests, isEmpty);
+    });
   });
 
   test('subscriptions replay state and cancellation never stops the core',

@@ -361,7 +361,9 @@ class WindowsCMake(WindowsFixture):
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
         shutil.copyfile(ROOT / "windows/install_resources.cmake.in", windows / "install_resources.cmake.in")
+        shutil.copyfile(ROOT / "windows/verify_core_install.cmake.in", windows / "verify_core_install.cmake.in")
         (windows / "sing_box_flutter_plugin_c_api.cpp").write_text("// configure-only fixture\n", encoding="utf-8")
+        (windows / "secure_core_launch.cpp").write_text("// configure-only fixture\n", encoding="utf-8")
         header = windows / "include/sing_box_flutter/sing_box_flutter_plugin_c_api.h"
         header.parent.mkdir(parents=True, exist_ok=True)
         header.write_text("// configure-only fixture\n", encoding="utf-8")
@@ -486,6 +488,44 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
         self.assertEqual((installed / "sing_box_flutter/Legal/NOTICE").read_text(encoding="utf-8"),
                          "other required notice\n")
         self.assertNotEqual((legal / "LICENSE.wintun").read_bytes(), expected)
+
+    def test_install_rejects_tampered_or_reselected_core_before_copying(self):
+        for mutation in ("tamper", "reselect", "pubspec"):
+            with self.subTest(mutation=mutation):
+                entry, _, _ = self.published()
+                result = self.configure(flutter_layout=True, install_prefix=self.root / "configured install")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                result = subprocess.run(["cmake", "--build", str(self.cmake_build),
+                                         "--config", "Release", "--target", "fixture_runner"],
+                                        capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                artifact = build_core.host_path(self.host, entry["path"])
+                helper = artifact / WINDOWS_EXECUTABLE
+                before = helper.read_bytes()
+                manifest = self.host / "pubspec.yaml"
+                pubspec_before = manifest.read_bytes()
+                try:
+                    if mutation == "tamper":
+                        helper.write_bytes(before + b"tampered")
+                    elif mutation == "reselect":
+                        (self.bundle / WINDOWS_EXECUTABLE).write_bytes(pe("amd64") + b"new verified build")
+                        self.published()
+                    else:
+                        manifest.write_bytes(pubspec_before + b"# selection changed after configure\n")
+                    installed = self.root / ("rejected " + mutation)
+                    result = subprocess.run(["cmake", "--install", str(self.cmake_build),
+                                             "--config", "Release", "--component", "Runtime",
+                                             "--prefix", str(installed)],
+                                            capture_output=True, text=True, encoding="utf-8")
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("install-time verification", result.stdout + result.stderr)
+                    self.assertFalse((self.root / "configured install" / WINDOWS_EXECUTABLE).exists())
+                    self.assertFalse((installed / WINDOWS_EXECUTABLE).exists())
+                finally:
+                    helper.write_bytes(before)
+                    manifest.write_bytes(pubspec_before)
+                    (self.bundle / WINDOWS_EXECUTABLE).write_bytes(pe("amd64"))
+                    self.published()
 
     def assert_flutter_install(self, install_prefix=None, late_install_prefix=None,
                                nested_host=False, discover_application=False,

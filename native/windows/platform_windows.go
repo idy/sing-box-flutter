@@ -268,7 +268,7 @@ func (d *directoryHandles) openChild(parent windows.Handle, name string, create 
 }
 
 func (d *directoryHandles) open(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
-	return d.openObject(parent, name, create, descriptor, true, false, false)
+	return d.openObject(parent, name, create, descriptor, storageObjectOptions{directory: true})
 }
 
 // Full SACL protection is a root invariant, separate from its label ACE.
@@ -276,17 +276,32 @@ func (d *directoryHandles) openPrivateRoot(parent windows.Handle, name string, d
 	if parent == 0 || !safeDirectoryComponent(name) || descriptor == nil {
 		return 0, errDirectories
 	}
-	return d.openObject(parent, name, true, descriptor, true, false, true)
+	return d.openObject(parent, name, true, descriptor, storageObjectOptions{directory: true, readSACL: true})
 }
 
 func (d *directoryHandles) openFile(parent windows.Handle, name string, create, write bool, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
 	if parent == 0 || !safeDirectoryComponent(name) {
 		return 0, errDirectories
 	}
-	return d.openObject(parent, name, create, descriptor, false, write, false)
+	return d.openObject(parent, name, create, descriptor, storageObjectOptions{write: write})
 }
 
-func (d *directoryHandles) openObject(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR, directory, write, readSACL bool) (windows.Handle, error) {
+// Retain a metadata-only file pin that denies delete/rename but permits the
+// native database to reopen it for data IO. The parent must already be private;
+// both new and existing files must satisfy the same immutable private policy.
+func (d *directoryHandles) pinNativeFile(parent windows.Handle, name string, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
+	if parent == 0 || !safeDirectoryComponent(name) || descriptor == nil {
+		return 0, errDirectories
+	}
+	return d.openObject(parent, name, true, descriptor, storageObjectOptions{nativeIO: true})
+}
+
+type storageObjectOptions struct {
+	directory, write, readSACL, nativeIO bool
+}
+
+func (d *directoryHandles) openObject(parent windows.Handle, name string, create bool, descriptor *windows.SECURITY_DESCRIPTOR, mode storageObjectOptions) (windows.Handle, error) {
+	directory, write, readSACL := mode.directory, mode.write, mode.readSACL
 	objectName, err := windows.NewNTUnicodeString(name)
 	if err != nil {
 		return 0, err
@@ -335,6 +350,10 @@ func (d *directoryHandles) openObject(parent windows.Handle, name string, create
 	}
 	if write {
 		access |= windows.FILE_WRITE_DATA
+	}
+	if mode.nativeIO {
+		access = windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL | windows.SYNCHRONIZE
+		share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
 	}
 	var handle windows.Handle
 	var status windows.IO_STATUS_BLOCK

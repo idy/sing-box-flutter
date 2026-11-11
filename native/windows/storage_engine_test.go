@@ -30,7 +30,11 @@ func TestOwnedStoragePreservesDefaultRelativeExternalCacheAndTempIO(t *testing.T
 			if kind == "relative" {
 				path, want = "profile.db", filepath.Join(working, "profile.db")
 			} else if kind == "external" {
-				path = filepath.Join(t.TempDir(), "explicit.db")
+				external := filepath.Join(base, "external-cache")
+				if err := privateDirectory(external); err != nil {
+					t.Fatal(err)
+				}
+				path = filepath.Join(external, "explicit.db")
 				want = path
 			}
 			encoded, _ := json.Marshal(path)
@@ -73,7 +77,10 @@ func TestOwnedStoragePreservesDefaultRelativeExternalCacheAndTempIO(t *testing.T
 				}
 				// Exercise native path creation/read/write under a newly created
 				// state directory, as used by temp/Tailscale-backed services.
-				nativeState := filepath.Join(working, "tailscale-state", "state.bin")
+				nativeState := filemanager.BasePath(instance.ctx, filepath.Join("tailscale-state", "state.bin"))
+				if nativeState != filepath.Join(working, "tailscale-state", "state.bin") {
+					t.Fatal("external cache changed native persistent storage root")
+				}
 				if err := os.MkdirAll(filepath.Dir(nativeState), 0o700); err != nil {
 					t.Fatal(err)
 				}

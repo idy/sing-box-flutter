@@ -19,19 +19,25 @@ import 'src/windows_core_client.dart';
 class SingBoxFlutterWindows extends SingBoxFlutterPlatform
     implements SingBoxFlutterApplicationIdentity {
   /// Creates the Windows platform implementation.
-  SingBoxFlutterWindows();
+  SingBoxFlutterWindows()
+      : _launchChannel = const MethodChannel('sing_box_flutter/windows_launch');
 
   /// Injects a process launcher and paths for transport/lifecycle tests.
+  ///
+  /// Omitting [launchChannel] bypasses native validation for fake processes only.
+  /// Production instances always require the native secure-launch lease.
   @visibleForTesting
   SingBoxFlutterWindows.withLauncher({
     required Future<Process> Function(String executable) launcher,
     String? workingPath,
     String? localAppData,
     required String executable,
+    MethodChannel? launchChannel,
   })  : _launcher = launcher,
         _workingPath = workingPath,
         _localAppData = localAppData,
-        _executable = executable;
+        _executable = executable,
+        _launchChannel = launchChannel;
 
   static final _instance = SingBoxFlutterWindows();
 
@@ -58,6 +64,7 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
   }
 
   Future<Process> Function(String executable)? _launcher;
+  final MethodChannel? _launchChannel;
   String? _workingPath;
   String? _localAppData;
   String? _executable;
@@ -113,25 +120,11 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
     if (_launcher == null && !Platform.isWindows) {
       throw UnsupportedError('The Windows VPN backend requires Windows.');
     }
-    final executable = _executable ??
-        p.join(p.dirname(Platform.resolvedExecutable),
-            'sing_box_flutter_core.exe');
     // A broken transport can precede native route cleanup and lease release.
     // Keep single-flight launch ownership while waiting for actual termination.
     await _awaitRetirement();
     _retirement = null;
-    final Process process;
-    try {
-      process = await (_launcher?.call(executable) ??
-          Process.start(executable, const [],
-              workingDirectory: p.dirname(executable)));
-    } catch (_) {
-      throw PlatformException(
-        code: 'core_unavailable',
-        message: 'The bundled Windows VPN core could not be started. '
-            'Build the Windows core and rebuild the application.',
-      );
-    }
+    final process = await _startVerifiedCore();
     return WindowsCoreClient(process, onEvent: _emit, onFailure: () {
       if (_generation != generation) return;
       _retirement = process.exitCode;
@@ -142,6 +135,85 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
             'Initialize again before reconnecting.',
       ));
     });
+  }
+
+  static PlatformException _untrustedCore() => PlatformException(
+        code: 'core_untrusted',
+        message: 'The Windows VPN core could not be securely launched. '
+            'Install the complete application in an administrator-managed '
+            'location such as Program Files, then run it as administrator.',
+      );
+
+  Future<Process> _startVerifiedCore() async {
+    var executable = _executable ??
+        p.join(p.dirname(Platform.resolvedExecutable),
+            'sing_box_flutter_core.exe');
+    final channel = _launchChannel;
+    int? lease;
+    if (channel != null) {
+      try {
+        final authorization =
+            await channel.invokeMapMethod<String, Object?>('acquire');
+        final id = authorization?['lease'];
+        if (id is int && id > 0) lease = id;
+        final nativePath = authorization?['executable'];
+        final paths = p.Context(style: p.Style.windows);
+        if (lease == null ||
+            nativePath is! String ||
+            !nativePath.startsWith(r'\\?\Volume{') ||
+            !paths.isAbsolute(nativePath) ||
+            paths.basename(nativePath) != 'sing_box_flutter_core.exe') {
+          throw _untrustedCore();
+        }
+        // Use the native volume-GUID path, not an app-adjacent Dart path that a
+        // DOS drive remap could redirect after validation.
+        executable = nativePath;
+      } catch (_) {
+        if (lease != null) {
+          try {
+            await channel.invokeMethod<void>('release', lease);
+          } catch (_) {
+            // A failed release leaves the native lease pinned until process exit.
+          }
+        }
+        throw _untrustedCore();
+      }
+    }
+    Process? started;
+    try {
+      try {
+        started = await (_launcher?.call(executable) ??
+            Process.start(executable, const [],
+                workingDirectory:
+                    p.Context(style: p.Style.windows).dirname(executable)));
+      } catch (_) {
+        throw PlatformException(
+          code: 'core_unavailable',
+          message: 'The bundled Windows VPN core could not be started. '
+              'Build the Windows core and rebuild the application.',
+        );
+      }
+    } finally {
+      if (channel != null && lease != null) {
+        try {
+          // Process.start completes after CreateProcess has mapped the image.
+          // Every no-follow directory/file handle stays pinned until this point.
+          await channel.invokeMethod<void>('release', lease);
+        } catch (_) {
+          if (started != null) {
+            // Never attach a protocol client or send credentials on an uncertain
+            // authorization result. Drain output and retire this unused child.
+            unawaited(started.stdout.drain<void>().catchError((Object _) {}));
+            unawaited(started.stderr.drain<void>().catchError((Object _) {}));
+            unawaited(started.stdin.close().catchError((Object _) {}));
+            _retirement = started.exitCode;
+            started.kill();
+          }
+          throw _untrustedCore();
+        }
+      }
+    }
+    return started;
   }
 
   void _emit(SingBoxEvent event) {

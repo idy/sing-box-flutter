@@ -88,9 +88,12 @@ Python 3.11+, Git and Flutter. Build the selected Windows core, then package:
 flutter build windows --release
 ```
 
-Launch `build/windows/x64/runner/Release/sing_box_flutter_example.exe` and accept
-the UAC prompt. The example's manifest requests administrator privileges for
-Wintun adapter creation. Use an elevated terminal for `flutter run -d windows`.
+Deploy the complete `build/windows/x64/runner/Release/` bundle using an elevated
+installer into an administrator-owned directory, for example under `Program Files`,
+then launch its installed `sing_box_flutter_example.exe` and accept the UAC prompt.
+The example's manifest requests administrator privileges for Wintun adapter creation.
+The helper launch check rejects user-writable build directories; see the trusted
+installation and development requirements in [Windows setup](../doc/windows-setup.md).
 CMake bundles the selected helper, which embeds sing-tun's verified official
 Wintun driver, and retains its license under `sing_box_flutter/Legal/`. For ARM64,
 build the core with `--windows-arch arm64` and Flutter with

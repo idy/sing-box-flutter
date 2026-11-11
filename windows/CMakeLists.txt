@@ -4,6 +4,7 @@ project(sing_box_flutter LANGUAGES CXX)
 set(PLUGIN_NAME "sing_box_flutter_plugin")
 add_library(${PLUGIN_NAME} SHARED
   "sing_box_flutter_plugin_c_api.cpp"
+  "secure_core_launch.cpp"
   "include/sing_box_flutter/sing_box_flutter_plugin_c_api.h"
 )
 apply_standard_settings(${PLUGIN_NAME})
@@ -12,6 +13,9 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin)
+if(WIN32)
+  target_link_libraries(${PLUGIN_NAME} PRIVATE advapi32)
+endif()
 
 # A normal Flutter build validates a previously selected core. It never downloads
 # a toolchain or builds Go implicitly, including when the pub cache is shared.
@@ -82,6 +86,21 @@ add_custom_target(sing_box_flutter_verify_core ALL
   COMMENT "Verify selected Windows sing-box core and embedded Wintun license"
   VERBATIM)
 add_dependencies(${PLUGIN_NAME} sing_box_flutter_verify_core)
+
+# cmake --install does not run build targets or reconfigure. Register this in
+# the plugin directory now, before the host's helper-copy rules, for all components.
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" -I -X utf8 "${PLUGIN_ROOT}/tool/windows_install.py" guard-settings
+    --output "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-install-guard.json"
+    --project-dir "${FLUTTER_APPLICATION_PATH}" --core-dir "${CORE_DIR}"
+    --core-digest "${CORE_DIGEST}" --architecture "${CORE_ARCH}"
+  RESULT_VARIABLE INSTALL_GUARD_RESULT ERROR_VARIABLE INSTALL_GUARD_ERROR ENCODING UTF-8)
+if(NOT INSTALL_GUARD_RESULT EQUAL 0)
+  message(FATAL_ERROR "${INSTALL_GUARD_ERROR}")
+endif()
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/verify_core_install.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-verify-install.cmake" COPYONLY)
+install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/sing_box_flutter-verify-install.cmake" ALL_COMPONENTS)
 
 string(REPLACE ";" "\\;" CORE_DIR_LIST "${CORE_DIR}")
 set(sing_box_flutter_bundled_libraries

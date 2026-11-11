@@ -62,6 +62,8 @@ active artifact. Windows artifacts use
 recipe fingerprint and all artifact file hashes. Full recipe and file identities
 remain in the receipt and build metadata. CMake validates the path and digest in
 one read-only invocation, then rechecks the configured pair before every build.
+Installation verifies the configured receipt, path and digest before copying the
+helper, including when invoked directly through `cmake --install`.
 It bundles `sing_box_flutter_core.exe` beside the host executable and installs
 capabilities, build provenance, and notices under `sing_box_flutter/`. The exact
 official driver license is package-owned at `native/windows/LICENSE.wintun` and
@@ -69,6 +71,49 @@ retained under `sing_box_flutter/Legal/LICENSE.wintun` in the app.
 Keep the complete Flutter release directory together when distributing the app.
 Rebuild the core after changing its feature selection or updating the plugin.
 A normal Flutter build reports a missing/stale core instead of downloading one.
+
+## Secure helper deployment
+
+Deploy the **complete host application** through a trusted elevated installer to a
+new administrator-managed directory, normally `%ProgramFiles%\\YourVendor\\YourApp`.
+The installer must obtain its files from an authenticated release package, create
+its directories and files with their final restrictive permissions, and assign
+ownership to **Administrators**, **SYSTEM**, or **TrustedInstaller**. Grant ordinary
+users read/execute access only. Use the same policy for updates; stop the app
+before replacing its installed files. Do not move a user-owned build directory
+into Program Files, reuse an untrusted existing directory, or rely on a build-time
+hash to make a writable deployment safe. The host, its Flutter runtime/plugin,
+and its assets must already be trusted when the elevated host starts.
+
+Before every helper launch, the native plugin derives the helper location from
+the running host and opens the volume root, every directory, and
+`sing_box_flutter_core.exe` separately with no-follow semantics. It requires a
+local fixed volume with persistent ACLs and rejects reparse points, a multi-link
+helper, and owners outside the three trusted identities. It rejects
+DACL grants allowing any other identity to modify data, attributes, extended
+attributes, ownership or permissions, or delete/replace the object or its child.
+Inherited grants and generic access masks are checked too; unsupported ACL grant
+types fail closed. Ancestors may permit creating unrelated sibling entries, as
+normal Windows volume roots do, but the application directory cannot permit
+ordinary users to create children. An individual administrator's user SID is
+**not** trusted ownership: the same user at medium integrity can otherwise obtain
+implicit permission to change the DACL.
+
+The plugin retains read-only handles denying write/delete sharing on the entire
+chain until Dart's `Process.start` completes. Existing incompatible write/delete
+handles cause validation to fail. Dart launches the pinned volume-GUID path so a
+drive-letter remap cannot redirect the launch, and sends configuration through its
+pipe only after the native lease is released successfully. Missing native validation,
+unsafe deployment or uncertain lease handling fails closed with a fixed
+`core_untrusted` error, without starting an unverified helper or sending it VPN
+configuration. The plugin does not repair permissions, alter token privileges,
+or provide an unsafe development/CI override.
+
+Ordinary checkout, Downloads, temporary and user-owned Flutter build directories
+are therefore unsuitable for running this elevated backend. Build normally, then
+install an authenticated build using the policy above and launch the **installed**
+host. Development builds require the same secure deployment as release builds;
+`flutter run` from a writable checkout is not a supported elevated launch path.
 
 ## Administrator privileges
 
@@ -107,9 +152,9 @@ endif()
 
 The supplied `requireAdministrator` manifest remains embedded in the executable.
 The checked-in example includes both settings, and Windows CI verifies the final
-embedded elevation level. Launch its built executable to accept the Windows UAC
-prompt. For `flutter run`, use an elevated terminal so
-Flutter can launch the runner. A plugin cannot change the host's manifest.
+embedded elevation level. After secure deployment, launch its installed
+executable to accept the Windows UAC prompt. A plugin cannot change the host's
+manifest or make a user-writable build directory safe.
 
 ## Configuration and lifecycle
 
@@ -142,6 +187,16 @@ repairing or adopting those objects. Directory entries are checked by file
 identity, including distinct names in case-sensitive directories. Administrator
 privileges are required to create or reopen storage; normal cache and temporary-file
 features remain enabled.
+
+An explicit `experimental.cache_file.path` outside application storage must also
+have a verified local hierarchy without reparse points. Its immediate parent and
+existing file must already be private at the required integrity, or be created
+atomically with that policy. Unsafe writable external paths are rejected without
+repair. The cache file's identity remains pinned through all core/check cleanup;
+checking a configuration with the cache enabled can create an empty private file.
+Deleting and recreating a corrupt cache is blocked while its file is leased: stop
+and exit the helper before manually cleaning it up.
+
 The Apple identifiers and Android notification title are not used on Windows. `checkConfig()` parses against
 the selected native registry and validates the engine before connecting.
 Configurations travel through an anonymous process pipe, never command-line
@@ -167,7 +222,13 @@ After resolving overlays, the build loads the selected host and Windows test
 dependency graphs with plain `go list -deps -test`, then runs `go mod verify`
 before any tests or compilation. It avoids downloading unused module variants.
 It runs helper protocol/lifecycle tests on the build host and cross-compiles the
-selected Windows core. Windows CI also packages the Flutter example and enables
+selected Windows core. Windows CI compiles and runs standalone native launch-policy tests without a
+Flutter framework build. These cover trusted and untrusted owners, mutation ACLs,
+no-follow path validation, retained write/delete handles, directory replacement,
+hard links, reparse points, DOS aliases and an actual launch through the pinned
+volume-GUID path. The tests require elevation and fail if their secure fixtures
+cannot be created; they do not bypass the production policy for CI.
+Windows CI also packages the Flutter example and enables
 `SING_BOX_FLUTTER_WINTUN_SMOKE=1` for a real Wintun adapter lifecycle test. That test
 requires elevation, starts a uniquely named adapter with `auto_route: false`,
 closes the native core, and verifies adapter removal while preserving the runner's

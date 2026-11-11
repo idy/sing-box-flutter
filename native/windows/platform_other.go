@@ -4,10 +4,17 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/sagernet/sing-box/option"
 )
+
+// Host builds exercise parsing and lifetime logic; the Windows-only policy
+// needs native handle sharing, ACLs and integrity labels, and runs in Windows CI.
+func prepareEngineStorage(context.Context, option.Options) (io.Closer, error) { return nil, nil }
 
 // Host builds exist for protocol/configuration tests, not for running a VPN.
 func isElevated() bool { return false }

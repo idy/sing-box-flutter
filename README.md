@@ -90,8 +90,9 @@ dart run sing_box_flutter build --target windows --windows-arch amd64
 ```
 
 For Windows ARM64, use `--windows-arch arm64`. The helper embeds the verified
-official Wintun driver through the pinned sing-tun module. Run the host as
-administrator to create its adapter.
+official Wintun driver through the pinned sing-tun module. Deploy the complete
+bundle to a trusted administrator-owned installation directory and run the host
+as administrator to create its adapter. User-writable helper locations are rejected.
 Follow [Windows setup](doc/windows-setup.md) for packaging, UAC and lifecycle details.
 
 The builder generates a constructor registry and compiles a small mobile binding

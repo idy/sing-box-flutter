@@ -299,19 +299,30 @@ func TestNativeCacheResolvesCallerPathAndDefault(t *testing.T) {
 	}
 	for _, name := range []string{"default", "relative", "absolute"} {
 		t.Run(name, func(t *testing.T) {
-			working := t.TempDir()
+			base := directoryTestCacheRoot(t)
+			working := filepath.Join(base, "Host App", "sing_box_flutter")
+			lease, err := initializeStorage(working)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			ctx := withStorageContext(context.Background(), lease)
 			path := ""
 			want := filepath.Join(working, "cache.db")
 			if name == "relative" {
 				path, want = "profile.db", filepath.Join(working, "profile.db")
 			} else if name == "absolute" {
-				path = filepath.Join(t.TempDir(), "absolute.db")
+				external := filepath.Join(base, "external-cache")
+				if err := privateDirectory(external); err != nil {
+					t.Fatal(err)
+				}
+				path = filepath.Join(external, "absolute.db")
 				want = path
 			}
 			pathJSON, _ := json.Marshal(path)
 			content := `{"experimental":{"cache_file":{"enabled":true,"path":` + string(pathJSON) + `}}}`
 			for attempt := range 2 {
-				engine, err := createBox(context.Background(), content, working, false)
+				engine, err := createBox(ctx, content, working, false)
 				if err != nil {
 					t.Fatal(err)
 				}
