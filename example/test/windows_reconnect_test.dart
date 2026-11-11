@@ -13,7 +13,8 @@ class _RestartablePlatform extends SingBoxFlutterPlatform {
   bool initialized = false;
   int initializeCalls = 0;
   int startCalls = 0;
-  int eventSubscriptions = 0;
+  int activeSubscriptions = 0;
+  int maxActiveSubscriptions = 0;
 
   @override
   Future<void> initialize({
@@ -65,10 +66,21 @@ class _RestartablePlatform extends SingBoxFlutterPlatform {
   }
 
   @override
-  Stream<SingBoxEvent> get events {
-    eventSubscriptions++;
-    return updates.stream;
-  }
+  Stream<SingBoxEvent> get events => Stream.multi((controller) {
+        activeSubscriptions++;
+        if (activeSubscriptions > maxActiveSubscriptions) {
+          maxActiveSubscriptions = activeSubscriptions;
+        }
+        final subscription = updates.stream.listen(
+          controller.add,
+          onError: controller.addError,
+          onDone: controller.close,
+        );
+        controller.onCancel = () async {
+          await subscription.cancel();
+          activeSubscriptions--;
+        };
+      });
 }
 
 void main() {
@@ -96,13 +108,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('VPN: error'), findsOneWidget);
       await tester.tap(find.text('Connect'));
+      // Let the source cancellation finish on the real event loop before
+      // settling UI frames for the replacement subscription.
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
       await tester.pumpAndSettle();
       expect(find.text('VPN: connected'), findsOneWidget);
       expect(platform.initializeCalls, failure + 2);
       expect(platform.startCalls, failure + 2);
-      expect(platform.eventSubscriptions, 1);
+      expect(platform.activeSubscriptions, 1);
+      expect(platform.maxActiveSubscriptions, 1);
       expect(find.text('not_initialized'), findsNothing);
     }
     await tester.pumpWidget(const SizedBox.shrink());
+    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.pumpAndSettle();
+    expect(platform.activeSubscriptions, 0);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 }

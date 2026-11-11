@@ -14,11 +14,12 @@ Build from source (0.3.0):
   dart run sing_box_flutter build --target apple
   dart run sing_box_flutter build --target macos
   dart run sing_box_flutter build --target windows --windows-arch amd64
+  dart run sing_box_flutter build --target linux --arch amd64
 
 Windows supports amd64 and arm64, using native Windows or macOS/Linux cross builds.
 The helper embeds the pinned signed Wintun driver and retains its official license.
 With a core block, --target all builds Android + Apple + macOS.
-Legacy --target all builds Android + Apple. Windows always requires its own target.
+Legacy --target all builds Android + Apple. Linux and Windows require explicit targets.
 
 Add sing_box_flutter.core to your host pubspec.yaml to select features.
 Select macOS with sing_box_flutter.macos.mode: ne (default) or user_tun.
@@ -36,6 +37,8 @@ install: download and verify historical native release artifacts (Python 3.11+).
 Without a core block, mobile targets retain the legacy standard build/install path.
 A macos-only block builds source defaults for --target macos; run mobile targets
 separately. Mixed legacy/source selections require an explicit platform target.
+Linux requires a feature selection and source build; --arch defaults to the host
+architecture (amd64 or arm64). Linux cross builds work from macOS without an SDK.
 Selected cores require build; install cannot satisfy a host feature selection.
 Pass --help after a subcommand for its options.''');
     return;
@@ -65,10 +68,19 @@ Pass --help after a subcommand for its options.''');
     final invocation = resolveHostArguments(arguments.skip(1).toList(),
         callerDirectory: Directory.current, environment: Platform.environment);
     forwarded = invocation.arguments;
-    final windows = requestedCoreTarget(forwarded) == 'windows';
-    if (windows && arguments.first == 'build') script = 'build_core.py';
+    final target = requestedCoreTarget(forwarded);
+    final windows = target == 'windows';
+    final linux = target == 'linux';
+    if ((windows || linux) && arguments.first == 'build') {
+      script = 'build_core.py';
+    }
     // Help must work even if the host selection is incomplete or unsupported.
     if (!forwarded.contains('--help') && !forwarded.contains('-h')) {
+      if (linux && arguments.first == 'install') {
+        throw const FormatException(
+            'Linux has no legacy release installer. Select sing_box_flutter.core '
+            'in the host pubspec.yaml and use dart run sing_box_flutter build --target linux.');
+      }
       final snapshot = invocation.pubspec == null
           ? null
           : readCoreBuildSnapshot(invocation.pubspec!);
@@ -77,6 +89,11 @@ Pass --help after a subcommand for its options.''');
             'Windows requires a host sing_box_flutter.core selection. '
             'Add sing_box_flutter: {core: {}} to your pubspec.yaml, then '
             'run dart run sing_box_flutter build --target windows.');
+      }
+      if (linux && (snapshot == null || !snapshot.hasCoreSelection)) {
+        throw const FormatException(
+            'Linux source builds require sing_box_flutter.core in the host pubspec.yaml. '
+            'Add a feature selection, then run dart run sing_box_flutter build --target linux.');
       }
       final selected = snapshot != null &&
           (snapshot.hasCoreSelection || _macosOnlySourceTarget(forwarded));

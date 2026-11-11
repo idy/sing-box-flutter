@@ -148,9 +148,9 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
     // This exact Win32 device form reaches the verified NT volume through the
     // protected namespace links retained by native code. Bare GLOBALROOT can be
     // shadowed locally; accept only the image-path spelling selected natively.
-    final root = RegExp(
-            r'^\\\\\.\\Global\\GLOBALROOT\\Device\\HarddiskVolume[0-9]+\\')
-        .firstMatch(value);
+    final root =
+        RegExp(r'^\\\\\.\\Global\\GLOBALROOT\\Device\\HarddiskVolume[0-9]+\\')
+            .firstMatch(value);
     if (root == null || value.length >= 260) return false;
     final parts = value.substring(root.end).split(r'\');
     if (parts.length < 2 || parts.last != 'sing_box_flutter_core.exe') {

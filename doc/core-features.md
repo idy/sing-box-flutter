@@ -49,8 +49,17 @@ Wintun helper instead of the mobile binding. Use `--windows-arch arm64` for ARM6
 architecture is part of the Windows artifact identity. See
 [Windows setup](windows-setup.md) for packaging and administrator requirements.
 
+```bash
+dart run sing_box_flutter build --target linux --arch amd64
+```
+
+Linux supports `amd64` and `arm64`, defaults to the build host's architecture,
+and requires a host selection. It builds a static Go helper, bundled through
+CMake; see [Linux setup](linux-setup.md) for GTK prerequisites and TUN permissions.
+
 Use `--dry-run` to inspect the selection, resolved tags, fingerprint and output
-receipt without downloading Go or compiling. The CLI reads the canonical host
+receipt without downloading Go or compiling. Windows and Linux require explicit
+build targets; selected `all` builds Android, Apple and macOS. The CLI reads the canonical host
 pubspec bytes once and passes their digest and features through a private,
 per-invocation request; edits during discovery or compilation require a fresh
 build. `--config` must resolve to the actual host `pubspec.yaml`, not a separate
@@ -140,7 +149,8 @@ stacks, optional VPN endpoints and services. Tailscale retains the upstream mobi
 Selecting the Tailscale endpoint does not enable those omitted subsystems.
 
 Linux transparent interception (`redirect`/`tproxy`) and systemd-resolved integration
-are unavailable through these Android/iOS/macOS hosts. Native bridge/helper-process and
+are available on Linux and unavailable through Android/iOS/macOS/Windows hosts. Linux Naive
+outbound is rejected because the static helper does not bundle Cronet. Native bridge/helper-process and
 USB/IP selections also fail when their required host facilities are unavailable.
 Apple Naive outbound is rejected because the pinned Cronet archive has unresolved
 symbols in a real NetworkExtension link. OpenVPN/OpenConnect have selectable tags;
@@ -185,8 +195,9 @@ checks with `python3 tool/check_core_profiles.py --target apple --race` (or targ
 
 Selected artifacts are immutable, content-addressed outputs under the host's
 `.dart_tool/sing_box_flutter/builds/`. `native.json` is an atomic current-profile
-receipt containing the selection, source fingerprint, version, pubspec hash,
-artifact hashes and capabilities manifest paths. Both native build systems reject
+receipt for Android, Apple, macOS and Linux; Windows uses a separate `windows.json`.
+Receipts contain the selection, source fingerprint, version, pubspec hash,
+artifact hashes and capabilities manifest paths. Native build systems reject
 missing, modified or stale artifacts. A changed profile drops pointers to another
 profile's platform binaries; build each required target again.
 
@@ -196,15 +207,16 @@ available when Gradle or CocoaPods consumes selected cores; set `SINGBOX_PYTHON`
 if the interpreter is not discoverable. This validation does not download tools or
 compile Go, and legacy standard-artifact builds retain their previous path.
 
-The JNI/Go binary embeds the same fingerprint as its bundled capabilities manifest.
-Android checks it during initialization; the iOS extension checks it before core
+The native binary embeds the same fingerprint as its bundled capabilities manifest.
+Android and Linux check it during initialization; the iOS extension checks it before core
 startup. Go compiler/module verification and WGC extension checksum rules remain
 in effect. Local transport extensions use the existing `--wgc-config` manifest.
 
 Different host apps never overwrite each other's native artifacts in the shared
 pub cache. Build caches/toolchains remain in the plugin checkout's ignored `.build`.
-The pub package retains the `native/mobile/`, `native/wgc/` and `tool/` sources and
-pins needed for source builds, while excluding these caches and generated binaries.
+The pub package retains the `native/mobile/`, `native/windows/`, `native/linux/`,
+`native/wgc/` and `tool/` sources and pins needed for source builds, while excluding
+these caches and generated binaries.
 
 Hosts without a `sing_box_flutter.core` block retain the legacy standard source
 builder and installer for historical releases such as `install --release v0.2.0`.

@@ -44,6 +44,25 @@ class SelectionTests(unittest.TestCase):
             resolve_features({"outbounds": ["naive"]}, "apple")
         self.assertIn("with_naive_outbound", resolve_features({"outbounds": ["naive"]}, "android")["tags"])
 
+    def test_linux_native_features_and_static_build_exclusions(self):
+        selection = {"inbounds": ["redirect", "tproxy"], "dns": ["local", "resolved"],
+                     "services": ["resolved"]}
+        resolved = resolve_features(selection, "linux")
+        self.assertEqual(resolved["features"], canonicalize(selection))
+        generated = generate_registry(resolved["features"])
+        self.assertIn("p_redirect.RegisterRedirect(inboundRegistry)", generated)
+        self.assertIn("p_redirect.RegisterTProxy(inboundRegistry)", generated)
+        self.assertIn("s_resolved.RegisterTransport(dnsRegistry)", generated)
+        self.assertIn("if platformInterface != nil", generated)
+        self.assertIn("dns_local.RegisterTransport(dnsRegistry)", generated)
+        self.assertNotIn("with_low_memory", resolved["tags"])
+        for category, name in [("outbounds", "bridge"), ("outbounds", "tor"),
+                               ("services", "usbip-client"), ("services", "usbip-server")]:
+            with self.subTest(feature=name), self.assertRaisesRegex(FeatureError, "unsupported"):
+                resolve_features({category: [name]}, "linux")
+        with self.assertRaisesRegex(FeatureError, "CGO_ENABLED=0"):
+            resolve_features({"outbounds": ["naive"]}, "linux")
+
     def test_quic_and_utls_dependencies(self):
         for category, name in [("outbounds", "hysteria"), ("inbounds", "hysteria2"),
                                ("outbounds", "tuic"), ("dns", "quic"), ("dns", "h3"),

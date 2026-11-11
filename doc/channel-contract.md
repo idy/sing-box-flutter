@@ -59,6 +59,38 @@ not contain complete configs or credentials. The initial status is disconnected.
 Log: `{type: 'log', level: String, message: String}`. Optional in the first release.
 Do not forward unredacted upstream auth URLs, keys, or configuration dumps as logs.
 
+## Linux process backend
+
+Linux implements the same Dart platform API with `LinuxSingBoxFlutter`, registered
+as a Dart plugin with native CMake bundling. It uses JSON-line requests/responses
+on inherited pipes to a source-built `sing-box-core`; it opens no command socket.
+Configurations never appear in command-line arguments. The bundled capabilities
+fingerprint must match the helper handshake before initialization. That handshake
+also identifies the actual engine worker by its proc PID and start time. Retiring
+a supervisor does not release the reconnection barrier until that exact worker
+has exited; unreadable proc state cannot authorize another worker.
+
+Linux uses the generated registry with no mobile `PlatformInterface`, preserving
+upstream Linux TUN, routing and network monitors. `checkConfig` uses native engine
+validation. `requestPermission` probes actual TUN creation and returns a boolean;
+it does not elevate the process or display a consent dialog. Only the helper needs
+TUN capabilities. Start/stop requests are serialized in the helper, and connected
+is emitted only after the engine starts. The Linux start future remains pending
+until startup succeeds or is cancelled; hosts must keep stop available while
+connecting. A native close failure permanently marks that helper unusable with
+`cleanup_failed`; the Dart backend retires it and requires initialization of a
+replacement after process exit.
+
+Subscriptions and widgets do not own the Linux connection. Flutter engine/app
+exit closes stdin, which stops the helper and releases the TUN/routes. This differs
+from the persistent mobile service lifecycle. Unexpected helper exit fails pending
+requests, emits an error and requires initialization before reconnection. In
+temporary-state mode, a helper supervisor forwards the private pipe protocol and
+waits for the engine process to exit before reaping identity-checked state. This
+also covers failed cleanup and uncooperative workers without deleting files while
+they remain in use. Persistent state does not use a supervisor. See
+[Linux setup](linux-setup.md).
+
 ## Native core
 
 With a host `sing_box_flutter.core` selection, use the small `native/mobile`

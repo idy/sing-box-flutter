@@ -38,15 +38,12 @@ func CheckConfig(content string) error {
 	if _, err = privateLogPath(ctx, options.Log); err != nil {
 		return err
 	}
-	// These pinned endpoint constructors allocate userspace stacks. Initialize
-	// only registers cleanup; later stages start clients, listeners and loops.
-	// Attach cleanup at construction so a later constructor failure also frees it.
-	cleanup := adapter.NewScope(ctx, log.NewNOPFactory().Logger())
+	return checkConfig(ctx, options)
+}
+
+func checkConfig(ctx context.Context, options option.Options) error {
+	ctx, cleanup := withConstructorCleanup(ctx)
 	defer cleanup.Close()
-	ctx = service.ContextWith[adapter.EndpointRegistry](ctx, &validationEndpointRegistry{
-		EndpointRegistry: service.FromContext[adapter.EndpointRegistry](ctx),
-		cleanup:          cleanup,
-	})
 	options.Log = &option.LogOptions{Disabled: true}
 	instance, err := box.New(box.Options{Context: ctx, Options: options})
 	if instance != nil {
@@ -59,14 +56,27 @@ func CheckConfig(content string) error {
 	return nil
 }
 
-// validationEndpointRegistry leaves option decoding and all other endpoint
-// lifecycles unchanged. Only these known Initialize stages are cleanup-only.
-type validationEndpointRegistry struct {
+// These pinned endpoint constructors allocate userspace stacks before box.New
+// can return a box. Their Initialize stages only register idempotent cleanup
+// (device.Close uses sync.Once or a locked nil check). Retain this owner through
+// early startup failures, without wrapping endpoints and losing their concrete
+// DNS types or optional routing interfaces.
+func withConstructorCleanup(ctx context.Context) (context.Context, *adapter.Scope) {
+	// Registration must still succeed when the caller cancels during a constructor.
+	cleanup := adapter.NewScope(context.WithoutCancel(ctx), log.NewNOPFactory().Logger())
+	ctx = service.ContextWith[adapter.EndpointRegistry](ctx, &constructorEndpointRegistry{
+		EndpointRegistry: service.FromContext[adapter.EndpointRegistry](ctx),
+		cleanup:          cleanup,
+	})
+	return ctx, cleanup
+}
+
+type constructorEndpointRegistry struct {
 	adapter.EndpointRegistry
 	cleanup *adapter.Scope
 }
 
-func (r *validationEndpointRegistry) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag, kind string, options any) (adapter.Endpoint, error) {
+func (r *constructorEndpointRegistry) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag, kind string, options any) (adapter.Endpoint, error) {
 	endpoint, err := r.EndpointRegistry.Create(ctx, router, logger, tag, kind, options)
 	if err != nil {
 		return nil, err
@@ -82,10 +92,14 @@ func HasTunInbound(content string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return hasTunInbound(options), nil
+}
+
+func hasTunInbound(options option.Options) bool {
 	for _, inbound := range options.Inbounds {
 		if inbound.Type == C.TypeTun {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }

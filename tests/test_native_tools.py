@@ -15,10 +15,11 @@ import zipfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
-from native_common import (ARTIFACTS, BuildError, ROOT, REQUIRED_TAGS, archive_name, artifact_hashes,
+from native_common import (ARTIFACTS, BuildError, GOMOBILE_MODULE, ROOT, REQUIRED_TAGS, archive_name, artifact_hashes,
                            build_directory, download, load_pins, parse_manifest, pin_identity, safe_extract,
                            sha256, validate_metadata)
-from build_libbox import bootstrap_go, go_environment, mobile_profile_bytes, resolved_tailscale_dependency, verify_dependency_toolchain
+from build_libbox import (bootstrap_go, go_environment, install_mobile, mobile_profile_bytes,
+                          prepare_dependencies, resolved_tailscale_dependency, verify_dependency_toolchain)
 from source_inputs import ADAPTER_INPUTS, adapter_digest, source_digest
 import install_libbox
 
@@ -752,6 +753,94 @@ class ToolchainTests(unittest.TestCase):
                 "GOPRIVATE": "git.example.com/team/*", "GONOPROXY": "none",
             })
             self.assertEqual(explicit["GONOPROXY"], "none")
+
+    def test_dependency_preparation_limits_linux_graph_and_verifies_all_downloads(self):
+        go, source, pins = Path("/verified/bin/go"), Path("/verified/source"), load_pins()
+        packages = ["./experimental/libbox", "./cmd/sing-box-flutter-linux"]
+        tags = ["badlinkname", "tfogo_checklinkname0", "with_gvisor"]
+        env = {"GOOS": "linux", "GOARCH": "arm64", "CGO_ENABLED": "0", "GOTOOLCHAIN": "local",
+               "GOSUMDB": "sum.golang.org", "GOFLAGS": "-mod=readonly -trimpath -buildvcs=false"}
+        dependency = {"version": "resolved", "toolchain_revision": pins["tailscale_go_revision"]}
+        for selected in (None, packages):
+            with self.subTest(packages=selected):
+                events = []
+
+                def download(command, **kwargs):
+                    events.append(command)
+                    self.assertEqual(kwargs["cwd"], source)
+                    self.assertIs(kwargs["env"], env)
+                    if selected is not None:
+                        self.assertTrue(kwargs["capture"])
+                    return ""
+
+                def resolve(*args):
+                    events.append("contract")
+                    self.assertEqual(args, (go, env, source, pins))
+                    return dependency
+
+                with mock.patch("build_libbox.network_run", side_effect=download), \
+                        mock.patch("build_libbox.resolved_tailscale_dependency", side_effect=resolve), \
+                        mock.patch("build_libbox.run", side_effect=lambda command, **kwargs: events.append(command)) as verify:
+                    self.assertEqual(prepare_dependencies(go, env, source, pins, packages=selected, tags=tags), dependency)
+                first = ([go, "mod", "download"] if selected is None else
+                         [go, "list", "-mod=readonly", "-deps", "-test", "-tags", ",".join(tags), *packages])
+                self.assertEqual(events, [first, "contract", [go, "mod", "verify"]])
+                verify.assert_called_once_with([go, "mod", "verify"], cwd=source, env=env)
+                self.assertEqual(env["GOFLAGS"], "-mod=readonly -trimpath -buildvcs=false")
+
+    def test_mobile_install_checks_pin_and_prepares_before_installing_tools(self):
+        pins = load_pins()
+        go = Path("/verified/bin/go")
+        for failure in (None, "pin", "verification"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                source = Path(temp)
+                env = {"GOBIN": str(source / "bin")}
+                events = []
+                modules = {"Version": pins["gomobile_version"] if failure != "pin" else "v0.0.0",
+                           "Sum": "h1:module", "GoModSum": "h1:mod"}
+                dependency = {"toolchain_revision": pins["tailscale_go_revision"]}
+
+                def download(command, **kwargs):
+                    events.append(command[1])
+                    self.assertEqual(kwargs["cwd"], source)
+                    self.assertIs(kwargs["env"], env)
+                    if command[1] == "mod":
+                        self.assertEqual(command[2:], ["download", "-json", GOMOBILE_MODULE])
+                        return json.dumps(modules)
+                    self.assertEqual(command, [go, "install", "-trimpath", f"{GOMOBILE_MODULE}/cmd/gomobile",
+                                               f"{GOMOBILE_MODULE}/cmd/gobind"])
+                    for name in ("gomobile", "gobind"):
+                        binary = Path(env["GOBIN"]) / name
+                        binary.parent.mkdir(exist_ok=True)
+                        binary.write_bytes(b"fresh verified mobile tool")
+                    return ""
+
+                def prepare(*args):
+                    events.append("prepare")
+                    self.assertEqual(args, (go, env, source, pins))
+                    if failure == "verification":
+                        raise BuildError("module verification failed")
+                    return dependency
+
+                def version(command, **kwargs):
+                    name = Path(command[-1]).name
+                    events.append(name)
+                    return f"\tmod\t{GOMOBILE_MODULE}\t{pins['gomobile_version']}\th1:module\n\tpath\t{GOMOBILE_MODULE}/cmd/{name}"
+
+                with mock.patch("build_libbox.network_run", side_effect=download), \
+                        mock.patch("build_libbox.prepare_dependencies", side_effect=prepare), \
+                        mock.patch("build_libbox.run", side_effect=version):
+                    if failure:
+                        with self.assertRaisesRegex(BuildError, "gomobile module" if failure == "pin" else "verification"):
+                            install_mobile(go, env, source, pins)
+                    else:
+                        mobile, actual_dependency = install_mobile(go, env, source, pins)
+                        self.assertEqual(actual_dependency, dependency)
+                        self.assertEqual(mobile["version"], pins["gomobile_version"])
+                        self.assertEqual(set(mobile["binaries"]), {"gomobile", "gobind"})
+                expected = (["mod"] if failure == "pin" else ["mod", "prepare"] if failure else
+                            ["mod", "prepare", "install", "gomobile", "gobind"])
+                self.assertEqual(events, expected)
 
     def test_resolved_tailscale_upgrade_is_verified_and_recorded(self):
         pins = load_pins()

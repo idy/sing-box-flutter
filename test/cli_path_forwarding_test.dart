@@ -707,6 +707,58 @@ raise SystemExit(int(os.environ['MOCK_TOOL_EXIT']))
     expect(result.stdout, contains('--windows-arch'));
   });
 
+  for (final target in [
+    ['--target', 'linux'],
+    ['--target=linux'],
+  ]) {
+    for (final macosOnly in [false, true]) {
+      test(
+          'Linux requires source selection before launching Python '
+          '($target, macOS-only: $macosOnly)', () async {
+        File('${caller.path}/pubspec.yaml').writeAsStringSync('name: host\n'
+            '${macosOnly ? 'sing_box_flutter:\n  macos:\n    mode: user_tun\n' : ''}');
+        final result = await _runBuild(caller, {'PATH': ''}, arguments: target);
+        expect(result.exitCode, 64);
+        expect(result.stderr, contains('require sing_box_flutter.core'));
+        expect(result.stderr, isNot(contains('Python')));
+        final install = await _runBuild(caller, {'PATH': ''},
+            command: 'install', arguments: target);
+        expect(install.exitCode, 64);
+        expect(
+            install.stderr, contains('Linux has no legacy release installer'));
+      });
+    }
+  }
+
+  test('Linux selected dry-run forwards architecture without bootstrapping',
+      () async {
+    File('${caller.path}/pubspec.yaml').writeAsStringSync(
+        'name: host\nsing_box_flutter:\n  core:\n    inbounds: []\n    dns: [local]\n');
+    final result = await _runBuild(caller, {},
+        arguments: ['--target=linux', '--arch', 'arm64', '--dry-run']);
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    final plan = jsonDecode(result.stdout as String) as Map;
+    expect(plan['arch'], 'arm64');
+    expect((plan['resolved'] as Map).keys, ['linux']);
+    expect(plan['resolved']['linux']['features']['inbounds'], isEmpty);
+    expect(plan['resolved']['linux']['features']['dns'], ['local']);
+    expect(
+        File('${caller.path}/.dart_tool/sing_box_flutter/native.json')
+            .existsSync(),
+        isFalse);
+    expect(Directory('${caller.path}/.dart_tool/sing_box_flutter').listSync(),
+        isEmpty);
+  }, skip: Platform.isWindows);
+
+  test('Linux build help works without a source selection', () async {
+    File('${caller.path}/pubspec.yaml')
+        .writeAsStringSync('name: host\nsing_box_flutter:\n  core: invalid\n');
+    final result =
+        await _runBuild(caller, {}, arguments: ['--target', 'linux', '--help']);
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    expect(result.stdout, contains('--arch {amd64,arm64}'));
+  }, skip: Platform.isWindows);
+
   test('Windows falls back to HOMEDRIVE and HOMEPATH', () {
     expect(
       cli.forwardPathArguments(['--from-dir=~\\artifacts'],

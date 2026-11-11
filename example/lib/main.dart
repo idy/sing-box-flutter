@@ -37,12 +37,15 @@ class _VpnExampleState extends State<VpnExample> {
   VpnStatus _status = const VpnStatus(state: VpnConnectionState.disconnected);
   String? _error;
   String? _version;
-  bool _working = false;
+  int _operations = 0;
+  bool _stopping = false;
   bool _initialized = false;
+
+  bool get _working => _operations != 0;
 
   Future<void> _perform(Future<void> Function() operation) async {
     setState(() {
-      _working = true;
+      _operations++;
       _error = null;
     });
     try {
@@ -54,7 +57,7 @@ class _VpnExampleState extends State<VpnExample> {
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     } finally {
-      if (mounted) setState(() => _working = false);
+      if (mounted) setState(() => _operations--);
     }
   }
 
@@ -70,21 +73,20 @@ class _VpnExampleState extends State<VpnExample> {
         'TUNNEL_BUNDLE_ID with --dart-define. See doc/ios-setup.md.',
       );
     }
+    await _subscription?.cancel();
+    _subscription = null;
     await _plugin.initialize(
       applicationId: applicationId,
       appGroup: appGroup.isEmpty ? null : appGroup,
       providerBundleIdentifier: provider.isEmpty ? null : provider,
       notificationTitle: 'sing_box_flutter example',
     );
-    _subscription ??= _plugin.status.listen(
+    _subscription = _plugin.status.listen(
       (status) {
         if (mounted) {
           setState(() {
             _status = status;
-            if (defaultTargetPlatform == TargetPlatform.windows &&
-                status.state == VpnConnectionState.error) {
-              _initialized = false;
-            }
+            if (status.state == VpnConnectionState.error) _initialized = false;
           });
         }
       },
@@ -112,6 +114,15 @@ class _VpnExampleState extends State<VpnExample> {
       throw StateError('VPN permission was not granted.');
     }
     await _plugin.start(config: _config.text, name: 'sing_box_flutter example');
+  }
+
+  Future<void> _disconnect() async {
+    setState(() => _stopping = true);
+    try {
+      await _perform(_plugin.stop);
+    } finally {
+      if (mounted) setState(() => _stopping = false);
+    }
   }
 
   @override
@@ -160,15 +171,21 @@ class _VpnExampleState extends State<VpnExample> {
             ),
             const SizedBox(height: 16),
             FilledButton(
-              onPressed: _working
+              onPressed: _stopping
                   ? null
-                  : () => _perform(active ? _plugin.stop : _connect),
+                  : active
+                      ? _disconnect
+                      : _working
+                          ? null
+                          : () => _perform(_connect),
               child: Text(
-                _working
+                _stopping
                     ? 'Working…'
                     : active
                         ? 'Disconnect'
-                        : 'Connect',
+                        : _working
+                            ? 'Working…'
+                            : 'Connect',
               ),
             ),
             TextButton(

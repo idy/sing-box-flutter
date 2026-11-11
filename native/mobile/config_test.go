@@ -172,7 +172,7 @@ func TestValidationRegistryInitializesOnlyKnownCleanupStages(t *testing.T) {
 			scope := adapter.NewScope(context.Background(), logger)
 			defer scope.Close()
 			endpoint := &validationTestEndpoint{}
-			registry := &validationEndpointRegistry{EndpointRegistry: &validationTestRegistry{endpoint: endpoint}, cleanup: scope}
+			registry := &constructorEndpointRegistry{EndpointRegistry: &validationTestRegistry{endpoint: endpoint}, cleanup: scope}
 			got, err := registry.Create(context.Background(), nil, logger, "vpn", kind, nil)
 			if err != nil || got != endpoint {
 				t.Fatalf("create: %v", err)
@@ -201,7 +201,7 @@ func TestValidationRegistryClosesCleanupOnInitializeFailure(t *testing.T) {
 	defer scope.Close()
 	failure := errors.New("initialization failed")
 	endpoint := &validationTestEndpoint{err: failure}
-	registry := &validationEndpointRegistry{EndpointRegistry: &validationTestRegistry{endpoint: endpoint}, cleanup: scope}
+	registry := &constructorEndpointRegistry{EndpointRegistry: &validationTestRegistry{endpoint: endpoint}, cleanup: scope}
 	if _, err := registry.Create(context.Background(), nil, logger, "vpn", C.TypeOpenConnect, nil); !errors.Is(err, failure) {
 		t.Fatalf("initialize error lost: %v", err)
 	}

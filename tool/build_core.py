@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
@@ -16,8 +17,8 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
-from build_libbox import (bootstrap_go, check_sdks, install_mobile, resolved_tailscale_dependency,
-                          retain_wgc_license, run, source_checkout)
+from build_libbox import (bootstrap_go, check_sdks, install_mobile, prepare_dependencies,
+                          resolved_tailscale_dependency, retain_wgc_license, run, source_checkout)
 from core_features import _unique_object, canonicalize, generate_registry, resolve_features
 from native_common import (BuildError, ROOT, artifact_hashes, build_directory, legal_files,
                            file_lock, load_pins, pin_identity, project_lock, selected_sources, sha256, write_json)
@@ -30,12 +31,31 @@ ANDROID_TARGETS = {"armeabi-v7a": "android/arm", "arm64-v8a": "android/arm64",
                    "x86": "android/386", "x86_64": "android/amd64"}
 RECEIPT = Path(".dart_tool/sing_box_flutter/native.json")
 WINDOWS_RECEIPT = Path(".dart_tool/sing_box_flutter/windows.json")
+LINUX_ARCHITECTURES = {"amd64": 62, "arm64": 183}
+ARTIFACT_NAMES = {"android": "libbox.aar", "apple": "Libbox.xcframework",
+                  "macos": "Libbox.xcframework", "linux": "sing-box-core", "windows": "WindowsCore"}
 
 
 def receipt_for_target(target: str) -> Path:
     # Windows has a different binding and architecture fingerprint. Its active
-    # bundle must not invalidate the same host's Android/Apple artifact pointer.
+    # bundle must not invalidate the same host's Android/Apple/Linux artifact pointer.
     return WINDOWS_RECEIPT if target == "windows" else RECEIPT
+
+
+def linux_architecture(requested: str | None = None) -> str:
+    architecture = requested or {"x86_64": "amd64", "amd64": "amd64",
+                                 "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine().lower())
+    if architecture not in LINUX_ARCHITECTURES:
+        raise BuildError("Linux builds require --arch amd64 or --arch arm64")
+    return architecture
+
+
+def artifact_key(target: str, arch: str | None = None) -> str:
+    if target == "linux":
+        if arch not in LINUX_ARCHITECTURES:
+            raise BuildError("Linux artifact validation requires --arch amd64 or --arch arm64")
+        return f"linux-{arch}"
+    return target
 
 
 def canonical_hash(value: dict) -> str:
@@ -44,6 +64,10 @@ def canonical_hash(value: dict) -> str:
 
 def mobile_sources(root: Path = ROOT) -> dict[str, str]:
     return selected_sources(root, "mobile")
+
+
+def linux_sources(root: Path = ROOT) -> dict[str, str]:
+    return selected_sources(root, "linux")
 
 
 def canonical_macos(value: object) -> dict:
@@ -70,7 +94,7 @@ def build_identity(selection: dict, extensions: list[dict], pins: dict, root: Pa
                          "windows_sources": windows_sources(root), "wintun": load_wintun_lock(root)})
         tooling.extend(["windows_core.py", "wintun.json"])
     else:
-        identity["mobile_sources"] = mobile_sources(root)
+        identity.update({"mobile_sources": mobile_sources(root), "linux_sources": linux_sources(root)})
         if macos is not None:
             identity["macos"] = canonical_macos(macos)
     identity["tooling"] = {name: sha256(root / "tool" / name) for name in tooling}
@@ -130,6 +154,19 @@ def host_lock(project: Path):
         yield
 
 
+def copy_verified_sources(source: Path, destination: Path, expected_sources: dict[str, str],
+                          changed_message: str) -> None:
+    """Copy a captured source snapshot without importing its standalone module."""
+    for name, digest in expected_sources.items():
+        if name in ("go.mod", "go.sum"):
+            continue
+        path = destination / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / name, path)
+        if sha256(path) != digest:
+            raise BuildError(changed_message)
+
+
 @contextlib.contextmanager
 def mobile_overlay(source: Path, registry: str, expected_sources: dict[str, str], root: Path = ROOT):
     """Replace only libbox's binding package, restoring official inputs on all exits."""
@@ -144,15 +181,8 @@ def mobile_overlay(source: Path, registry: str, expected_sources: dict[str, str]
         original.rename(backup)
         moved = True
         original.mkdir()
-        for name in expected_sources:
-            if name in ("go.mod", "go.sum"):
-                continue
-            path = root / "native/mobile" / name
-            destination = original / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, destination)
-            if sha256(destination) != expected_sources[name]:
-                raise BuildError("Mobile core source changed while capturing the build")
+        copy_verified_sources(root / "native/mobile", original, expected_sources,
+                              "Mobile core source changed while capturing the build")
         (original / "registry_selected.go").write_text(registry, encoding="utf-8")
         yield
     finally:
@@ -163,11 +193,79 @@ def mobile_overlay(source: Path, registry: str, expected_sources: dict[str, str]
         shutil.rmtree(backup_root)
 
 
+@contextlib.contextmanager
+def linux_overlay(source: Path, expected_sources: dict[str, str], root: Path = ROOT):
+    """Compile the verified helper inside the pinned module, then remove it."""
+    if linux_sources(root) != expected_sources:
+        raise BuildError("Linux helper source changed after the build identity was captured")
+    directory = source / "cmd/sing-box-flutter-linux"
+    if directory.exists() or directory.is_symlink():
+        raise BuildError("Linux helper overlay would overwrite existing core source")
+    directory.mkdir()
+    try:
+        copy_verified_sources(root / "native/linux", directory, expected_sources,
+                              "Linux helper source changed while capturing the build")
+        yield "./cmd/sing-box-flutter-linux"
+    finally:
+        shutil.rmtree(directory)
+
+
+@contextlib.contextmanager
+def linux_clash_overlay(source: Path):
+    """Make the pinned external-UI download honour Linux service cancellation."""
+    patches = {
+        "experimental/clashapi/server_resources.go": (
+            ("\tresponse, err := httpClient.Get(downloadURL)",
+             "\trequest, err := http.NewRequestWithContext(s.ctx, http.MethodGet, downloadURL, nil)\n"
+             "\tif err != nil {\n\t\treturn err\n\t}\n"
+             "\tresponse, err := httpClient.Do(request)"),
+            ("\tif err != nil {\n\t\tremoveAllInDirectory(s.ctx, s.externalUI)",
+             "\tif err != nil && s.ctx.Err() == nil {\n\t\tremoveAllInDirectory(s.ctx, s.externalUI)"),
+        ),
+        "experimental/clashapi/server.go": (
+            ("\t\ts.checkAndDownloadExternalUI()\n\t\tvar (",
+             "\t\tscope.Add(s.httpServer.Close)\n\t\ts.checkAndDownloadExternalUI()\n"
+             "\t\tif err := scope.Context().Err(); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tvar ("),
+            ("\t\tscope.Add(s.httpServer.Close)\n\t\ts.logger.Info(", "\t\ts.logger.Info("),
+        ),
+    }
+    originals = {}
+    replacements = {}
+    for name, changes in patches.items():
+        path = source / name
+        original = path.read_bytes()
+        content = original.decode()
+        for old, new in changes:
+            if content.count(old) != 1:
+                raise BuildError("Pinned Clash cancellation source differs from the reviewed input")
+            content = content.replace(old, new, 1)
+        originals[path] = original
+        replacements[path] = content.encode()
+    try:
+        for path, content in replacements.items():
+            path.write_bytes(content)
+        yield
+    finally:
+        for path, original in originals.items():
+            path.write_bytes(original)
+
+
+def linker_flags(fingerprint: str, pins: dict) -> str:
+    return ("-s -w -buildid= -checklinkname=0 "
+            f"-X github.com/sagernet/sing-box/constant.Version={pins['sing_box_version']} "
+            f"-X github.com/sagernet/sing-box/experimental/libbox.coreFingerprint={fingerprint}")
+
+
+def linux_command(go: Path, output: Path, tags: list[str], fingerprint: str,
+                  pins: dict, package: str) -> list[str | Path]:
+    return [go, "build", "-trimpath", "-buildvcs=false", "-ldflags", linker_flags(fingerprint, pins),
+            "-tags", ",".join(sorted(set(tags) | {"badlinkname", "tfogo_checklinkname0"})),
+            "-o", output, package]
+
+
 def bind_command(env: dict, output: Path, target: str, tags: list[str],
                  fingerprint: str, pins: dict, android_abis: list[str], apple_platform: str) -> list[str | Path]:
-    linker = ("-s -w -buildid= -checklinkname=0 "
-              f"-X github.com/sagernet/sing-box/constant.Version={pins['sing_box_version']} "
-              f"-X github.com/sagernet/sing-box/experimental/libbox.coreFingerprint={fingerprint}")
+    linker = linker_flags(fingerprint, pins)
     command: list[str | Path] = [Path(env["GOBIN"]) / ("gomobile.exe" if os.name == "nt" else "gomobile"),
                                "bind", "-v", "-o", output]
     if target == "android":
@@ -184,8 +282,21 @@ def bind_command(env: dict, output: Path, target: str, tags: list[str],
     return command
 
 
-def validate_artifact(path: Path, target: str) -> None:
-    if target == "android":
+def validate_artifact(path: Path, target: str, arch: str | None = None) -> None:
+    if target == "linux":
+        # Validate without executing a cross-compiled artifact on the build host.
+        artifact_key(target, arch)
+        if path.is_symlink() or not path.is_file() or not path.stat().st_mode & 0o111:
+            raise BuildError("The selected Linux helper must be a regular executable file")
+        with path.open("rb") as stream:
+            header = stream.read(64)
+        if (len(header) != 64 or header[:7] != b"\x7fELF\x02\x01\x01" or
+                int.from_bytes(header[16:18], "little") not in (2, 3) or
+                int.from_bytes(header[18:20], "little") != LINUX_ARCHITECTURES[arch] or
+                int.from_bytes(header[20:24], "little") != 1 or
+                int.from_bytes(header[52:54], "little") != 64):
+            raise BuildError("The selected Linux helper is not a valid ELF executable for the requested architecture")
+    elif target == "android":
         import zipfile
         try:
             with zipfile.ZipFile(path) as archive:
@@ -202,7 +313,8 @@ def validate_artifact(path: Path, target: str) -> None:
         raise BuildError("The selected core did not produce a valid XCFramework")
 
 
-RECIPE_METADATA = ("schema", "mode", "target", "identity", "fingerprint", "features", "tags", "artifact_sha256")
+RECIPE_METADATA = ("schema", "mode", "target", "arch", "environment", "identity", "fingerprint",
+                   "features", "tags", "artifact_sha256")
 WORK_MARKER = ".sing-box-flutter-work"
 
 
@@ -277,11 +389,14 @@ def repair_provenance(final: Path, stage: Path, metadata: dict) -> None:
 
 
 def publish_artifact(project: Path, output: Path, target: str, capabilities: dict,
-                     metadata: dict, notices: dict[str, Path]) -> dict:
+                     metadata: dict, notices: dict[str, Path], *, arch: str | None = None) -> dict:
     """Publish an immutable content-addressed artifact before updating the pointer."""
-    validate_artifact(output, target)
+    validate_artifact(output, target, arch)
+    key = artifact_key(target, arch)
     hashes = artifact_hashes(output)
     metadata = {**metadata, "artifact_sha256": hashes}
+    if target == "linux":
+        metadata["arch"] = arch
     if target == "windows":
         # One full digest binds both the recipe and per-file contents while keeping
         # ordinary Windows executable paths below the traditional MAX_PATH limit.
@@ -289,12 +404,11 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
         relative = Path(".dart_tool/sing_box_flutter/builds/windows") / content
     else:
         content = canonical_hash(hashes)
-        relative = Path(".dart_tool/sing_box_flutter/builds") / capabilities["fingerprint"] / target / content
+        relative = Path(".dart_tool/sing_box_flutter/builds") / capabilities["fingerprint"] / key / content
     final = host_path(project, relative.as_posix())
     final.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".stage-", dir=final.parent))
-    name = {"android": "libbox.aar", "apple": "Libbox.xcframework",
-            "macos": "Libbox.xcframework", "windows": "WindowsCore"}[target]
+    name = ARTIFACT_NAMES[target]
     try:
         # Stage small provenance/notice inputs even on a cache hit. Keep the first
         # provenance while it still describes these bytes; repair corrupt metadata
@@ -306,6 +420,8 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, destination)
         if final.exists():
+            if target == "linux":
+                validate_artifact(final / name, target, arch)
             if artifact_hashes(final / name) != hashes or json.loads((final / "core-capabilities.json").read_text(encoding="utf-8")) != capabilities:
                 raise BuildError("An existing content-addressed artifact was modified")
             if target == "android":
@@ -318,6 +434,9 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
                 shutil.copytree(output, stage / name, symlinks=True)
             else:
                 shutil.copyfile(output, stage / name)
+                if target == "linux":
+                    shutil.copymode(output, stage / name)
+                    validate_artifact(stage / name, target, arch)
             if artifact_hashes(stage / name) != hashes:
                 raise BuildError("Native artifact changed while copying it to the Flutter project")
             if target == "android":
@@ -329,7 +448,8 @@ def publish_artifact(project: Path, output: Path, target: str, capabilities: dic
     return {"path": (relative / name).as_posix(),
             "capabilities": (relative / "core-capabilities.json").as_posix(),
             "metadata": (relative / "native-build.json").as_posix(),
-            "sha256": hashes, "capabilities_sha256": sha256(final / "core-capabilities.json")}
+            "sha256": hashes, "capabilities_sha256": sha256(final / "core-capabilities.json"),
+            **({"arch": arch} if target == "linux" else {})}
 
 
 def update_receipt(project: Path, capabilities: dict, requested: dict, artifacts: dict,
@@ -348,6 +468,10 @@ def update_receipt(project: Path, capabilities: dict, requested: dict, artifacts
         if (artifact_hashes(host_path(project, entry["path"])) != entry["sha256"] or
                 sha256(host_path(project, entry["capabilities"])) != entry["capabilities_sha256"]):
             raise BuildError("A previously built platform artifact was modified; rebuild that platform")
+        if target.startswith("linux-"):
+            if target != artifact_key("linux", entry.get("arch")):
+                raise BuildError("A previously built Linux artifact has an invalid architecture")
+            validate_artifact(host_path(project, entry["path"]), "linux", entry["arch"])
     updated = {**capabilities, "requested_features": requested,
                "pubspec_sha256": current_pubspec,
                "artifacts": {**retained, **artifacts}}
@@ -481,8 +605,10 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--features-file", type=Path, required=True)
     result.add_argument("--project-dir", type=Path, required=True)
-    result.add_argument("--target", choices=("apple", "android", "macos", "windows", "all"), default="all",
-                        help="all builds Android + Apple + macOS; Windows is explicit")
+    result.add_argument("--target", choices=("apple", "android", "macos", "linux", "windows", "all"), default="all",
+                        help="all builds Android + Apple + macOS; Linux and Windows are explicit")
+    result.add_argument("--arch", choices=tuple(LINUX_ARCHITECTURES),
+                        help="Linux helper architecture (default: build host architecture)")
     result.add_argument("--windows-arch", choices=tuple(WINDOWS_ARCHES), default="amd64",
                         help="Standalone Windows helper architecture (default: amd64)")
     result.add_argument("--android-abis", default=",".join(ANDROID_TARGETS))
@@ -505,7 +631,10 @@ def main(argv: list[str] | None = None) -> int:
         if not (project / "pubspec.yaml").is_file():
             raise BuildError("--project-dir must name the Flutter host project containing pubspec.yaml")
         selection, pubspec_sha256, macos = load_host_build_request(args.features_file, project)
-        if "tun" not in selection["inbounds"]:
+        if args.arch is not None and args.target != "linux":
+            raise BuildError("--arch is only supported with --target linux")
+        arch = linux_architecture(args.arch) if args.target == "linux" else None
+        if args.target != "linux" and "tun" not in selection["inbounds"]:
             raise BuildError("A VPN core must include the tun inbound")
         pins = load_pins()
         extensions = load_extensions(args.wgc_config)
@@ -532,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
                               "registry_sha256": hashlib.sha256(registry.encode()).hexdigest(),
                               "receipt": receipt_for_target(targets[0]).as_posix(), "android_abis": android_abis,
                               "apple_platform": args.apple_platform, "windows_arch": args.windows_arch,
-                              "macos": macos or {"mode": "ne"},
+                              "macos": macos or {"mode": "ne"}, "arch": arch,
                               "shared_pub_cache_artifacts": False}, indent=2))
             return 0
         # The work lock protects its verified toolchain/source; the host lock
@@ -560,8 +689,14 @@ def main(argv: list[str] | None = None) -> int:
                                receipt_path=WINDOWS_RECEIPT)
                 print(f"Selectable Windows core built. Receipt: {project / WINDOWS_RECEIPT}")
                 return 0
-            mobile, tailscale = install_mobile(go, env, source, pins)
-            if args.bootstrap_only:
+            mobile = tailscale = None
+            if targets == ["linux"]:
+                env = {**env, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": arch}
+                # Linux dependencies must be resolved after both selected source
+                # overlays are installed, including for --bootstrap-only.
+            else:
+                mobile, tailscale = install_mobile(go, env, source, pins)
+            if args.bootstrap_only and targets != ["linux"]:
                 print("Verified selectable-core compiler and mobile tools are ready.")
                 return 0
             artifacts = {}
@@ -570,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
                 capabilities = {"schema": 1, "version": pins["sing_box_version"],
                                 "fingerprint": fingerprint, "features": effective["features"]}
                 stage = Path(tempfile.mkdtemp(prefix=f"selectable-{target}-", dir=cache))
-                output = stage / ("libbox.aar" if target == "android" else "Libbox.xcframework")
+                output = stage / ARTIFACT_NAMES[target]
                 try:
                     selected_registry = generate_registry(effective["features"], extensions)
                     with mobile_overlay(source, selected_registry, identity["mobile_sources"]):
@@ -580,26 +715,47 @@ def main(argv: list[str] | None = None) -> int:
                             if "wgc" in effective["features"]["endpoints"]:
                                 wgc = stack.enter_context(wgc_overlay(source, go, env, run, extensions))
                                 wgc_license = retain_wgc_license(go, env, source, cache, pins)
-                            if any("tailscale" in values for values in effective["features"].values()):
-                                tailscale = resolved_tailscale_dependency(go, env, source, pins)
-                            # Exercise the selected constructor graph and lifecycle on
-                            # the build host before cross-compiling native bindings.
-                            run([go, "test", "-tags", ",".join(effective["tags"]),
-                                 "./experimental/libbox"], cwd=source, env=env)
-                            # Compile selected bindings directly: the official builder
-                            # unconditionally enables many unrelated protocols.
-                            run(bind_command(env, output, target, effective["tags"], fingerprint,
-                                             pins, android_abis, args.apple_platform), cwd=source, env=env)
+                            # Compile directly: the official mobile builder enables
+                            # unrelated protocols. Linux uses the same selected libbox.
+                            if target == "linux":
+                                if "clash_api" in effective["features"]["api"]:
+                                    stack.enter_context(linux_clash_overlay(source))
+                                package = stack.enter_context(linux_overlay(source, identity["linux_sources"]))
+                                tailscale = prepare_dependencies(go, env, source, pins,
+                                    packages=["./experimental/libbox", package], tags=effective["tags"])
+                                if args.bootstrap_only:
+                                    print("Verified selectable-core compiler and dependencies are ready.")
+                                    return 0
+                                if platform.system() == "Linux" and linux_architecture() == arch:
+                                    run([go, "test", "-tags", ",".join(effective["tags"]),
+                                         "./experimental/libbox", package], cwd=source, env=env)
+                                run(linux_command(go, output, effective["tags"], fingerprint, pins, package),
+                                    cwd=source, env=env)
+                            else:
+                                if any("tailscale" in values for values in effective["features"].values()):
+                                    tailscale = resolved_tailscale_dependency(go, env, source, pins)
+                                # Mobile constructor tests run on the build host;
+                                # Linux-only graphs are tested on matching Linux hosts.
+                                run([go, "test", "-tags", ",".join(effective["tags"]),
+                                     "./experimental/libbox"], cwd=source, env=env)
+                                run(bind_command(env, output, target, effective["tags"], fingerprint,
+                                                 pins, android_abis, args.apple_platform), cwd=source, env=env)
                             metadata = {"schema": 1, "mode": "selectable-core", "target": target,
                                         "identity": identity, "fingerprint": fingerprint,
                                         "features": effective["features"], "tags": effective["tags"],
-                                        "toolchain": toolchain, "gomobile": mobile, "sdks": sdk_versions,
+                                        "toolchain": toolchain, "sdks": sdk_versions,
                                         "tailscale_dependency": tailscale, "wgc": wgc,
                                         "registry_sha256": hashlib.sha256(selected_registry.encode()).hexdigest()}
+                            if target == "linux":
+                                metadata.update({"arch": arch, "environment": {
+                                    "GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": "0"}})
+                            else:
+                                metadata["gomobile"] = mobile
                             notices = legal_files(wgc_license=wgc_license)
                             notices = {**notices, "LICENSE.sing-box": source / "LICENSE",
                                        "NOTICE.mobile-core": ROOT / "native/mobile/NOTICE"}
-                            artifacts[target] = publish_artifact(project, output, target, capabilities, metadata, notices)
+                            artifacts[artifact_key(target, arch)] = publish_artifact(
+                                project, output, target, capabilities, metadata, notices, arch=arch)
                 finally:
                     shutil.rmtree(stage)
             receipt_capabilities = {**capabilities, **({"macos": macos} if macos is not None else {})}

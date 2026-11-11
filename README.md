@@ -3,8 +3,8 @@
 [Project website](https://sing-box-flutter.idy.dev/) · [Feature guide](doc/core-features.md)
 
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
-as a native VPN on Android, iOS, macOS and Windows (Wintun). Select the compiled
-protocols in your host
+as a native VPN on Android, iOS, macOS, Windows (Wintun) and Linux. Select the
+compiled protocols in your host
 `pubspec.yaml` and build them from source with the pinned **Tailscale Go** compiler.
 
 ![Overview: a minimal WGC core is 62–64% smaller than the standard libbox build, the iOS app process has no Go runtime, and three steps build it from the host pubspec.yaml](doc/images/overview.svg)
@@ -26,11 +26,13 @@ Kotlin and JDK 17; the checked-in example and CI use the same Flutter toolchain.
 | macOS (NE) | `NEPacketTunnelProvider` in a separately signed host extension | macOS 12 |
 | macOS (user TUN) | Native `utun`, core-managed routes and DNS, unsandboxed administrator process | macOS 12 |
 | Windows | Bundled core process, native Wintun adapter and routes; elevated host | Windows 10, x64 / ARM64 |
+| Linux | Native TUN/routing in a bundled Go helper; ordinary-user Flutter UI | x86_64 / arm64, Flutter GTK 3 host |
 
-Flutter controls the service through method channels and receives typed connection
-events. Packet processing stays in the native service. Closing the UI or cancelling
-a stream subscription does not disconnect the VPN. On Windows the tunnel belongs
-to the running application and is closed when the app exits.
+Flutter controls the native core and receives typed connection events. Mobile uses
+method channels; Windows and Linux use private child-process pipes. Packet processing
+stays in the native core. Cancelling a stream subscription does not disconnect the
+VPN. Mobile services survive UI closure; desktop child helpers clean up when their
+owning application exits.
 
 The first release provides core version lookup, configuration validation, explicit
 VPN consent, start/stop, and connection status. It accepts complete sing-box JSON;
@@ -68,6 +70,7 @@ Install these build prerequisites:
   in [macOS setup](doc/macos-setup.md).
 - For Windows packaging: Windows with Visual Studio's Desktop development with C++
   workload, Windows SDK and CMake 3.27+. The Go core also cross-compiles from macOS/Linux.
+- For Linux: CMake 3.19+, Clang, Ninja, pkg-config and GTK 3 development headers.
 
 The builder automatically downloads and verifies the pinned **Tailscale Go**
 compiler and mobile tools. You do not need to install Go globally. The installed
@@ -95,14 +98,22 @@ bundle to a trusted administrator-owned installation directory and run the host
 as administrator to create its adapter. User-writable helper locations are rejected.
 Follow [Windows setup](doc/windows-setup.md) for packaging, UAC and lifecycle details.
 
+```bash
+dart run sing_box_flutter build --target linux --arch amd64
+```
+
+Use `--arch arm64` for ARM64 Linux. Linux requires a host feature selection.
+
 The builder generates a constructor registry and compiles a small mobile binding
 layer directly against the pinned sing-box engine. It does not link the official
-libbox RPC/profile-management layer. Windows uses a separate helper against the
-same selected engine registry, with native Wintun handling. Required dependencies, such as WGC's userspace
-network stack or Hysteria2's QUIC implementation, are resolved automatically.
+libbox RPC/profile-management layer. Windows and Linux use separate helpers against
+the same selected engine registry, with native Wintun or TUN handling. Required
+dependencies, such as WGC's userspace network stack or Hysteria2's QUIC
+implementation, are resolved automatically. Windows and Linux require explicit
+build targets; a selected `all` build includes Android, Apple and macOS.
 
 Artifacts stay in your app's `.dart_tool/sing_box_flutter/`, keyed by feature and
-source fingerprints. Gradle, CocoaPods and Windows CMake resolve that app's artifact; changing
+source fingerprints. Gradle, CocoaPods and desktop CMake resolve that app's artifact; changing
 another app's selection does not overwrite binaries in a shared pub cache.
 Rebuild the core after editing the host pubspec, then rebuild the app (on iOS,
 rerun `pod install` or let Flutter run it). Neither `flutter pub get` nor a normal
@@ -185,6 +196,14 @@ the core and rerun `pod install` after changing it. Both modes expose the same D
 API. Follow [the macOS setup guide](doc/macos-setup.md) for host targets,
 entitlements, permissions and validation.
 
+### Linux host setup
+
+Linux runs the bundled core as a child process and uses upstream TUN, routing and
+network monitoring. Userspace packet processing still needs `/dev/net/tun` and
+`CAP_NET_ADMIN`; grant capabilities to the core helper rather than running the
+Flutter UI as root. `requestPermission()` checks TUN access without opening an
+elevation dialog. See [Linux build, permissions and lifecycle](doc/linux-setup.md).
+
 ## Dart API
 
 ```dart
@@ -195,7 +214,7 @@ final vpn = SingBoxFlutter();
 await vpn.initialize(
   // Required on Windows; keep stable across updates and install-directory changes.
   applicationId: 'com.example.myapp',
-  // Required on iOS and macOS NE; omit on Android, macOS user_tun and Windows.
+  // Required on iOS and macOS NE; omit on Android, Linux, Windows and macOS user_tun.
   appGroup: 'group.com.example.app',
   providerBundleIdentifier: 'com.example.app.PacketTunnel',
   notificationTitle: 'Example VPN',
@@ -219,7 +238,7 @@ await vpn.stop();
 await subscription.cancel();
 ```
 
-Invalid JSON is rejected locally. Android and Windows checks use the native engine; iOS
+Invalid JSON is rejected locally. Android, Windows and Linux use native engine checks; iOS
 `checkConfig` performs structural/capability preflight in the Go-free app, with
 full engine validation deferred to extension startup. A successful iOS preflight
 does not guarantee startup. Validation and connection failures surface as
@@ -285,8 +304,8 @@ bootstraps the pinned compiler automatically; it never substitutes a system Go
 installation. Toolchains and source caches live under `.build/` inside the package
 checkout, while selected artifacts stay in the host app's `.dart_tool/`.
 
-The pub package must retain `native/mobile/`, `native/windows/`, `native/wgc/`,
-`windows/`, `tool/`, pin files and
+The pub package must retain `native/mobile/`, `native/windows/`, `native/linux/`,
+`native/wgc/`, `windows/`, `linux/`, `tool/`, pin files and
 license notices so hosts can build from source. Build caches and native outputs
 are excluded from Git and pub.dev. Temporary CI binary archives are validation
 inputs, not 0.3.0 GitHub Release SDK assets. See [native build details](doc/native-build.md)

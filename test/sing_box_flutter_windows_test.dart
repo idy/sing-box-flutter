@@ -300,11 +300,15 @@ void main() {
       });
     }
 
-    test('device image paths preserve spaces and Unicode directories', () async {
+    test('device image paths preserve spaces and Unicode directories',
+        () async {
       const path =
           r'\\.\Global\GLOBALROOT\Device\HarddiskVolume123\Program Files\VPN 中\sing_box_flutter_core.exe';
-      messenger.setMockMethodCallHandler(channel, (call) async =>
-          call.method == 'acquire' ? {'lease': 71, 'executable': path} : null);
+      messenger.setMockMethodCallHandler(
+          channel,
+          (call) async => call.method == 'acquire'
+              ? {'lease': 71, 'executable': path}
+              : null);
       process.onRequest = process.respondNormally;
       expect(await verified().getVersion(), '1.14.4');
       expect(launches, [path]);

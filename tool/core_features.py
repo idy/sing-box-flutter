@@ -63,7 +63,7 @@ def selection_hash(selection: dict) -> str:
 
 def resolve_features(selection: dict, target: str) -> dict:
     requested = canonicalize(selection)
-    if target not in {"android", "apple", "ios", "macos", "windows"}:
+    if target not in {"android", "apple", "ios", "macos", "linux", "windows"}:
         raise FeatureError(f"Unsupported core target: {target}")
     unsupported = {
         "inbounds": {"redirect", "tproxy"},
@@ -71,7 +71,11 @@ def resolve_features(selection: dict, target: str) -> dict:
         "dns": {"resolved"},
         "services": {"resolved", "usbip-server", "usbip-client"},
     }
-    if target in {"apple", "ios", "macos", "windows"}:
+    if target == "linux":
+        unsupported["inbounds"].clear()
+        unsupported["dns"].clear()
+        unsupported["services"].remove("resolved")
+    if target in {"apple", "ios", "macos", "linux", "windows"}:
         unsupported["outbounds"].add("naive")
     reasons = {
         "redirect": "Linux transparent interception is unavailable to the mobile VPN host",
@@ -81,7 +85,8 @@ def resolve_features(selection: dict, target: str) -> dict:
         "tor": "the host does not provide the Tor helper executable/process integration",
         "usbip-server": "the host does not implement USB/IP device access or native bridges",
         "usbip-client": "the host does not implement USB/IP device access or native bridges",
-        "naive": "Apple Naive outbound requires an incompatible Cronet linker setup",
+        "naive": ("Linux source builds use CGO_ENABLED=0 and do not bundle the Cronet native library"
+                  if target == "linux" else "Apple Naive outbound requires an incompatible Cronet linker setup"),
     }
     for category, denied in unsupported.items():
         invalid = denied.intersection(requested[category])
@@ -138,7 +143,7 @@ def generate_registry(features: dict, extensions: list[dict] | None = None, *,
     Extension records are validated by wgc_overlay.load_extensions; their package
     imports install WGC transport factories via init, without extra endpoints.
     """
-    if target not in {"android", "apple", "ios", "macos", "windows"}:
+    if target not in {"android", "apple", "ios", "macos", "linux", "windows"}:
         raise FeatureError(f"Unsupported registry target: {target}")
     features = canonicalize(features)
     prefix = "github.com/sagernet/sing-box/"

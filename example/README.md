@@ -133,6 +133,34 @@ The plugin does not elevate the app or install a privileged helper. Follow
 [macOS setup](../doc/macos-setup.md) for the complete requirements. The protocol
 profile switcher preserves the chosen macOS mode.
 
+## Linux
+
+Build the selected core and the GTK application on Linux:
+
+```bash
+dart run sing_box_flutter build --target linux --arch amd64
+```
+
+```bash
+flutter build linux --release
+```
+
+Grant TUN capabilities to the helper, then run the app as your ordinary user:
+
+```bash
+sudo setcap cap_net_admin,cap_net_raw+ep build/linux/x64/release/bundle/lib/sing_box_flutter/sing-box-core
+```
+
+```bash
+build/linux/x64/release/bundle/sing_box_flutter_example
+```
+
+For ARM64, select `--arch arm64` and use `build/linux/arm64/`. Reapply capabilities
+after rebuilding/replacing the helper. `requestPermission` checks TUN access
+without an elevation dialog. Exiting the app closes the Linux core and removes
+its TUN/routes; cancelling a status subscription does not. See the
+[Linux host guide](../doc/linux-setup.md) for dependencies and packaging.
+
 ## iOS
 
 The checked-in Xcode project contains an embedded PacketTunnel target and uses
