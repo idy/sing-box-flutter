@@ -322,7 +322,13 @@ void FilesystemTests() {
         native.substr(0, native.find(L'\\', std::wstring(L"\\Device\\").size()));
     Require(DefineDosDeviceW(DDD_RAW_TARGET_PATH, unused_drive, native_volume.c_str()) != FALSE,
             "create whole-volume DOS alias fixture");
-    auto remapped = CoreLaunchLease::Acquire(std::wstring(unused_drive) + executable.substr(2));
+    const char* rejection = nullptr;
+    auto remapped = CoreLaunchLease::Acquire(
+        std::wstring(unused_drive) + executable.substr(2), &rejection);
+    if (!remapped) {
+      std::fprintf(stderr, "DOS alias rejection stage: %s\n",
+                   rejection ? rejection : "unspecified native failure");
+    }
     Require(remapped != nullptr, "whole-volume DOS alias verifies all ancestors");
     Require(DefineDosDeviceW(0, unused_drive, root.c_str()) != FALSE,
             "remap the authorized DOS drive to a directory");

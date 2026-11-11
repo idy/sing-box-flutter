@@ -214,7 +214,8 @@ bool PinNamespaceLink(NtOpenLink open, NtQueryLink query,
          TrustedDescriptor(descriptor, mapping, READ_CONTROL | kLinkQuery);
 }
 
-std::wstring VolumeRoot(HANDLE handle) {
+std::wstring VolumeRoot(HANDLE handle, const char** rejection_stage) {
+  if (rejection_stage) *rejection_stage = "volume GUID root";
   // Reject UNC, mapped network drives and SUBST aliases (which hide ancestors).
   // A GUID is useful for verifying the root, but CreateProcessW rejects the
   // extended \\?\Volume{GUID} image form with ERROR_INVALID_PARAMETER.
@@ -238,6 +239,7 @@ std::wstring VolumeRoot(HANDLE handle) {
       return {};
     }
   }
+  if (rejection_stage) *rejection_stage = "local fixed ACL volume";
   DWORD flags = 0;
   if (!GetVolumeInformationByHandleW(handle, nullptr, 0, nullptr, nullptr,
                                      &flags, nullptr, 0) ||
@@ -251,6 +253,7 @@ std::wstring VolumeRoot(HANDLE handle) {
   // retained by Acquire. The Win32 device (\\.\) spelling uses normal Win32 path
   // processing rather than assuming CreateProcess accepts every extended file-I/O
   // namespace. Its image and current-directory compatibility is tested on Windows.
+  if (rejection_stage) *rejection_stage = "native volume root";
   std::array<wchar_t, 128> device{};
   const DWORD length = GetFinalPathNameByHandleW(
       handle, device.data(), static_cast<DWORD>(device.size()), VOLUME_NAME_NT);
@@ -360,7 +363,12 @@ std::unique_ptr<CoreLaunchLease> CoreLaunchLease::AcquireForHost() {
 }
 
 std::unique_ptr<CoreLaunchLease> CoreLaunchLease::Acquire(
-    const std::wstring& path) {
+    const std::wstring& path, const char** rejection_stage) {
+  const auto reject = [rejection_stage](const char* stage) {
+    if (rejection_stage) *rejection_stage = stage;
+    return std::unique_ptr<CoreLaunchLease>{};
+  };
+  if (rejection_stage) *rejection_stage = "path validation";
   // Do not normalize aliases: reject them. Only a local drive-absolute path is
   // accepted as input; the output names the pinned device in the global namespace.
   if (path.size() < 4 ||
@@ -406,7 +414,7 @@ std::unique_ptr<CoreLaunchLease> CoreLaunchLease::Acquire(
   map_attributes.Attributes = OBJ_CASE_INSENSITIVE;
   HANDLE device_map = nullptr;
   if (open_directory(&device_map, kDirectoryQuery, &map_attributes) < 0) {
-    return nullptr;
+    return reject("DOS device-map open");
   }
   lease->handles_.push_back(device_map);
   const auto map = ObjectName(query_name, device_map);
@@ -415,35 +423,40 @@ std::unique_ptr<CoreLaunchLease> CoreLaunchLease::Acquire(
   // exact device directory, not global fallback that a new local Global can hide.
   // Object directories have no filesystem-style DELETE_CHILD right: their owner
   // cannot replace an existing protected link without DELETE on that link.
-  if (map.empty() ||
-      !PinNamespaceLink(open_link, query_link, L"\\??\\Global", L"\\GLOBAL??",
-                        lease->handles_) ||
-      _wcsicmp(ObjectName(query_name, lease->handles_.back()).c_str(),
-               (map + L"\\Global").c_str()) != 0 ||
-      !PinNamespaceLink(open_link, query_link, L"\\GLOBAL??\\GLOBALROOT", L"",
+  if (map.empty()) return reject("DOS device-map name");
+  if (!PinNamespaceLink(open_link, query_link, L"\\??\\Global", L"\\GLOBAL??",
                         lease->handles_)) {
-    return nullptr;
+    return reject("Global namespace link target/permissions");
+  }
+  if (_wcsicmp(ObjectName(query_name, lease->handles_.back()).c_str(),
+               (map + L"\\Global").c_str()) != 0) {
+    return reject("Global link is not in the effective device map");
+  }
+  if (!PinNamespaceLink(open_link, query_link, L"\\GLOBAL??\\GLOBALROOT", L"",
+                        lease->handles_)) {
+    return reject("GLOBALROOT namespace link target/permissions");
   }
   HANDLE current = OpenPinned(open, nullptr, L"\\??\\" + path.substr(0, 3), true);
-  if (current == INVALID_HANDLE_VALUE) return nullptr;
+  if (current == INVALID_HANDLE_VALUE) return reject("volume root open");
   lease->handles_.push_back(current);
-  if (!VerifyPinned(current, true, true)) return nullptr;
-  lease->executable_ = VolumeRoot(current);
+  if (!VerifyPinned(current, true, true)) return reject("volume root permissions/identity");
+  lease->executable_ = VolumeRoot(current, rejection_stage);
   if (lease->executable_.empty()) return nullptr;
   for (size_t index = 0; index < parts.size(); ++index) {
     const bool directory = index + 1 < parts.size();
     current = OpenPinned(open, current, parts[index], directory);
-    if (current == INVALID_HANDLE_VALUE) return nullptr;
+    if (current == INVALID_HANDLE_VALUE) return reject("path component open");
     lease->handles_.push_back(current);
     if (!VerifyPinned(current, directory, index + 2 < parts.size())) {
-      return nullptr;
+      return reject("path component permissions/identity");
     }
     lease->executable_ += parts[index];
     if (directory) lease->executable_ += L'\\';
   }
   // Dart supplies a quoted command line with a NULL lpApplicationName, for which
   // CreateProcessW documents a MAX_PATH limit on the image name.
-  if (lease->executable_.size() >= MAX_PATH) return nullptr;
+  if (lease->executable_.size() >= MAX_PATH) return reject("image path length");
+  if (rejection_stage) *rejection_stage = nullptr;
   return lease;
 }
 

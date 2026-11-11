@@ -26,7 +26,9 @@ class CoreLaunchLease {
 
   // Also used by the standalone Windows policy tests. Applies the same policy
   // to an explicit helper path; the method-channel handler does not expose it.
-  static std::unique_ptr<CoreLaunchLease> Acquire(const std::wstring& path);
+  // Tests may request a fixed rejection-stage label; never includes paths/data.
+  static std::unique_ptr<CoreLaunchLease> Acquire(
+      const std::wstring& path, const char** rejection_stage = nullptr);
 
  private:
   CoreLaunchLease() = default;
