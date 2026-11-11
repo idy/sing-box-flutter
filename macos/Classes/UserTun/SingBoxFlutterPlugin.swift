@@ -4,6 +4,9 @@ import Foundation
 
 /// Channels attach to the process-owned service. Cancelling events or detaching
 /// a Flutter engine never closes the standalone core or changes its configuration.
+#if SINGBOX_SWIFT_PACKAGE
+@objc(SBFSelectedController)
+#endif
 public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var eventSink: FlutterEventSink?
     private var observer: UUID?

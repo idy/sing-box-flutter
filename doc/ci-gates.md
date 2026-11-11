@@ -25,8 +25,10 @@ Ordinary host tests skip this opt-in test. Adding the Windows job does not chang
 the repository's configured required-check list.
 
 The native workflow starts for every pull request. Its `changes` job determines
-whether native inputs changed. If so, validation, both Android/Apple builds and
-combined release-input verification must all succeed. If not, those jobs are
+whether native inputs changed. If so, validation, Android/Apple builds, both macOS
+backends, the iOS/macOS SPM host builds and combined release-input verification
+must all succeed. SPM builds also verify Go ownership and reject modified capability
+bytes during an otherwise unchanged incremental build. If not, those jobs are
 skipped and the gate reports that no native build was required. A failed change
 comparison, missing decision, failed/cancelled build or unexpected job skip fails
 the gate. This avoids leaving documentation-only PRs waiting for a path-filtered

@@ -346,6 +346,44 @@ jobs:
         if: matrix.mode == 'ne'
         run: python3 -B tool/check_core_profiles.py --target macos --race
 
+  spm:
+    needs: validate
+    if: github.event_name == 'pull_request' || inputs.target == 'all' || inputs.target == 'apple' || inputs.target == 'macos'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ios
+            mode: ne
+          - platform: macos
+            mode: ne
+          - platform: macos
+            mode: user_tun
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - uses: subosito/flutter-action@fd55f4c5af5b953cc57a2be44cb082c8f6635e8e # v2.21.0
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+      - name: Use CocoaPods Ruby for example target setup
+        run: |
+          brew list --versions cocoapods >/dev/null || brew install cocoapods
+          printf '%s/bin\n' "$(brew --prefix ruby)" >> "$GITHUB_PATH"
+          printf 'GEM_HOME=%s/libexec\n' "$(brew --prefix cocoapods)" >> "$GITHUB_ENV"
+      - name: Build actual SPM host and verify Go ownership
+        run: python3 -I -B tool/check_apple_spm.py --platform '${{ matrix.platform }}' --mode '${{ matrix.mode }}'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spm-${{ matrix.platform }}-${{ matrix.mode }}
+          path: .build/apple-spm-*/spm-build-report.json
+          if-no-files-found: ignore
+
   release-inputs:
     if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'all')
     needs: build
@@ -399,7 +437,7 @@ jobs:
   gate:
     name: Native CI gate
     if: always() && github.event_name == 'pull_request'
-    needs: [changes, validate, build, macos, release-inputs]
+    needs: [changes, validate, build, macos, spm, release-inputs]
     runs-on: ubuntu-24.04
     steps:
       - name: Require successful native validation when needed
@@ -409,16 +447,17 @@ jobs:
           VALIDATE_RESULT: ${{ needs.validate.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
+          SPM_RESULT: ${{ needs.spm.result }}
           RELEASE_RESULT: ${{ needs.release-inputs.result }}
         run: |
           python3 -I - <<'PY'
           import os
           if os.environ['CHANGES_RESULT'] != 'success':
               raise SystemExit('Native input detection did not succeed')
-          results = [os.environ[name] for name in ('VALIDATE_RESULT', 'BUILD_RESULT', 'MACOS_RESULT', 'RELEASE_RESULT')]
+          results = [os.environ[name] for name in ('VALIDATE_RESULT', 'BUILD_RESULT', 'MACOS_RESULT', 'SPM_RESULT', 'RELEASE_RESULT')]
           if os.environ['NATIVE_REQUIRED'] == 'true':
               if any(result != 'success' for result in results):
-                  raise SystemExit('Native validation, Android/iOS/macOS builds and release-input checks must pass')
+                  raise SystemExit('Native validation, Android/iOS/macOS/SPM builds and release-input checks must pass')
               print('Native CI gate passed: all native checks succeeded')
           elif os.environ['NATIVE_REQUIRED'] == 'false':
               if any(result != 'skipped' for result in results):

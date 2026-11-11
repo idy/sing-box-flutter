@@ -5,7 +5,7 @@ ne_mode = artifacts.mode == 'ne'
 
 Pod::Spec.new do |s|
   s.name             = 'sing_box_flutter'
-  s.version          = '0.1.0'
+  s.version          = '0.3.1'
   s.summary          = 'Native sing-box integration for Flutter macOS and Packet Tunnel extensions.'
   s.description      = <<-DESC
 The host pubspec selects a Go-free Network Extension controller or an in-process

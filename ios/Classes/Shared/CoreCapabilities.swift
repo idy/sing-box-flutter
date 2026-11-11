@@ -23,6 +23,11 @@ struct CoreCapabilities: Decodable {
     }
 
     static func load() throws -> CoreCapabilities {
+        #if SINGBOX_SWIFT_PACKAGE
+        // The always-run SwiftPM build plugin validates the installed selection
+        // before emitting this metadata into each consuming module.
+        return try decode(SBFSelectedCapabilities.data)
+        #else
         // CocoaPods copies the Shared resource bundle into each consuming app/extension.
         let owners = [Bundle(for: CapabilitiesBundleMarker.self), Bundle.main]
         for owner in owners {
@@ -33,6 +38,7 @@ struct CoreCapabilities: Decodable {
             }
         }
         throw TunnelFailure.coreMismatch
+        #endif
     }
 
     func supports(_ group: String, _ type: String) -> Bool { features[group]?.contains(type) == true }

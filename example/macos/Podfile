@@ -32,7 +32,7 @@ target 'Runner' do
   end
 end
 
-if macos_mode == 'ne'
+if macos_mode == 'ne' && !SingBoxFlutterExampleSPM.enabled?(__dir__)
   target 'PacketTunnel' do
     use_frameworks!
     pod 'sing_box_flutter/PacketTunnel', :path => 'Flutter/ephemeral/.symlinks/plugins/sing_box_flutter/macos'

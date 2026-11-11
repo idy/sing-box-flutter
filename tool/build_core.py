@@ -760,6 +760,13 @@ def main(argv: list[str] | None = None) -> int:
                     shutil.rmtree(stage)
             receipt_capabilities = {**capabilities, **({"macos": macos} if macos is not None else {})}
             update_receipt(project, receipt_capabilities, selection, artifacts, pubspec_sha256)
+            # SwiftPM packages are derived per host, never in the shared pub cache.
+            # The generated build plugin revalidates this exact installed selection.
+            from apple_spm import prepare as prepare_apple_spm
+            receipt = json.loads((project / RECEIPT).read_text(encoding="utf-8"))
+            for target in ("apple", "macos"):
+                if target in artifacts:
+                    prepare_apple_spm(project, receipt, target)
         print(f"Selectable core built. Receipt: {project / RECEIPT}")
         return 0
     except (BuildError, OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
