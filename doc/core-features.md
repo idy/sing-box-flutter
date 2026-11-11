@@ -1,4 +1,4 @@
-# Selectable mobile core
+# Selectable native core
 
 Version 0.3.0 uses source builds selected by the **host Flutter application's**
 `pubspec.yaml`. Add `sing_box_flutter: ^0.3.0` under `dependencies` and place the
@@ -39,6 +39,14 @@ dart run sing_box_flutter build --target apple
 ```bash
 dart run sing_box_flutter build --target android
 ```
+
+```bash
+dart run sing_box_flutter build --target linux --arch amd64
+```
+
+Linux supports `amd64` and `arm64`, defaults to the build host's architecture,
+and requires a host selection. It builds a static Go helper, bundled through
+CMake; see [Linux setup](linux-setup.md) for GTK prerequisites and TUN permissions.
 
 Use `--dry-run` to inspect the selection, resolved tags, fingerprint and output
 receipt without downloading Go or compiling. The CLI reads the canonical host
@@ -131,7 +139,8 @@ stacks, optional VPN endpoints and services. Tailscale retains the upstream mobi
 Selecting the Tailscale endpoint does not enable those omitted subsystems.
 
 Linux transparent interception (`redirect`/`tproxy`) and systemd-resolved integration
-are unavailable through these Android/iOS/macOS hosts. Native bridge/helper-process and
+are available on Linux and unavailable through Android/iOS/macOS hosts. Linux Naive
+outbound is rejected because the static helper does not bundle Cronet. Native bridge/helper-process and
 USB/IP selections also fail when their required host facilities are unavailable.
 Apple Naive outbound is rejected because the pinned Cronet archive has unresolved
 symbols in a real NetworkExtension link. OpenVPN/OpenConnect have selectable tags;
@@ -187,14 +196,14 @@ available when Gradle or CocoaPods consumes selected cores; set `SINGBOX_PYTHON`
 if the interpreter is not discoverable. This validation does not download tools or
 compile Go, and legacy standard-artifact builds retain their previous path.
 
-The JNI/Go binary embeds the same fingerprint as its bundled capabilities manifest.
-Android checks it during initialization; the iOS extension checks it before core
+The native binary embeds the same fingerprint as its bundled capabilities manifest.
+Android and Linux check it during initialization; the iOS extension checks it before core
 startup. Go compiler/module verification and WGC extension checksum rules remain
 in effect. Local transport extensions use the existing `--wgc-config` manifest.
 
 Different host apps never overwrite each other's native artifacts in the shared
 pub cache. Build caches/toolchains remain in the plugin checkout's ignored `.build`.
-The pub package retains the `native/mobile/`, `native/wgc/` and `tool/` sources and
+The pub package retains the `native/mobile/`, `native/linux/`, `native/wgc/` and `tool/` sources and
 pins needed for source builds, while excluding these caches and generated binaries.
 
 Hosts without a `sing_box_flutter.core` block retain the legacy standard source

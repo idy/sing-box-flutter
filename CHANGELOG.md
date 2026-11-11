@@ -1,3 +1,10 @@
+## Unreleased
+
+- Add Linux x86_64/arm64 support with a bundled, source-built Go helper, native
+  TUN/routing, configuration validation and connection events.
+- Add Linux capabilities checks, automatic cleanup on application exit, source
+  receipt validation in CMake, a GTK example and Linux CI/runtime smoke checks.
+
 ## 0.3.0
 
 - Select compiled protocols, endpoints, DNS transports, TLS features, APIs and

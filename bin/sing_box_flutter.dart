@@ -13,6 +13,7 @@ Build from source (0.3.0):
   dart run sing_box_flutter build --target android
   dart run sing_box_flutter build --target apple
   dart run sing_box_flutter build --target macos
+  dart run sing_box_flutter build --target linux --arch amd64
 
 Add sing_box_flutter.core to your host pubspec.yaml to select features.
 Select macOS with sing_box_flutter.macos.mode: ne (default) or user_tun.
@@ -30,6 +31,8 @@ install: download and verify historical native release artifacts (Python 3.11+).
 Without a core block, mobile targets retain the legacy standard build/install path.
 A macos-only block builds source defaults for --target macos; run mobile targets
 separately. Mixed legacy/source selections require an explicit platform target.
+Linux requires a feature selection and source build; --arch defaults to the host
+architecture (amd64 or arm64). Linux cross builds work from macOS without an SDK.
 Selected cores require build; install cannot satisfy a host feature selection.
 Pass --help after a subcommand for its options.''');
     return;
@@ -59,11 +62,23 @@ Pass --help after a subcommand for its options.''');
     final invocation = resolveHostArguments(arguments.skip(1).toList(),
         callerDirectory: Directory.current, environment: Platform.environment);
     forwarded = invocation.arguments;
+    final linux = _targetArgument(forwarded) == 'linux';
+    if (linux && arguments.first == 'build') script = 'build_core.py';
     // Help must work even if the host selection is incomplete or unsupported.
     if (!forwarded.contains('--help') && !forwarded.contains('-h')) {
+      if (linux && arguments.first == 'install') {
+        throw const FormatException(
+            'Linux has no legacy release installer. Select sing_box_flutter.core '
+            'in the host pubspec.yaml and use dart run sing_box_flutter build --target linux.');
+      }
       final snapshot = invocation.pubspec == null
           ? null
           : readCoreBuildSnapshot(invocation.pubspec!);
+      if (linux && (snapshot == null || !snapshot.hasCoreSelection)) {
+        throw const FormatException(
+            'Linux source builds require sing_box_flutter.core in the host pubspec.yaml. '
+            'Add a feature selection, then run dart run sing_box_flutter build --target linux.');
+      }
       final selected = snapshot != null &&
           (snapshot.hasCoreSelection || _macosOnlySourceTarget(forwarded));
       if (snapshot != null && selected) {
@@ -161,6 +176,19 @@ bool _macosOnlySourceTarget(List<String> arguments) {
         'and build --target macos separately.');
   }
   return target == 'macos';
+}
+
+String? _targetArgument(List<String> arguments) {
+  String? target;
+  for (var index = 0; index < arguments.length; index++) {
+    final argument = arguments[index];
+    if (argument.startsWith('--target=')) {
+      target = argument.substring('--target='.length);
+    } else if (argument == '--target' && index + 1 < arguments.length) {
+      target = arguments[++index];
+    }
+  }
+  return target;
 }
 
 /// Resolves CLI-owned host selectors while preserving legacy tool arguments.

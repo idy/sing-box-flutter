@@ -59,6 +59,28 @@ the app directory; direct `python3 tool/...` examples in this document run from 
 plugin directory, including a local copy of the pub package. Python must execute
 these checked-in scripts rather than scripts found inside a downloaded archive.
 
+## Linux core and Flutter bundle
+
+Linux uses the same selected registry and verified Tailscale Go inputs, compiled
+with `CGO_ENABLED=0` into a standalone executable rather than a gomobile library.
+It requires a host feature selection. Build with `--target linux --arch amd64` or
+`--arch arm64`; the helper can be cross-compiled from macOS or Linux. Building the
+Flutter GTK application requires Linux, CMake 3.19+, Clang, Ninja, pkg-config and
+GTK 3 development headers.
+
+The build records architecture and validates the ELF executable, source identity
+and artifact hashes. CMake verifies the host receipt and bundles the executable
+and capabilities manifest under `lib/sing_box_flutter/`. It does not silently build
+a missing core. When Clash API is selected, a checked, reversible source overlay
+binds its external-UI HTTP download to the service context and registers listener
+cleanup before startup. This preserves prompt cancellation without changing the
+pinned upstream revision; the overlay is covered by the build-tool fingerprint
+and restored after compilation, including on failure.
+
+Give TUN capabilities only to the installed helper, then launch
+the UI as an ordinary user. See [Linux setup](linux-setup.md) for commands,
+permissions and the process lifecycle.
+
 ## Compiler verification and source inputs
 
 All Go compilation uses **Tailscale's Go fork**, including selections without

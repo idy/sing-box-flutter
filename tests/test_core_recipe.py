@@ -7,12 +7,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tool"))
-from build_core import build_identity, canonical_hash
+from build_core import (RECEIPT, build_identity, canonical_hash, host_path,
+                        publish_artifact, update_receipt)
 from core_features import canonicalize, resolve_features
 from core_recipe import verify_current_recipe
 from native_common import BuildError, ROOT, load_pins, sha256
+from native_fixtures import linux_executable
 
 
 class CurrentRecipe(unittest.TestCase):
@@ -33,6 +36,8 @@ class CurrentRecipe(unittest.TestCase):
         shutil.copytree(ROOT / "native/wgc", self.plugin / "native/wgc")
         (self.plugin / "native/mobile").mkdir()
         (self.plugin / "native/mobile/runtime.go").write_text("package libbox\n// recipe A\n")
+        (self.plugin / "native/linux").mkdir()
+        (self.plugin / "native/linux/main.go").write_text("package main\n// recipe A\n")
         selection = canonicalize({})
         pins = load_pins(self.plugin)
         identity = build_identity(selection, [], pins, self.plugin)
@@ -116,8 +121,50 @@ class CurrentRecipe(unittest.TestCase):
         write_json(cache / "core-capabilities.json", {**capabilities, "features": {}})
         self.assertEqual(subprocess.run(command, capture_output=True, text=True).returncode, 1)
 
+    def test_linux_cache_hit_repairs_every_rejected_recipe_field(self):
+        selection = self.receipt["requested_features"]
+        resolved = resolve_features(selection, "linux")
+        capabilities = {key: self.receipt[key] for key in ("schema", "version", "fingerprint")}
+        capabilities["features"] = resolved["features"]
+        metadata = {**self.metadata, "target": "linux", "arch": "amd64",
+                    "environment": {"GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"},
+                    "features": resolved["features"], "tags": resolved["tags"]}
+        output = self.host.parent / "sing-box-core"
+        linux_executable(output)
+
+        def publish():
+            return publish_artifact(self.host, output, "linux", capabilities, metadata, {}, arch="amd64")
+
+        entry = publish()
+        update_receipt(self.host, capabilities, selection, {"linux-amd64": entry})
+        receipt = json.loads((self.host / RECEIPT).read_text())
+        path = host_path(self.host, entry["metadata"])
+        recorded = json.loads(path.read_text())
+        corruptions = (("schema", 0), ("mode", "other"), ("target", "apple"), ("arch", "arm64"),
+                       ("environment", None), ("environment", {"GOOS": "darwin", "GOARCH": "amd64", "CGO_ENABLED": "1"}),
+                       ("identity", {}), ("fingerprint", "b" * 64), ("features", {}), ("tags", []))
+        for key, value in corruptions:
+            with self.subTest(key=key, value=value):
+                corrupt = {**recorded, key: value}
+                if value is None:
+                    del corrupt[key]
+                path.write_text(json.dumps(corrupt))
+                with self.assertRaises(BuildError):
+                    verify_current_recipe(self.host, receipt, corrupt, target="linux", arch="amd64", root=self.plugin)
+                with mock.patch("build_core.shutil.copyfile", wraps=shutil.copyfile) as copying:
+                    self.assertEqual(publish(), entry)
+                self.assertFalse(any(Path(call.args[0]) == output for call in copying.call_args_list))
+                repaired = json.loads(path.read_text())
+                self.assertEqual(repaired, recorded)
+                verify_current_recipe(self.host, receipt, repaired, target="linux", arch="amd64", root=self.plugin)
+
     def test_runtime_source_edit_is_stale_without_pubspec_change(self):
         (self.plugin / "native/mobile/runtime.go").write_text("package libbox\n// recipe B\n")
+        with self.assertRaisesRegex(BuildError, "stale"):
+            self.verify()
+
+    def test_linux_helper_edit_is_stale_without_pubspec_change(self):
+        (self.plugin / "native/linux/main.go").write_text("package main\n// recipe B\n")
         with self.assertRaisesRegex(BuildError, "stale"):
             self.verify()
 

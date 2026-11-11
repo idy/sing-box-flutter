@@ -3,7 +3,7 @@
 [Project website](https://sing-box-flutter.idy.dev/) · [Feature guide](doc/core-features.md)
 
 An independent Flutter plugin for running [sing-box](https://github.com/SagerNet/sing-box)
-as a native VPN on Android, iOS and macOS. Select the compiled protocols in your host
+as a native VPN on Android, iOS, macOS and Linux. Select the compiled protocols in your host
 `pubspec.yaml` and build them from source with the pinned **Tailscale Go** compiler.
 
 ![Overview: a minimal WGC core is 62–64% smaller than the standard libbox build, the iOS app process has no Go runtime, and three steps build it from the host pubspec.yaml](doc/images/overview.svg)
@@ -24,10 +24,13 @@ Kotlin and JDK 17; the checked-in example and CI use the same Flutter toolchain.
 | iOS | `NEPacketTunnelProvider` in a separately signed host extension | iOS 15 |
 | macOS (NE) | `NEPacketTunnelProvider` in a separately signed host extension | macOS 12 |
 | macOS (user TUN) | Native `utun`, core-managed routes and DNS, unsandboxed administrator process | macOS 12 |
+| Linux | Native TUN/routing in a bundled Go helper; ordinary-user Flutter UI | x86_64 / arm64, Flutter GTK 3 host |
 
-Flutter controls the service through method channels and receives typed connection
-events. Packet processing stays in the native service. Closing the UI or cancelling
-a stream subscription does not disconnect the VPN.
+Flutter controls the native core and receives typed connection events. Mobile uses
+method channels; Linux uses private child-process pipes. Packet processing stays
+in the native core. Cancelling a stream subscription does not disconnect the VPN.
+Mobile services survive UI closure; the Linux helper cleans up when its Flutter
+engine/application exits.
 
 The first release provides core version lookup, configuration validation, explicit
 VPN consent, start/stop, and connection status. It accepts complete sing-box JSON;
@@ -61,6 +64,7 @@ Install these build prerequisites:
 - For Android: OpenJDK 17, the Android SDK and NDK `28.0.13004108`.
 - For iOS: macOS with Xcode and its iPhoneOS/simulator SDKs, plus CocoaPods for the
   Flutter host integration.
+- For Linux: CMake 3.19+, Clang, Ninja, pkg-config and GTK 3 development headers.
 
 The builder automatically downloads and verifies the pinned **Tailscale Go**
 compiler and mobile tools. You do not need to install Go globally. The installed
@@ -77,6 +81,12 @@ dart run sing_box_flutter build --target android
 ```bash
 dart run sing_box_flutter build --target apple
 ```
+
+```bash
+dart run sing_box_flutter build --target linux --arch amd64
+```
+
+Use `--arch arm64` for ARM64 Linux. Linux requires a host feature selection.
 
 The builder generates a constructor registry and compiles a small mobile binding
 layer directly against the pinned sing-box engine. It does not link the official
@@ -167,6 +177,14 @@ the core and rerun `pod install` after changing it. Both modes expose the same D
 API. Follow [the macOS setup guide](doc/macos-setup.md) for host targets,
 entitlements, permissions and validation.
 
+### Linux host setup
+
+Linux runs the bundled core as a child process and uses upstream TUN, routing and
+network monitoring. Userspace packet processing still needs `/dev/net/tun` and
+`CAP_NET_ADMIN`; grant capabilities to the core helper rather than running the
+Flutter UI as root. `requestPermission()` checks TUN access without opening an
+elevation dialog. See [Linux build, permissions and lifecycle](doc/linux-setup.md).
+
 ## Dart API
 
 ```dart
@@ -175,7 +193,7 @@ import 'package:sing_box_flutter/sing_box_flutter.dart';
 final vpn = SingBoxFlutter();
 
 await vpn.initialize(
-  // Required on iOS and macOS NE; omit on Android and macOS user_tun.
+  // Required on iOS and macOS NE; omit on Android, Linux and macOS user_tun.
   appGroup: 'group.com.example.app',
   providerBundleIdentifier: 'com.example.app.PacketTunnel',
   notificationTitle: 'Example VPN',
@@ -199,7 +217,7 @@ await vpn.stop();
 await subscription.cancel();
 ```
 
-Invalid JSON is rejected locally. Android checks use the native engine; iOS
+Invalid JSON is rejected locally. Android and Linux checks use the native engine; iOS
 `checkConfig` performs structural/capability preflight in the Go-free app, with
 full engine validation deferred to extension startup. A successful iOS preflight
 does not guarantee startup. Validation and connection failures surface as
