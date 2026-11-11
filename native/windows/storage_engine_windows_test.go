@@ -414,7 +414,14 @@ func TestManagedCacheRecreatesImportedMediumObjectWithRetainedRights(t *testing.
 			ctx, working, managed := managedCacheFixture(t)
 			outside := t.TempDir()
 			original := filepath.Join(outside, "imported.db")
-			path := filepath.Join(managed, "profile.db")
+			// A native-created descendant is not yet leased by the owner. Model
+			// import there without asking Windows to reopen an already pinned
+			// managed parent for FILE_ADD_FILE during the administrator's move.
+			imported := filepath.Join(managed, "imported")
+			if err := os.Mkdir(imported, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(imported, "profile.db")
 			medium := unsafeStorageDescriptor(t, "medium")
 			directories, err := openDirectoryHierarchy(outside)
 			if err != nil {
@@ -466,14 +473,8 @@ func TestManagedCacheRecreatesImportedMediumObjectWithRetainedRights(t *testing.
 				windows.CloseHandle(rename)
 				t.Fatal(err)
 			}
-			directories, err = openDirectoryHierarchy(managed)
-			if err != nil {
-				windows.CloseHandle(rename)
-				t.Fatal(err)
-			}
-			err = renameStorageFile(rename, directories.last(), "profile.db", false)
-			directories.close()
 			windows.CloseHandle(rename)
+			err = os.Rename(original, path)
 			if err != nil {
 				t.Fatalf("administrator could not import fixture into live managed storage: %v", err)
 			}
@@ -670,6 +671,20 @@ func TestFreshCacheHandoffRejectsPathSubstitutionWhileWriterKeepsIdentity(t *tes
 	}
 	defer directories.close()
 	parent := directories.last()
+	parentName, err := windows.UTF16PtrFromString(managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutation, err := windows.CreateFile(parentName, windows.FILE_WRITE_DATA,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err == nil {
+		windows.CloseHandle(mutation)
+		t.Fatal("cache publication parent admitted a mutation handle")
+	}
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("parent mutation probe did not exercise no-write sharing: %v", err)
+	}
 	staging, err := directories.openObject(parent, "handoff.tmp", true, private, storageObjectOptions{staging: true, fresh: true})
 	if err != nil {
 		t.Fatal(err)
@@ -683,7 +698,7 @@ func TestFreshCacheHandoffRejectsPathSubstitutionWhileWriterKeepsIdentity(t *tes
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(writer)
-	if err := renameStorageFile(staging, parent, "published.db", false); err != nil {
+	if err := renameStorageFile(staging, "published.db", false); err != nil {
 		t.Fatal(err)
 	}
 	directories.release(staging)
@@ -693,7 +708,7 @@ func TestFreshCacheHandoffRejectsPathSubstitutionWhileWriterKeepsIdentity(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := renameStorageFile(replacement, parent, "published.db", true); err != nil {
+	if err := renameStorageFile(replacement, "published.db", true); err != nil {
 		t.Fatal(err)
 	}
 	directories.release(replacement)

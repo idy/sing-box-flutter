@@ -410,7 +410,7 @@ func (d *directoryHandles) publishNativeFile(parent windows.Handle, name string,
 	if err != nil || writerIdentity != freshIdentity {
 		return 0, errDirectories
 	}
-	if err := renameStorageFile(staging, parent, name, snapshot != 0); err != nil {
+	if err := renameStorageFile(staging, name, snapshot != 0); err != nil {
 		return 0, err
 	}
 	published = true
@@ -483,8 +483,10 @@ func reopenStorageWriter(handle windows.Handle) (windows.Handle, error) {
 }
 
 // FILE_RENAME_INFORMATION_EX uses an ULONG flags field and natural HANDLE
-// alignment (both supported architectures are 64-bit). Use Nt's relative target
-// directory directly; do not reopen a pathname with directory mutation access.
+// alignment (both supported architectures are 64-bit). A simple filename with a
+// NULL RootDirectory renames within the source's existing directory. Supplying
+// the pinned parent as RootDirectory would make IopOpenLinkOrRenameTarget reopen
+// it with FILE_WRITE_DATA, conflicting with its deliberate no-write sharing.
 type storageRenameInformation struct {
 	Flags          uint32
 	RootDirectory  windows.Handle
@@ -492,8 +494,8 @@ type storageRenameInformation struct {
 	FileName       [1]uint16
 }
 
-func renameStorageFile(source, parent windows.Handle, name string, replace bool) error {
-	if parent == 0 || !safeDirectoryComponent(name) {
+func renameStorageFile(source windows.Handle, name string, replace bool) error {
+	if source == 0 || !safeDirectoryComponent(name) {
 		return errDirectories
 	}
 	encoded, err := windows.UTF16FromString(name)
@@ -506,7 +508,7 @@ func renameStorageFile(source, parent windows.Handle, name string, replace bool)
 	words := make([]uint64, (offset+length+7)/8)
 	buffer := unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8)
 	info := (*storageRenameInformation)(unsafe.Pointer(&buffer[0]))
-	info.RootDirectory, info.FileNameLength = parent, length
+	info.FileNameLength = length // RootDirectory stays NULL: same-directory rename.
 	if replace {
 		info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
 	}

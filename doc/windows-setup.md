@@ -231,8 +231,10 @@ from earlier administrator hardening cannot be excluded by a sharing probe. The
 helper verifies the live root's volume/file identity and each cache descendant,
 without rewriting an explicit path. On first admission per live storage owner,
 an unknown existing cache is copied through a real read handle that excludes
-writers into a fresh object protected at creation. A handle-relative replacement
-preserves the bytes while retiring the old object; retained old metadata rights
+writers into a fresh object protected at creation. A simple-name rename through
+that source handle replaces the old object within its pinned directory, without
+reopening the protected parent for write access. This preserves the bytes;
+retained old metadata rights
 cannot modify the admitted identity. Independent handles preserve the fresh file
 identity across publication and final pinning. The owner retains keepers across
 core/check cleanup, so concurrent checks reuse the same fresh identity; a new
@@ -284,8 +286,9 @@ mapped child's file identity is checked before it runs. These are Windows runtim
 checks; passing Dart tests on another platform does not establish compatibility.
 The tests require elevation and fail if their secure fixtures
 cannot be created; they do not bypass the production policy for CI.
-The stderr remapping regression runs in a child with an unnamed private NT device
-directory and a process-specific map. It never changes the logon-session mapping;
+The stderr remapping regression runs in a child with an ordinary device directory
+inside an unnamed private NT container and a process-specific map. It needs no
+shadow directory or DOS drive lookup after switching. It never changes the logon-session mapping;
 parent `NUL` checks cover the live child, panic exit and forced termination without
 Go cleanup. Windows CI also packages the Flutter example and enables
 `SING_BOX_FLUTTER_WINTUN_SMOKE=1` for a real Wintun adapter lifecycle test. That test

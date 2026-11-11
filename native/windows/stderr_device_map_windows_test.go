@@ -11,9 +11,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// A test child owns an unnamed directory and a process-specific device map.
-// Nothing is inserted into the logon session's DOS directory. Kernel references
-// disappear on child exit, including forced termination before Go cleanup runs.
+// The child owns an unnamed container and an ordinary named directory below it.
+// Only that child uses the directory as its device map. No name is added to the
+// shared object namespace, and process exit releases the complete private tree.
 func installStderrPrivateDeviceMap(capture *os.File) (err error) {
 	var buffer [32768]uint16
 	size, err := windows.GetFinalPathNameByHandle(windows.Handle(capture.Fd()), &buffer[0], uint32(len(buffer)), 2)
@@ -27,7 +27,7 @@ func installStderrPrivateDeviceMap(capture *os.File) (err error) {
 	if err != nil {
 		return err
 	}
-	globalName, err := windows.NewNTUnicodeString(`\GLOBAL??`)
+	directoryName, err := windows.NewNTUnicodeString("Devices")
 	if err != nil {
 		return err
 	}
@@ -36,10 +36,9 @@ func installStderrPrivateDeviceMap(capture *os.File) (err error) {
 		return err
 	}
 	ntdll := windows.NewLazySystemDLL("ntdll.dll")
-	openDirectory := ntdll.NewProc("NtOpenDirectoryObject")
-	createDirectory := ntdll.NewProc("NtCreateDirectoryObjectEx")
+	createDirectory := ntdll.NewProc("NtCreateDirectoryObject")
 	createLink := ntdll.NewProc("NtCreateSymbolicLinkObject")
-	for _, procedure := range []*windows.LazyProc{openDirectory, createDirectory, createLink} {
+	for _, procedure := range []*windows.LazyProc{createDirectory, createLink} {
 		if err := procedure.Find(); err != nil {
 			return err
 		}
@@ -50,37 +49,35 @@ func installStderrPrivateDeviceMap(capture *os.File) (err error) {
 		}
 		return nil
 	}
-	var global, directory, link windows.Handle
+	var container, directory, link windows.Handle
 	keep := false
 	defer func() {
 		if !keep {
-			for _, handle := range []windows.Handle{link, directory, global} {
+			for _, handle := range []windows.Handle{link, directory, container} {
 				if handle != 0 {
 					windows.CloseHandle(handle)
 				}
 			}
 		}
 	}()
+	const directoryAllAccess = 0x000f000f
+	// ProcessDeviceMap uses an ordinary directory, not an anonymous shadow
+	// directory created with NtCreateDirectoryObjectEx. A private container gives
+	// the map a named leaf without exposing either object through a global path.
+	result, _, _ := createDirectory.Call(uintptr(unsafe.Pointer(&container)), directoryAllAccess, 0)
+	if err := statusError(result); err != nil {
+		return fmt.Errorf("create private container: %w", err)
+	}
 	attributes := windows.OBJECT_ATTRIBUTES{
-		ObjectName: globalName,
-		Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		RootDirectory: container,
+		ObjectName:    directoryName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
 	}
 	attributes.Length = uint32(unsafe.Sizeof(attributes))
-	const directoryQueryTraverse = 3
-	// Keep pointer conversions at the annotated syscall Call sites, not in a
-	// uintptr-forwarding helper that could lose pointer liveness on stack growth.
-	result, _, _ := openDirectory.Call(uintptr(unsafe.Pointer(&global)), directoryQueryTraverse,
+	result, _, _ = createDirectory.Call(uintptr(unsafe.Pointer(&directory)), directoryAllAccess,
 		uintptr(unsafe.Pointer(&attributes)))
 	if err := statusError(result); err != nil {
-		return fmt.Errorf("open global fallback directory: %w", err)
-	}
-	// NULL ObjectAttributes creates an unnamed private directory. The read-only
-	// shadow preserves system drive lookup without changing any global entry.
-	const directoryAllAccess = 0x000f000f
-	result, _, _ = createDirectory.Call(uintptr(unsafe.Pointer(&directory)), directoryAllAccess,
-		0, uintptr(global), 0)
-	if err := statusError(result); err != nil {
-		return fmt.Errorf("create unnamed device directory: %w", err)
+		return fmt.Errorf("create private device directory: %w", err)
 	}
 	attributes.RootDirectory = directory
 	attributes.ObjectName = linkName
@@ -90,23 +87,14 @@ func installStderrPrivateDeviceMap(capture *os.File) (err error) {
 	if err := statusError(result); err != nil {
 		return fmt.Errorf("create private NUL link: %w", err)
 	}
-	// Set uses the HANDLE member. Some supported native interfaces require the
-	// complete union size (the query member is ULONG + UCHAR[32], aligned to 8).
-	information := struct {
-		Directory windows.Handle
-		Reserved  [32]byte
-	}{Directory: directory}
+	// The setter consumes a HANDLE, not the larger query union. After switching,
+	// this child needs no DOS drives: the capture link uses its native device path
+	// and the production sink opens \Device\Null directly.
 	err = windows.NtSetInformationProcess(windows.CurrentProcess(), windows.ProcessDeviceMap,
-		unsafe.Pointer(&information), uint32(unsafe.Sizeof(information.Directory)))
-	if err == windows.STATUS_INFO_LENGTH_MISMATCH {
-		err = windows.NtSetInformationProcess(windows.CurrentProcess(), windows.ProcessDeviceMap,
-			unsafe.Pointer(&information), uint32(unsafe.Sizeof(information)))
-	}
+		unsafe.Pointer(&directory), uint32(unsafe.Sizeof(directory)))
 	if err != nil {
 		return fmt.Errorf("set child process device map: %w", err)
 	}
-	// Deliberately retain these handles until this child exits. No parent or
-	// logon-session alias exists to restore, even if the child is killed.
-	keep = true
+	keep = true // Retain all three handles until panic or forced process exit.
 	return nil
 }
