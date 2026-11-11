@@ -9,7 +9,7 @@ slice_paths = artifacts.slice_paths
 
 Pod::Spec.new do |s|
   s.name             = 'sing_box_flutter'
-  s.version          = '0.1.0'
+  s.version          = '0.3.1'
   s.summary          = 'Native sing-box VPN integration for Flutter and iOS Packet Tunnel extensions.'
   s.description      = <<-DESC
 Flutter channels manage VPN preferences and an App Group configuration handoff.

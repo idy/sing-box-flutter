@@ -8,6 +8,9 @@ import Foundation
 import NetworkExtension
 
 /// Owns system preferences and Flutter channels, never the running VPN service.
+#if SINGBOX_SWIFT_PACKAGE
+@objc(SBFSelectedController)
+#endif
 public final class SingBoxFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private let validationQueue = DispatchQueue(label: "dev.idy.sing_box_flutter.validation")
     private var commands: [() -> Void] = []

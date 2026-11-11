@@ -23,7 +23,8 @@ selects source features globally. This is not a runtime selector: changing the
 mode requires rebuilding the native core and Flutter app. Unknown modes or keys
 fail explicitly.
 
-Install Python 3.11+, Git, Xcode with its macOS SDK, and CocoaPods. Resolve packages
+Install Python 3.11+, Git, Xcode with its macOS SDK, and Swift Package Manager or
+CocoaPods. Resolve packages
 and compile the universal arm64/x86_64 core from the host directory:
 
 ```bash
@@ -35,10 +36,14 @@ dart run sing_box_flutter build --target macos
 ```
 
 The selected framework, capabilities and integrity receipt live in the host's
-`.dart_tool/sing_box_flutter/`. CocoaPods verifies the current sources, pubspec,
-backend fingerprint and artifact hashes. Rebuild and rerun `pod install` after
-changing the mode or core selection. Flutter's Swift Package Manager integration
-must be disabled for this CocoaPods plugin, as in the checked-in example.
+`.dart_tool/sing_box_flutter/`. Both integration methods verify the current
+sources, pubspec, backend fingerprint and artifact hashes. For SPM, follow
+[Apple SPM integration](apple-spm.md); the core build prepares the host-local
+controller and, in NE mode, PacketTunnel package. Rebuild the core and app after
+changing the mode or selection.
+
+The CocoaPods steps below remain supported with SPM disabled, as in the checked-in
+example. Rerun `pod install` after rebuilding that integration's core.
 
 ## Network Extension (`ne`)
 

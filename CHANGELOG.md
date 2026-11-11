@@ -1,4 +1,11 @@
-## Unreleased
+## 0.3.1
+
+- Support Swift Package Manager on iOS and macOS alongside CocoaPods.
+- Generate host-local packages for selected native cores, preserving the Go-free
+  Network Extension app and separate PacketTunnel target, plus macOS user TUN.
+- Validate the installed core selection before every Swift package compilation.
+
+## 0.3.0
 
 - Add Windows x64/ARM64 support with an app-owned native sing-box process and
   official Wintun adapter, retaining the public Dart VPN API.
@@ -10,9 +17,6 @@
   TUN/routing, configuration validation and connection events.
 - Add Linux capabilities checks, automatic cleanup on application exit, source
   receipt validation in CMake, a GTK example and Linux CI/runtime smoke checks.
-
-## 0.3.0
-
 - Select compiled protocols, endpoints, DNS transports, TLS features, APIs and
   services through the host application's `sing_box_flutter.core` pubspec block.
 - Build a thin mobile binding with only selected constructors using the pinned

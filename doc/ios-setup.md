@@ -1,6 +1,7 @@
 # iOS setup
 
-The iOS backend requires iOS 15 or later and CocoaPods. A signed host app and a
+The iOS backend requires iOS 15 or later and Swift Package Manager or CocoaPods.
+A signed host app and a
 separately signed Packet Tunnel Network Extension are required for a real VPN.
 The plugin does not create an extension target or provision Apple capabilities.
 
@@ -32,16 +33,14 @@ build a simulator target. Do not substitute another libbox release: its generate
 method signatures and platform protocol can change. Build artifacts are installed
 separately from the source package.
 
-This package supports CocoaPods only. Its generated SwiftPM template referenced a
-missing `FlutterFramework` package and has been removed. Disable Swift Package
-Manager for the host project, for example in the host `pubspec.yaml` on Flutter
-versions supporting project configuration:
+For Swift Package Manager, follow [Apple SPM integration](apple-spm.md). The
+selected core build prepares a host-local package with a Go-free controller and
+separate Flutter-free PacketTunnel product. Enable SPM in the host pubspec and
+link `sing-box-flutter-packet-tunnel` only to the extension target.
 
-```yaml
-flutter:
-  config:
-    enable-swift-package-manager: false
-```
+The CocoaPods steps below remain supported. Set
+`flutter.config.enable-swift-package-manager: false` in the host pubspec when
+using them, including historical standard-core installations.
 
 ## Add and sign the extension target
 

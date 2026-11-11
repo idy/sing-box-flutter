@@ -2,7 +2,7 @@ name: sing_box_flutter
 description: >-
   Native sing-box VPN plugin for Flutter on Android, iOS, macOS, Windows and Linux, with WGC,
   WireGuard and Tailscale endpoints and reproducible Tailscale Go builds.
-version: 0.3.0
+version: 0.3.1
 homepage: https://github.com/idy/sing-box-flutter
 repository: https://github.com/idy/sing-box-flutter
 issue_tracker: https://github.com/idy/sing-box-flutter/issues

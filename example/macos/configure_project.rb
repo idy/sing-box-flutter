@@ -3,6 +3,7 @@
 require 'date'
 require 'yaml'
 require 'xcodeproj'
+require_relative '../ios/configure_spm'
 
 module SingBoxFlutterMacOSExample
   def self.mode(directory = __dir__)
@@ -26,9 +27,9 @@ module SingBoxFlutterMacOSExample
     runner = project.targets.find { |target| target.name == 'Runner' }
     raise 'Runner target is missing.' unless runner
 
-    # The Flutter template enables SwiftPM; this example uses CocoaPods so the
-    # extension can select the Flutter-free PacketTunnel subspec separately.
-    project.objects.to_a.each do |object|
+    spm_enabled = SingBoxFlutterExampleSPM.enabled?(directory)
+    # Flutter owns the aggregate package; remove it only for CocoaPods hosts.
+    (spm_enabled ? [] : project.objects.to_a).each do |object|
       if object.isa == 'PBXBuildFile' && object.display_name.include?('FlutterGeneratedPluginSwiftPackage')
         object.remove_from_project
       elsif object.isa == 'XCSwiftPackageProductDependency' && object.product_name == 'FlutterGeneratedPluginSwiftPackage'
@@ -140,6 +141,7 @@ module SingBoxFlutterMacOSExample
         embed.remove_from_project if embed.files.empty?
       end
     end
+    SingBoxFlutterExampleSPM.configure_extension(project, extension, enabled: spm_enabled && ne_mode)
     project.save
     puts "Configured macOS #{selected_mode}: #{ne_mode ? 'sandboxed Runner with embedded PacketTunnel' : 'unsandboxed Runner without an embedded extension'}."
     selected_mode

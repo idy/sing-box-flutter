@@ -49,7 +49,7 @@ Add the dependency and a top-level feature selection to your **Flutter app's**
 
 ```yaml
 dependencies:
-  sing_box_flutter: ^0.3.0
+  sing_box_flutter: ^0.3.1
 
 sing_box_flutter:
   core:
@@ -61,12 +61,12 @@ sing_box_flutter:
 
 Install these build prerequisites:
 
-- Python 3.11+ and Git. Python is also used when Gradle or CocoaPods validates a
-  selected core; no third-party Python packages are needed.
+- Python 3.11+ and Git. Python is also used when Gradle, SPM or CocoaPods validates
+  a selected core; no third-party Python packages are needed.
 - For Android: OpenJDK 17, the Android SDK and NDK `28.0.13004108`.
-- For iOS: macOS with Xcode and its iPhoneOS/simulator SDKs, plus CocoaPods for the
-  Flutter host integration.
-- For macOS: Xcode and CocoaPods, plus the backend-specific host setup described
+- For iOS: macOS with Xcode and its iPhoneOS/simulator SDKs, using SPM or CocoaPods
+  for the Flutter host integration. See [Apple SPM setup](doc/apple-spm.md).
+- For macOS: Xcode and SPM or CocoaPods, plus the backend-specific host setup described
   in [macOS setup](doc/macos-setup.md).
 - For Windows packaging: Windows with Visual Studio's Desktop development with C++
   workload, Windows SDK and CMake 3.27+. The Go core also cross-compiles from macOS/Linux.
@@ -113,7 +113,7 @@ implementation, are resolved automatically. Windows and Linux require explicit
 build targets; a selected `all` build includes Android, Apple and macOS.
 
 Artifacts stay in your app's `.dart_tool/sing_box_flutter/`, keyed by feature and
-source fingerprints. Gradle, CocoaPods and desktop CMake resolve that app's artifact; changing
+source fingerprints. Gradle, Apple SPM/CocoaPods and desktop CMake resolve that app's artifact; changing
 another app's selection does not overwrite binaries in a shared pub cache.
 Rebuild the core after editing the host pubspec, then rebuild the app (on iOS,
 rerun `pod install` or let Flutter run it). Neither `flutter pub get` nor a normal
@@ -160,7 +160,8 @@ Android runs the service in the foreground with a persistent notification.
 A Flutter plugin cannot create or sign the host application's Network Extension.
 Add a Packet Tunnel extension target, embed it in the app, and configure matching
 App Group entitlements on the app and extension. The extension depends on the
-plugin's `PacketTunnel` CocoaPods subspec and does not embed Flutter.
+plugin's `PacketTunnel` CocoaPods subspec or the host-local SPM
+`sing-box-flutter-packet-tunnel` product. It does not embed Flutter.
 
 Follow [the complete iOS setup guide](doc/ios-setup.md) before running the app.
 A physical device is required to test VPN traffic; the simulator can validate
@@ -191,9 +192,9 @@ process and lets sing-box create `utun`, routes and DNS directly. It requires an
 unsandboxed process already running with administrator privileges; this plugin
 does not install a privileged helper or elevate the Flutter app.
 
-The selection controls CocoaPods source/link dependencies at build time. Rebuild
-the core and rerun `pod install` after changing it. Both modes expose the same Dart
-API. Follow [the macOS setup guide](doc/macos-setup.md) for host targets,
+The selection controls SPM or CocoaPods source/link dependencies at build time.
+Rebuild the core after changing it, then rebuild the app (rerun `pod install` for
+CocoaPods). Both modes expose the same Dart API. Follow [the macOS setup guide](doc/macos-setup.md) for host targets,
 entitlements, permissions and validation.
 
 ### Linux host setup

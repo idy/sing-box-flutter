@@ -1,6 +1,9 @@
 platform :ios, '15.0'
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 
+require_relative 'configure_spm'
+SingBoxFlutterExampleSPM.configure
+
 project 'Runner', {
   'Debug' => :debug,
   'Profile' => :release,
@@ -28,9 +31,11 @@ target 'Runner' do
   end
 end
 
-target 'PacketTunnel' do
-  use_frameworks!
-  pod 'sing_box_flutter/PacketTunnel', :path => '.symlinks/plugins/sing_box_flutter/ios'
+unless SingBoxFlutterExampleSPM.enabled?(__dir__)
+  target 'PacketTunnel' do
+    use_frameworks!
+    pod 'sing_box_flutter/PacketTunnel', :path => '.symlinks/plugins/sing_box_flutter/ios'
+  end
 end
 
 post_install do |installer|
