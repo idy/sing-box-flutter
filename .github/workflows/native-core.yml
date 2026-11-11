@@ -156,6 +156,12 @@ jobs:
           # selects 28.0 explicitly; Gradle selects its pinned 28.2 via ndkVersion.
           printf 'ANDROID_NDK=\nANDROID_NDK_HOME=\nANDROID_NDK_ROOT=\nANDROID_NDK_LATEST_HOME=\n' >> "$GITHUB_ENV"
           df -h "$GITHUB_WORKSPACE"
+      - name: Inspect CocoaPods iOS project before core compilation
+        if: steps.select.outputs.enabled == 'true' && matrix.target == 'apple'
+        run: |
+          mkdir -p .build/logs
+          xcodebuild -project example/ios/Runner.xcodeproj -list -json \
+            > .build/logs/cocoapods-project.json
       - name: Build pinned core with Tailscale Go
         if: steps.select.outputs.enabled == 'true'
         shell: bash

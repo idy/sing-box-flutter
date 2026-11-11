@@ -1,9 +1,11 @@
 """Fixture editing and real Xcode project wiring without Flutter/Go builds."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -43,6 +45,22 @@ class AppleSPMExample(unittest.TestCase):
             for name in ('Pods', 'ephemeral', '.dart_tool', 'build'):
                 self.assertFalse((host / 'macos' / name).exists())
 
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcodebuild'),
+                         'Xcode project discovery requires macOS')
+    def test_cocoapods_discovery_ignores_the_adjacent_spm_facade(self):
+        # Preserve the real repository layout: SPM-only fixture copies placed
+        # under .build made ../../ios/sing_box_flutter absent and hid this bug.
+        facade = self.root / 'ios/sing_box_flutter'
+        shutil.copytree(ROOT / 'ios/sing_box_flutter', facade)
+        self.assertFalse((self.root / 'SingBoxFlutterHost').exists())
+        project = self.root / 'example/ios/Runner.xcodeproj'
+        result = subprocess.run(['xcodebuild', '-project', str(project), '-list', '-json'],
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        targets = json.loads(result.stdout)['project']['targets']
+        self.assertIn('Runner', targets)
+        self.assertIn('PacketTunnel', targets)
+
     def test_rejects_ios_user_tun_and_unrecognized_pubspec(self):
         with self.assertRaises(ValueError):
             smoke.create_fixture(self.root, 'ios', 'user_tun')
@@ -67,8 +85,15 @@ aggregate = project.new(Xcodeproj::Project::Object::XCLocalSwiftPackageReference
 aggregate.relative_path = 'Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage'
 project.root_object.package_references << aggregate
 fixed_id = '78A318202AECB46A00862997'
-fixed_file = project.objects_by_uuid.fetch(fixed_id)
-raise 'fixture no longer reproduces orphan' unless fixed_file.product_ref.nil? && fixed_file.file_ref.nil?
+# Seed the historical orphan explicitly. The checked-in CocoaPods project
+# should not retain a broken build-file reference just to supply this fixture.
+fixed_file = project.objects_by_uuid[fixed_id]
+unless fixed_file
+  fixed_file = Xcodeproj::Project::Object::PBXBuildFile.new(project, fixed_id)
+  fixed_file.initialize_defaults
+  runner.frameworks_build_phase.files << fixed_file
+end
+raise 'fixture does not reproduce orphan' unless fixed_file.product_ref.nil? && fixed_file.file_ref.nil?
 if aggregate_state == 'valid'
   product = project.new(Xcodeproj::Project::Object::XCSwiftPackageProductDependency)
   product.product_name = 'FlutterGeneratedPluginSwiftPackage'
