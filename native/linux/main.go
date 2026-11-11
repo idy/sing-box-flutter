@@ -11,6 +11,7 @@ import (
 	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync"
@@ -116,7 +117,11 @@ func run() int {
 	signal.Ignore(syscall.SIGPIPE)
 	dataDir := flag.String("data-dir", "", "private absolute state directory")
 	temporary := flag.Bool("temporary-state", false, "remove owned temporary state after shutdown")
+	worker := flag.Bool("temporary-state-worker", false, "internal supervised temporary-state worker")
 	flag.Parse()
+	if *worker && !*temporary {
+		return 2
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
@@ -124,21 +129,16 @@ func run() int {
 	if err != nil {
 		return 2
 	}
-	var state *temporaryStateDirectory
-	if *temporary {
-		state, err = pinTemporaryStateDirectory(statePath)
-		if err != nil {
-			return 2
-		}
-		defer state.Close()
+	if *temporary && !*worker {
+		// Re-exec the same inode, including after an installation path update.
+		// Configuration continues to travel only through inherited pipes.
+		child := exec.Command("/proc/self/exe", "--data-dir", statePath, "--temporary-state", "--temporary-state-worker")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		return superviseTemporaryState(statePath, os.Stdin, signals, child)
 	}
 	if err := libbox.Setup(&libbox.SetupOptions{
 		BasePath: statePath, WorkingPath: statePath, TempPath: filepath.Join(statePath, "tmp"),
 	}); err != nil {
-		// No engine or worker has been created yet.
-		if state != nil {
-			_ = state.Remove()
-		}
 		return 2
 	}
 	s := &server{
@@ -146,20 +146,12 @@ func run() int {
 		create: newCoreService, prepare: prepareStartConfig, permission: tunPermission,
 	}
 	s.serve(os.Stdin, signals)
-	if state != nil && s.finishTemporaryState(state) != nil {
+	// A supervised worker never removes state itself: even a failed Close or
+	// an uncooperative goroutine cannot access it after the supervisor's Wait.
+	if *temporary && s.waitForWorkers() != nil {
 		return 2
 	}
 	return 0
-}
-
-func (s *server) finishTemporaryState(state *temporaryStateDirectory) error {
-	defer state.Close()
-	// Timeout or failed Close leaves lifetime uncertain. Release descriptors
-	// without deleting state, then let main terminate any remaining workers.
-	if err := s.waitForWorkers(); err != nil {
-		return err
-	}
-	return state.Remove()
 }
 
 func (s *server) serve(input io.Reader, signals <-chan os.Signal) {

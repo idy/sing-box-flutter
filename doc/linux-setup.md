@@ -125,16 +125,20 @@ are allowed; nonsticky group/other-writable ancestors and foreign-owned ancestor
 are rejected before any directory is created. A safe symlinked temporary parent is
 supported. The newly created child is passed to the helper without resolving it,
 so replacing that child with a symlink cannot hide the replacement from the helper.
-The directory is allocated lazily when launching the helper. The helper tracks
-its identity and removes its contents and the directory after parent EOF or
-SIGINT/SIGTERM, once native shutdown and all startup workers finish. Symlink
-targets outside the directory are preserved. If launching the helper fails, the
-backend removes the unused empty directory. A replacement helper gets fresh
-fallback state after the old process exits; normal stop/start on the same helper
-reuses its state. The final startup-worker drain is limited to two seconds. If a
-worker ignores cancellation or native close fails, the helper releases its pins
-and exits without deleting potentially active state. Forced termination such as
-SIGKILL can also prevent cleanup.
+The directory is allocated lazily when launching the helper. In temporary-state
+mode a lightweight supervisor pins its identity and starts the engine as a
+separate worker using the same executable. Configuration still travels only
+through private pipes. After EOF or SIGINT/SIGTERM, the supervisor waits for the
+worker process to exit, then removes the original owned tree. This also reclaims
+state after a failed native close, worker-drain timeout or worker crash; live
+workers never have their state deleted. Symlink targets outside the directory
+are preserved, and replaced directories are rejected. If launching the helper
+fails, the backend removes the unused empty directory. A replacement helper gets
+fresh fallback state after the supervisor finishes; normal stop/start reuses the
+same state. The worker's final drain is limited to two seconds, and the supervisor
+allows at most five seconds after EOF or a shutdown signal before terminating a
+stuck worker and reaping it. Killing the supervisor itself with SIGKILL can prevent
+cleanup. Persistent-state helpers run directly without a supervisor.
 This fallback does not provide persistence across helper replacements or
 application launches. Set a valid `HOME` or
 `XDG_DATA_HOME` when persistent caches or other state are required. State paths

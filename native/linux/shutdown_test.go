@@ -78,7 +78,7 @@ func TestFinalShutdownBoundsRetiredWorkerAndPreservesState(t *testing.T) {
 				}
 				await(t, served, "EOF/SIGTERM did not stop request admission")
 				started := time.Now()
-				if err := s.finishTemporaryState(state); !errors.Is(err, context.DeadlineExceeded) {
+				if err := s.waitForWorkers(); !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("uncooperative worker must time out, got %v", err)
 				}
 				if time.Since(started) > finalWorkerDrainTimeout+2*time.Second {
@@ -87,8 +87,8 @@ func TestFinalShutdownBoundsRetiredWorkerAndPreservesState(t *testing.T) {
 				if contents, err := os.ReadFile(filepath.Join(path, "identity")); err != nil || string(contents) != "preserved" {
 					t.Fatalf("timed-out worker state was deleted: %q, %v", contents, err)
 				}
-				if len(state.directories) != 0 {
-					t.Fatal("shutdown timeout did not release directory pins")
+				if len(state.directories) == 0 {
+					t.Fatal("worker drain closed supervisor directory pins")
 				}
 			})
 		}
@@ -104,18 +104,18 @@ func TestFinalShutdownPreservesFailedCleanupState(t *testing.T) {
 	if err := s.close(); !errors.Is(err, errCleanupFailed) {
 		t.Fatalf("fixture cleanup unexpectedly succeeded: %v", err)
 	}
-	if err := s.finishTemporaryState(state); !errors.Is(err, errCleanupFailed) {
+	if err := s.waitForWorkers(); !errors.Is(err, errCleanupFailed) {
 		t.Fatalf("shutdown forgot failed native cleanup: %v", err)
 	}
 	if contents, err := os.ReadFile(filepath.Join(path, "identity")); err != nil || string(contents) != "preserved" {
 		t.Fatalf("failed-cleanup state was deleted: %q, %v", contents, err)
 	}
-	if len(state.directories) != 0 {
-		t.Fatal("failed cleanup did not release directory pins")
+	if len(state.directories) == 0 {
+		t.Fatal("failed worker cleanup closed supervisor directory pins")
 	}
 }
 
-func TestFinalShutdownRemovesSuccessfullyClosedState(t *testing.T) {
+func TestWorkerDrainLeavesStateOwnedBySupervisor(t *testing.T) {
 	var output lockedOutput
 	s := testServer(&output, &fakeService{})
 	state, path := ownedShutdownState(t)
@@ -123,10 +123,10 @@ func TestFinalShutdownRemovesSuccessfullyClosedState(t *testing.T) {
 	if err := s.close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.finishTemporaryState(state); err != nil {
+	if err := s.waitForWorkers(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		t.Fatalf("successful shutdown left temporary state: %v", err)
+	if _, err := os.Lstat(path); err != nil || len(state.directories) == 0 {
+		t.Fatalf("worker discarded supervisor-owned state before process exit: %v", err)
 	}
 }

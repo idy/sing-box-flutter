@@ -68,7 +68,11 @@ replacement after process exit.
 Subscriptions and widgets do not own the Linux connection. Flutter engine/app
 exit closes stdin, which stops the helper and releases the TUN/routes. This differs
 from the persistent mobile service lifecycle. Unexpected helper exit fails pending
-requests, emits an error and requires initialization before reconnection. See
+requests, emits an error and requires initialization before reconnection. In
+temporary-state mode, a helper supervisor forwards the private pipe protocol and
+waits for the engine process to exit before reaping identity-checked state. This
+also covers failed cleanup and uncooperative workers without deleting files while
+they remain in use. Persistent state does not use a supervisor. See
 [Linux setup](linux-setup.md).
 
 ## Native core
