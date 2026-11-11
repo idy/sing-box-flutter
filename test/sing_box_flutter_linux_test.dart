@@ -59,6 +59,14 @@ class FakeCoreProcess implements Process {
             emit({'type': 'status', 'state': state});
           case 'stop':
             if (failCleanup) {
+              if (cleanupStatusFirst) {
+                emit({
+                  'type': 'status',
+                  'state': 'error',
+                  'code': 'cleanup_failed',
+                  'message': 'Replace the helper before reconnecting.',
+                });
+              }
               emit({
                 'id': request['id'],
                 'error': {
@@ -98,6 +106,7 @@ class FakeCoreProcess implements Process {
   bool permission = true;
   bool rejectConfig = false;
   bool failCleanup = false;
+  bool cleanupStatusFirst = false;
   bool holdRequests = false;
   int kills = 0;
 
@@ -143,7 +152,7 @@ void main() {
     child = FakeCoreProcess();
     plugin = LinuxSingBoxFlutter.forTesting(
       bundleDirectory: bundle.path,
-      dataDirectory: '${bundle.path}/state',
+      dataDirectory: p.join(bundle.path, 'state'),
       startProcess: (path, args) async {
         executable = path;
         arguments = args;
@@ -735,23 +744,46 @@ void main() {
     });
   }
 
-  test('cleanup failure retires the helper before reconnecting', () async {
+  for (final statusFirst in [false, true]) {
+    test(
+        'cleanup failure retains its code and retires the helper '
+        '(status first: $statusFirst)', () async {
+      await plugin.initialize(notificationTitle: 'Test');
+      child.failCleanup = true;
+      child.cleanupStatusFirst = statusFirst;
+      await expectLater(
+        plugin.stop(),
+        throwsA(isA<PlatformException>()
+            .having((error) => error.code, 'code', 'cleanup_failed')),
+      );
+      expect(child.kills, 1);
+      final status = await plugin.events.first as VpnStatus;
+      expect(status.state, VpnConnectionState.error);
+      expect(status.message, contains('Could not fully close'));
+      await expectLater(plugin.start(config: '{}', name: 'Test'),
+          throwsA(isA<PlatformException>()));
+      child = FakeCoreProcess();
+      await plugin.initialize(notificationTitle: 'Test');
+      await plugin.start(config: '{}', name: 'Test');
+      expect((await plugin.getStatus()).isConnected, isTrue);
+    });
+  }
+
+  test('cleanup failure status preserves the code for every pending request',
+      () async {
     await plugin.initialize(notificationTitle: 'Test');
-    child.failCleanup = true;
-    await expectLater(
-      plugin.stop(),
-      throwsA(isA<PlatformException>()
-          .having((error) => error.code, 'code', 'cleanup_failed')),
-    );
+    child.holdRequests = true;
+    final pending = [plugin.checkConfig('{}'), plugin.getStatus()];
+    final assertions = pending
+        .map((request) => expectLater(
+              request,
+              throwsA(isA<PlatformException>()
+                  .having((error) => error.code, 'code', 'cleanup_failed')),
+            ))
+        .toList();
+    child.emit({'type': 'status', 'state': 'error', 'code': 'cleanup_failed'});
+    await Future.wait(assertions);
     expect(child.kills, 1);
-    expect((await plugin.events.first as VpnStatus).state,
-        VpnConnectionState.error);
-    await expectLater(plugin.start(config: '{}', name: 'Test'),
-        throwsA(isA<PlatformException>()));
-    child = FakeCoreProcess();
-    await plugin.initialize(notificationTitle: 'Test');
-    await plugin.start(config: '{}', name: 'Test');
-    expect((await plugin.getStatus()).isConnected, isTrue);
   });
 
   test('late cleanup failure status retires a helper with no pending RPC',

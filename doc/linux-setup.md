@@ -131,7 +131,10 @@ SIGINT/SIGTERM, once native shutdown and all startup workers finish. Symlink
 targets outside the directory are preserved. If launching the helper fails, the
 backend removes the unused empty directory. A replacement helper gets fresh
 fallback state after the old process exits; normal stop/start on the same helper
-reuses its state. Forced termination such as SIGKILL can prevent cleanup.
+reuses its state. The final startup-worker drain is limited to two seconds. If a
+worker ignores cancellation or native close fails, the helper releases its pins
+and exits without deleting potentially active state. Forced termination such as
+SIGKILL can also prevent cleanup.
 This fallback does not provide persistence across helper replacements or
 application launches. Set a valid `HOME` or
 `XDG_DATA_HOME` when persistent caches or other state are required. State paths

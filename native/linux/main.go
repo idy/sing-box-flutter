@@ -110,7 +110,7 @@ func main() {
 	os.Exit(run())
 }
 
-func run() (exitCode int) {
+func run() int {
 	// A parent can close stdout while startup is in progress. A broken pipe
 	// must reach the EOF cleanup path instead of terminating Go via SIGPIPE.
 	signal.Ignore(syscall.SIGPIPE)
@@ -124,22 +124,21 @@ func run() (exitCode int) {
 	if err != nil {
 		return 2
 	}
+	var state *temporaryStateDirectory
 	if *temporary {
-		state, err := pinTemporaryStateDirectory(statePath)
+		state, err = pinTemporaryStateDirectory(statePath)
 		if err != nil {
 			return 2
 		}
-		defer func() {
-			// run returns only after service shutdown and all startup workers.
-			// Pinned identities prevent removal of a replacement directory.
-			if state.Remove() != nil {
-				exitCode = 2
-			}
-		}()
+		defer state.Close()
 	}
 	if err := libbox.Setup(&libbox.SetupOptions{
 		BasePath: statePath, WorkingPath: statePath, TempPath: filepath.Join(statePath, "tmp"),
 	}); err != nil {
+		// No engine or worker has been created yet.
+		if state != nil {
+			_ = state.Remove()
+		}
 		return 2
 	}
 	s := &server{
@@ -147,14 +146,20 @@ func run() (exitCode int) {
 		create: newCoreService, prepare: prepareStartConfig, permission: tunPermission,
 	}
 	s.serve(os.Stdin, signals)
-	if *temporary {
-		// Retired constructors and Start calls can still own files after a
-		// cancelled RPC. Never erase their state while those workers run.
-		if s.waitForWorkers() != nil {
-			return 2
-		}
+	if state != nil && s.finishTemporaryState(state) != nil {
+		return 2
 	}
 	return 0
+}
+
+func (s *server) finishTemporaryState(state *temporaryStateDirectory) error {
+	defer state.Close()
+	// Timeout or failed Close leaves lifetime uncertain. Release descriptors
+	// without deleting state, then let main terminate any remaining workers.
+	if err := s.waitForWorkers(); err != nil {
+		return err
+	}
+	return state.Remove()
 }
 
 func (s *server) serve(input io.Reader, signals <-chan os.Signal) {
@@ -346,11 +351,28 @@ func (s *server) close() error {
 // closed the active service. Unlike stop's bounded wait, this includes retired
 // workers, so their state directory cannot be removed while they still use it.
 // Failed cleanup leaves resource lifetime uncertain even after all workers exit.
+const finalWorkerDrainTimeout = 2 * time.Second
+
 func (s *server) waitForWorkers() error {
+	return s.waitForWorkersWithin(finalWorkerDrainTimeout)
+}
+
+func (s *server) waitForWorkersWithin(timeout time.Duration) error {
 	s.access.Lock()
 	s.shuttingDown = true
 	s.access.Unlock()
-	s.workers.Wait()
+	drained := make(chan struct{})
+	go func() {
+		s.workers.Wait()
+		close(drained)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-drained:
+	case <-timer.C:
+		return context.DeadlineExceeded
+	}
 	s.access.Lock()
 	defer s.access.Unlock()
 	if s.cleanupFailed {

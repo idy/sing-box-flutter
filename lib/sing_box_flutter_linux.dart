@@ -436,7 +436,7 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
       final value = jsonDecode(line) as Map<String, dynamic>;
       if (value['type'] == 'status') {
         if (value['code'] == 'cleanup_failed') {
-          _failed(child);
+          _failed(child, failure: _cleanupFailure());
         } else {
           _updateStatus(VpnStatus.fromMap(value));
         }
@@ -450,7 +450,9 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
           failure['message'] is String) {
         completion.completeError(
             _error(failure['code'] as String, failure['message'] as String));
-        if (failure['code'] == 'cleanup_failed') _failed(child);
+        if (failure['code'] == 'cleanup_failed') {
+          _failed(child, failure: _cleanupFailure());
+        }
       } else if (value.containsKey('result')) {
         completion.complete(value['result']);
       } else {
@@ -463,7 +465,10 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
     }
   }
 
-  void _failed(Process child) {
+  static PlatformException _cleanupFailure() => _error('cleanup_failed',
+      'Could not fully close the Linux core. Initialize again before reconnecting.');
+
+  void _failed(Process child, {PlatformException? failure}) {
     if (!identical(_process, child)) return;
     _process = null;
     if (_temporaryState) _dataDirectory = null;
@@ -477,15 +482,16 @@ class LinuxSingBoxFlutter extends SingBoxFlutterPlatform {
       // IOSink.close can throw synchronously while a flush is in progress.
     }
     child.kill(ProcessSignal.sigterm);
-    final error = _error('core_exited',
-        'The Linux core exited. Initialize again before reconnecting.');
+    final error = failure ??
+        _error('core_exited',
+            'The Linux core exited. Initialize again before reconnecting.');
     for (final completion in _pending.values) {
       completion.completeError(error);
     }
     _pending.clear();
-    _updateStatus(const VpnStatus(
+    _updateStatus(VpnStatus(
       state: VpnConnectionState.error,
-      message: 'The Linux core exited.',
+      message: failure?.message ?? 'The Linux core exited.',
     ));
   }
 
