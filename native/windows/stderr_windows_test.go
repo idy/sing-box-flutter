@@ -7,20 +7,56 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 const stderrChildMode = "SING_BOX_TEST_STDERR_CHILD"
 const stderrChildReady = "stderr-probes-written\n"
+const stderrMapReady = "isolated-stderr-map-ready\n"
+const stderrMapTarget = "SING_BOX_TEST_STDERR_MAP_TARGET"
+const stderrMapControl = "remapped-null-control\n"
+
+func prepareStderrPrivateMapChild() error {
+	capture, err := os.OpenFile(os.Getenv(stderrMapTarget), os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer capture.Close()
+	if err := installStderrPrivateDeviceMap(capture); err != nil {
+		return err
+	}
+	ordinary, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	_, writeErr := ordinary.WriteString(stderrMapControl)
+	closeErr := ordinary.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if _, err := os.Stdout.WriteString(stderrMapReady); err != nil {
+		return err
+	}
+	// The parent checks its own NUL while this private map is active, then
+	// either releases the panic probe or kills this child before Go cleanup.
+	var release [1]byte
+	_, err = io.ReadFull(os.Stdin, release[:])
+	return err
+}
 
 var stderrSentinels = []string{
 	"synthetic-secret-os-stderr",
@@ -36,6 +72,13 @@ func TestWindowsStderrRedirectChild(t *testing.T) {
 	mode := os.Getenv(stderrChildMode)
 	if mode == "" {
 		return
+	}
+	if mode == "isolated-remapped" {
+		if err := prepareStderrPrivateMapChild(); err != nil {
+			fmt.Fprintln(os.Stdout, "isolated device-map setup failed:", err)
+			os.Exit(96)
+		}
+		mode = "redirected"
 	}
 	if mode == "redirected" {
 		if suppressStderr() != nil {
@@ -109,72 +152,119 @@ func TestWindowsStderrRedirectionIncludesNativeAndRuntimeWrites(t *testing.T) {
 	}
 }
 
+type stderrIsolatedOutput struct {
+	buffer bytes.Buffer
+	ready  chan struct{}
+	once   sync.Once
+}
+
+func (output *stderrIsolatedOutput) Write(data []byte) (int, error) {
+	count, err := output.buffer.Write(data)
+	if bytes.Contains(output.buffer.Bytes(), []byte(stderrMapReady)) {
+		output.once.Do(func() { close(output.ready) })
+	}
+	return count, err
+}
+
+func (output *stderrIsolatedOutput) String() string { return output.buffer.String() }
+
+func assertParentNULIsCharacterDevice(t *testing.T) {
+	t.Helper()
+	file, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	kind, err := syscall.GetFileType(syscall.Handle(file.Fd()))
+	if err != nil || kind != syscall.FILE_TYPE_CHAR {
+		t.Fatalf("child device map affected parent's NUL: type=%d error=%v", kind, err)
+	}
+}
+
 func TestWindowsStderrIgnoresRemappedNUL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "captured-stderr.log")
-	if err := os.WriteFile(path, nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	device, err := windows.UTF16PtrFromString("NUL")
-	if err != nil {
-		t.Fatal(err)
-	}
-	target, err := windows.UTF16PtrFromString(`\??\` + path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	define := windows.NewLazySystemDLL("kernel32.dll").NewProc("DefineDosDeviceW")
-	set := func(flags uintptr) error {
-		result, _, callErr := define.Call(flags, uintptr(unsafe.Pointer(device)), uintptr(unsafe.Pointer(target)))
-		if result == 0 {
-			return callErr
-		}
-		return nil
-	}
-	const rawTarget, removeDefinition, exactMatch, noBroadcast = 1, 2, 4, 8
-	if err := set(rawTarget | noBroadcast); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := set(rawTarget | removeDefinition | exactMatch | noBroadcast); err != nil {
-			t.Errorf("restore NUL alias: %v", err)
-		}
-	})
-	// The control proves that ordinary DOS NUL opens reach the attacker file.
-	const control = "remapped-null-control\n"
-	ordinary, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, writeErr := ordinary.WriteString(control)
-	closeErr := ordinary.Close()
-	if writeErr != nil || closeErr != nil {
-		t.Fatalf("write remapped NUL control: %v, %v", writeErr, closeErr)
-	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != control {
-		t.Fatalf("NUL was not remapped to the control file: %q, %v", data, err)
-	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, executable, "-test.run=^TestWindowsStderrRedirectChild$")
-	command.Env = append(os.Environ(), stderrChildMode+"=redirected", "GOTRACEBACK=single")
-	// Avoid an implicit DOS NUL open for the child's unused stdin.
-	command.Stdin = strings.NewReader("")
-	var stdout, stderr bytes.Buffer
-	command.Stdout, command.Stderr = &stdout, &stderr
-	err = command.Run()
-	var exit *exec.ExitError
-	if ctx.Err() != nil || !errors.As(err, &exit) || exit.ExitCode() != 2 ||
-		!strings.Contains(stdout.String(), stderrChildReady) {
-		t.Fatalf("remapped-NUL child did not exercise native/runtime writes: %v", err)
-	}
-	if stderr.Len() != 0 {
-		t.Fatalf("trusted null sink leaked %d bytes to inherited stderr", stderr.Len())
-	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != control {
-		t.Fatalf("trusted null sink wrote diagnostics to remapped NUL: %d bytes, %v", len(data), err)
+	for _, terminate := range []bool{false, true} {
+		name := "panic"
+		if terminate {
+			name = "forced-termination"
+		}
+		t.Run(name, func(t *testing.T) {
+			assertParentNULIsCharacterDevice(t)
+			path := filepath.Join(t.TempDir(), "captured-stderr.log")
+			if err := os.WriteFile(path, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, executable, "-test.run=^TestWindowsStderrRedirectChild$")
+			command.Env = append(os.Environ(), stderrChildMode+"=isolated-remapped",
+				stderrMapTarget+"="+path, "GOTRACEBACK=single")
+			stdin, err := command.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout := &stderrIsolatedOutput{ready: make(chan struct{})}
+			var stderr bytes.Buffer
+			command.Stdout, command.Stderr = stdout, &stderr
+			if err := command.Start(); err != nil {
+				stdin.Close()
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			var runErr error
+			go func() {
+				runErr = command.Wait()
+				close(done)
+			}()
+			t.Cleanup(func() {
+				_ = command.Process.Kill()
+				_ = stdin.Close()
+				<-done
+			})
+			select {
+			case <-stdout.ready:
+			case <-done:
+				t.Fatalf("isolated map child failed before handshake: %v, %s", runErr, stdout.String())
+			case <-ctx.Done():
+				t.Fatal("isolated map child did not become ready")
+			}
+			// The child is alive with its private NUL alias. Parent/logon-session
+			// opens must still resolve to a character device, not the capture file.
+			assertParentNULIsCharacterDevice(t)
+			if data, err := os.ReadFile(path); err != nil || string(data) != stderrMapControl {
+				t.Fatalf("child did not exercise a private DOS NUL mapping: %q, %v", data, err)
+			}
+			if terminate {
+				if err := command.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := stdin.Write([]byte{1}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_ = stdin.Close()
+			<-done
+			if ctx.Err() != nil {
+				t.Fatal("isolated map child did not exit")
+			}
+			var exit *exec.ExitError
+			if !errors.As(runErr, &exit) || (!terminate && exit.ExitCode() != 2) {
+				t.Fatalf("isolated map child ended unexpectedly: %v", runErr)
+			}
+			if !terminate && !strings.Contains(stdout.String(), stderrChildReady) {
+				t.Fatal("private-map child did not exercise OS/Go/panic writes")
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("trusted null sink leaked %d bytes to inherited stderr", stderr.Len())
+			}
+			assertParentNULIsCharacterDevice(t)
+			if data, err := os.ReadFile(path); err != nil || string(data) != stderrMapControl {
+				t.Fatalf("trusted null sink wrote diagnostics to private NUL: %d bytes, %v", len(data), err)
+			}
+		})
 	}
 }

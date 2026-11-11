@@ -284,7 +284,10 @@ mapped child's file identity is checked before it runs. These are Windows runtim
 checks; passing Dart tests on another platform does not establish compatibility.
 The tests require elevation and fail if their secure fixtures
 cannot be created; they do not bypass the production policy for CI.
-Windows CI also packages the Flutter example and enables
+The stderr remapping regression runs in a child with an unnamed private NT device
+directory and a process-specific map. It never changes the logon-session mapping;
+parent `NUL` checks cover the live child, panic exit and forced termination without
+Go cleanup. Windows CI also packages the Flutter example and enables
 `SING_BOX_FLUTTER_WINTUN_SMOKE=1` for a real Wintun adapter lifecycle test. That test
 requires elevation, starts a uniquely named adapter with `auto_route: false`,
 closes the native core, and verifies adapter removal while preserving the runner's
