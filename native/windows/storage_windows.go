@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/sagernet/sing-box/option"
@@ -17,9 +19,18 @@ import (
 
 // One owner retains the verified hierarchy, all managed directory pins and
 // handle-relative core.lock until every core/check operation has closed.
-type windowsStorage struct{ directories *directoryHandles }
+type windowsStorage struct {
+	mu           sync.RWMutex
+	directories  *directoryHandles
+	rootPath     string
+	rootIdentity nativeFileIdentity
+	closed       bool
+}
 
 func (s *windowsStorage) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
 	s.directories.close()
 	return nil
 }
@@ -36,7 +47,7 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 		}
 	}()
 	// Authorization precedes every filesystem operation, including creation
-	// of the ordinary host parent. A first Medium launch cannot poison v1 state.
+	// of the ordinary host parent. A first Medium launch cannot poison managed state.
 	descriptor, err := privateDirectorySecurityForToken(token)
 	if err != nil {
 		return nil, err
@@ -159,12 +170,18 @@ func initializeWindowsStorage(path, base string, token windows.Token) (_ io.Clos
 	if err = walk(working, 0); err != nil {
 		return nil, err
 	}
-	return &windowsStorage{directories: directories}, nil
+	identity, err := directories.nativeFileIdentity(working)
+	if err != nil {
+		return nil, err
+	}
+	return &windowsStorage{directories: directories, rootPath: path, rootIdentity: identity}, nil
 }
 
 // The core owns this additional lease, independent of the controller's working
-// storage lease. External cache paths never become the filemanager base/temp
-// directory or authorize other native IO outside managed storage.
+// storage lease. Cache files must descend from that owner's verified private
+// root. Labels and exclusive probes cannot prove external provenance: a Medium
+// caller's WRITE_DAC/WRITE_OWNER handle survives an administrator's hardening
+// and is invisible to read/write/delete sharing checks.
 func prepareEngineStorage(ctx context.Context, options option.Options) (_ io.Closer, err error) {
 	if options.Experimental == nil || options.Experimental.CacheFile == nil || !options.Experimental.CacheFile.Enabled {
 		return nil, nil
@@ -174,15 +191,32 @@ func prepareEngineStorage(ctx context.Context, options option.Options) (_ io.Clo
 		path = "cache.db"
 	}
 	path = filemanager.BasePath(ctx, path) // Preserve the core's exact resolution.
-	if _, parts, err := secureDirectoryPath(path); err != nil || len(parts) < 2 {
+	owner, ok := ctx.Value(storageContextKey{}).(*windowsStorage)
+	if !ok || owner == nil {
 		return nil, errDirectories
+	}
+	owner.mu.RLock()
+	defer owner.mu.RUnlock()
+	if owner.closed || owner.rootPath == "" {
+		return nil, errDirectories
+	}
+	root, parts, err := secureDirectoryPath(path)
+	ownerRoot, ownerParts, ownerErr := secureDirectoryPath(owner.rootPath)
+	if err != nil || ownerErr != nil || !strings.EqualFold(root, ownerRoot) || len(parts) <= len(ownerParts) {
+		return nil, errDirectories
+	}
+	for i, part := range ownerParts {
+		// Preserve literal application identity even on a case-insensitive host;
+		// EqualFold/Rel could admit a distinct sibling on a case-sensitive host.
+		if parts[i] != part {
+			return nil, errDirectories
+		}
 	}
 	descriptor, err := privateDirectorySecurity()
 	if err != nil {
 		return nil, errDirectories
 	}
-	parentPath := filepath.Dir(path)
-	directories, err := openDirectoryHierarchy(filepath.Dir(parentPath))
+	directories, err := openDirectoryHierarchy(owner.rootPath)
 	if err != nil {
 		return nil, errDirectories
 	}
@@ -192,13 +226,18 @@ func prepareEngineStorage(ctx context.Context, options option.Options) (_ io.Clo
 			err = errDirectories
 		}
 	}()
-	// Never seal an arbitrary existing directory/file in place: a Medium
-	// process's pre-opened WRITE_DAC handle would survive that transition.
-	parent, err := directories.openChild(directories.last(), filepath.Base(parentPath), false, descriptor)
-	if err != nil {
-		return nil, err
+	parent := directories.last()
+	identity, err := directories.nativeFileIdentity(parent)
+	if err != nil || identity != owner.rootIdentity {
+		return nil, errDirectories
 	}
-	if _, err = directories.pinNativeFile(parent, filepath.Base(path), descriptor); err != nil {
+	for _, part := range parts[len(ownerParts) : len(parts)-1] {
+		parent, err = directories.openChild(parent, part, false, descriptor)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err = directories.pinNativeFile(parent, parts[len(parts)-1], descriptor); err != nil {
 		return nil, err
 	}
 	return &windowsStorage{directories: directories}, nil

@@ -157,6 +157,11 @@ func assertStorageIntegrity(t *testing.T, path string, inherited bool) {
 	if err := windows.GetAce(wantACL, 0, &want); err != nil {
 		t.Fatal(err)
 	}
+	// Assert the confidentiality bit independently of the production descriptor.
+	const noWriteUp, noReadUp = 0x1, 0x2
+	if want.Mask != noWriteUp|noReadUp {
+		t.Fatalf("private policy does not deny lower-integrity reads and writes: %#x", want.Mask)
+	}
 	if got.Header.AceType != 0x11 || got.Mask != want.Mask ||
 		!windows.EqualSid((*windows.SID)(unsafe.Pointer(&got.SidStart)), (*windows.SID)(unsafe.Pointer(&want.SidStart))) ||
 		inherited && got.Header.AceFlags&windows.INHERITED_ACE == 0 {
@@ -217,6 +222,77 @@ func TestStorageIntegrityBlocksLowerIntegrityMutationAndPreservesNativeIO(t *tes
 	if after := directoryDACL(t, target); after != before {
 		t.Fatalf("outside DACL changed: %s -> %s", before, after)
 	}
+}
+
+func TestStorageIntegrityDeniesMediumReadsOfCurrentAndPersistedSecrets(t *testing.T) {
+	base := directoryTestCacheRoot(t)
+	// This same-user high-integrity control has only NW, as the old policy did.
+	// A successful read proves the impersonated token/path can exercise the leak.
+	directories, err := openDirectoryHierarchy(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = directories.openChild(directories.last(), "readable-high", true, unsafeStorageDescriptor(t, "write-only"))
+	if err != nil {
+		directories.close()
+		t.Fatal(err)
+	}
+	directories.close()
+	readable := filepath.Join(base, "readable-high", "control.bin")
+	if err := os.WriteFile(readable, []byte("readable control"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	working := filepath.Join(base, "Host App", "sing_box_flutter")
+	lease, err := initializeStorage(working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { lease.Close() }()
+	state := filepath.Join(working, "tailscale-state", "nested", "auth.bin")
+	temp := filepath.Join(working, "tmp", "native-temp.bin")
+	cache := filepath.Join(working, "cache", "profile.db")
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{state, temp, cache} {
+		if err := os.WriteFile(path, []byte("private auth state"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertStorageIntegrity(t, path, true)
+	}
+	check := func(stage string) {
+		t.Helper()
+		withMediumIntegrity(t, func() {
+			if data, err := os.ReadFile(readable); err != nil || string(data) != "readable control" {
+				t.Fatalf("%s: NW-only control did not reproduce same-user read access: %q, %v", stage, data, err)
+			}
+			for _, path := range []string{state, temp, cache} {
+				if _, err := os.ReadFile(path); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+					t.Fatalf("%s: Medium secret read must fail with access denied: %s: %v", stage, path, err)
+				}
+			}
+			for _, path := range []string{working, filepath.Join(working, "cache"), filepath.Join(working, "tmp"), filepath.Dir(state)} {
+				if _, err := os.ReadDir(path); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+					t.Fatalf("%s: Medium directory listing must fail with access denied: %s: %v", stage, path, err)
+				}
+			}
+		})
+		for _, path := range []string{state, temp, cache} {
+			if data, err := os.ReadFile(path); err != nil || string(data) != "private auth state" {
+				t.Fatalf("%s: high-integrity native IO failed: %q, %v", stage, data, err)
+			}
+		}
+	}
+	check("active")
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	check("persisted without pins")
+	lease, err = initializeStorage(working)
+	if err != nil {
+		t.Fatalf("private inherited state did not reopen: %v", err)
+	}
+	check("reopened")
 }
 
 func TestStorageRejectsUnsafePreownedMetadataWithoutChanges(t *testing.T) {

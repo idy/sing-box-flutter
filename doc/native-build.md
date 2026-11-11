@@ -116,8 +116,12 @@ for Tailscale's `build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb` release, with t
 source API URL recorded in the lock. The archive checksum is validated on every
 invocation, then the toolchain is extracted again before any downloaded executable
 runs. A modified cached executable or a local provenance stamp cannot substitute
-for verification. `VERSION`, `go env`, explicit `GOROOT`, and the first `PATH` entry
-must agree. The Tailscale dependency's embedded `go.toolchain.rev` / next-revision
+for verification. `VERSION`, `go env` and explicit `GOROOT` must agree with the
+verified absolute compiler path. Standalone Windows/Linux builds never discover
+Go through `PATH`, including when a Windows work directory contains a semicolon.
+Mobile tools spawn nested commands through `PATH`, so they require Go and `GOBIN`
+directories without the platform's path separator and verify those entries before
+any mobile tool download or compilation. The Tailscale dependency's embedded `go.toolchain.rev` / next-revision
 contract is checked before native compilation; a mismatched fork fails early rather
 than producing a binary that panics at startup. No mismatch environment override is
 used. No source build of Go or globally installed Go is used.

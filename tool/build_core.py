@@ -313,7 +313,7 @@ def validate_artifact(path: Path, target: str, arch: str | None = None) -> None:
         raise BuildError("The selected core did not produce a valid XCFramework")
 
 
-RECIPE_METADATA = ("schema", "mode", "target", "arch", "environment", "identity", "fingerprint",
+RECIPE_METADATA = ("schema", "mode", "target", "arch", "windows_arch", "environment", "identity", "fingerprint",
                    "features", "tags", "artifact_sha256")
 WORK_MARKER = ".sing-box-flutter-work"
 

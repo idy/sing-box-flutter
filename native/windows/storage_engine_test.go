@@ -39,6 +39,22 @@ func TestOwnedStoragePreservesDefaultRelativeExternalCacheAndTempIO(t *testing.T
 			}
 			encoded, _ := json.Marshal(path)
 			content := `{"experimental":{"cache_file":{"enabled":true,"path":` + string(encoded) + `}}}`
+			if runtime.GOOS == "windows" && kind == "external" {
+				// Current labels cannot prove when external handles were granted.
+				// Reject the explicit path rather than rewriting it to managed state.
+				if instance, err := createBox(ctx, content, working, false); err != errConfig || instance != nil {
+					if instance != nil {
+						instance.Close()
+					}
+					t.Fatalf("external cache must fail with a sanitized config error: %v", err)
+				}
+				for _, unexpected := range []string{want, filepath.Join(working, "explicit.db"), filepath.Join(working, "cache.db")} {
+					if _, err := os.Lstat(unexpected); !os.IsNotExist(err) {
+						t.Fatalf("external cache rejection created or rewrote a path: %s: %v", unexpected, err)
+					}
+				}
+				return
+			}
 			for attempt := range 2 {
 				instance, err := createBox(ctx, content, working, false)
 				if err != nil {

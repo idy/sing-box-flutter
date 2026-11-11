@@ -335,7 +335,7 @@ func TestProtocolSanitizesEveryBackendFailure(t *testing.T) {
 					h.send(4, "stop", nil)
 					h.event("disconnecting")
 					h.event("error")
-					h.response(4, "stop_failed")
+					h.response(4, "cleanup_failed")
 				} else {
 					h.event("error")
 				}

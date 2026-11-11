@@ -12,6 +12,8 @@ import (
 
 const maxRequestBytes = 8 << 20
 
+const cleanupFailedMessage = "Could not completely stop the Windows tunnel; initialize a new helper after this process exits"
+
 type request struct {
 	ID        *int                       `json:"id"`
 	Method    string                     `json:"method"`
@@ -26,6 +28,7 @@ type protocolError struct {
 type status struct {
 	Type    string `json:"type"`
 	State   string `json:"state"`
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
 }
 
@@ -57,10 +60,12 @@ type server struct {
 	output   *json.Encoder
 	writeMu  sync.Mutex
 	failed   chan struct{}
+	retired  chan struct{}
 	mu       sync.Mutex
 	working  string
 	current  status
 	active   *connection
+	unusable bool
 	closed   bool
 	lifetime context.Context
 	cancel   context.CancelFunc
@@ -72,7 +77,7 @@ func newServer(output io.Writer, engine backend) *server {
 	return &server{
 		lifetime: ctx, cancel: cancel,
 		backend: engine, storage: initializeStorage, admin: isElevated,
-		output: json.NewEncoder(output), failed: make(chan struct{}),
+		output: json.NewEncoder(output), failed: make(chan struct{}), retired: make(chan struct{}),
 		current: status{Type: "status", State: "disconnected"},
 	}
 }
@@ -106,7 +111,11 @@ func (s *server) failure(id int, code, message string) {
 
 // Call with mu held so status events have the same order as getStatus snapshots.
 func (s *server) state(state, message string) {
-	s.current = status{Type: "status", State: state, Message: message}
+	s.setStatus(status{Type: "status", State: state, Message: message})
+}
+
+func (s *server) setStatus(next status) {
+	s.current = next
 	s.send(struct {
 		Event status `json:"event"`
 	}{s.current})
@@ -139,6 +148,8 @@ func (s *server) run(ctx context.Context, input io.ReadCloser) {
 			return
 		case <-s.failed:
 			return
+		case <-s.retired:
+			return
 		case line, ok := <-lines:
 			if !ok {
 				return
@@ -161,13 +172,23 @@ func (s *server) handle(line []byte) {
 		return
 	}
 	id := *r.ID
-	if r.Method == "getVersion" {
-		s.result(id, s.backend.Version())
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.unusable {
+		// Requests already delivered by the reader must not reuse a helper whose
+		// cleanup left native resources in an unknown state, even during shutdown.
+		if r.Method == "getStatus" {
+			s.result(id, s.current)
+		} else {
+			s.failure(id, "cleanup_failed", cleanupFailedMessage)
+		}
+		return
+	}
 	if s.closed {
+		return
+	}
+	if r.Method == "getVersion" {
+		s.result(id, s.backend.Version())
 		return
 	}
 	if r.Method == "initialize" {
@@ -284,22 +305,33 @@ func (s *server) connect(ctx context.Context, conn *connection, content, working
 	conn.cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !cancelled && err != nil {
+	if closeErr != nil {
+		// Cleanup failure takes precedence over a constructor/Start error: native
+		// adapters, routes or workers may still belong to this process. Keep its
+		// connection slot and retire rather than admitting another core.
+		s.unusable = true
+		s.setStatus(status{Type: "status", State: "error", Code: "cleanup_failed", Message: cleanupFailedMessage})
+	} else if !cancelled && err != nil {
 		s.state("error", "Could not start the Windows tunnel")
-	} else if closeErr != nil {
-		s.state("error", "Could not completely stop the Windows tunnel")
 	} else {
 		s.state("disconnected", "")
 	}
 	for _, id := range conn.stops {
 		if closeErr != nil {
-			s.failure(id, "stop_failed", "Could not completely stop the Windows tunnel")
+			s.failure(id, "cleanup_failed", cleanupFailedMessage)
 		} else {
 			s.result(id, nil)
 		}
 	}
-	s.active = nil
 	close(conn.done)
+	if closeErr != nil {
+		// Flush fixed status and pending stop replies before ending the protocol.
+		// main returns after shutdown; the app's process-exit barrier owns retry.
+		s.cancel()
+		close(s.retired)
+	} else {
+		s.active = nil
+	}
 }
 
 func (s *server) shutdown() {

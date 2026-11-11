@@ -15,10 +15,11 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing/service"
+	"github.com/sagernet/sing/service/filemanager"
 	"golang.org/x/sys/windows"
 )
 
-func externalCacheFixture(t *testing.T) (context.Context, string, string) {
+func managedCacheFixture(t *testing.T) (context.Context, string, string) {
 	t.Helper()
 	base := directoryTestCacheRoot(t)
 	working := filepath.Join(base, "Host App", "sing_box_flutter")
@@ -27,11 +28,17 @@ func externalCacheFixture(t *testing.T) (context.Context, string, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { lease.Close() })
-	external := filepath.Join(base, "external-cache")
+	return withStorageContext(context.Background(), lease), working, filepath.Join(working, "cache")
+}
+
+func externalCacheFixture(t *testing.T) (context.Context, string, string) {
+	t.Helper()
+	ctx, working, _ := managedCacheFixture(t)
+	external := filepath.Join(filepath.Dir(filepath.Dir(working)), "external-cache")
 	if err := privateDirectory(external); err != nil {
 		t.Fatal(err)
 	}
-	return withStorageContext(context.Background(), lease), working, external
+	return ctx, working, external
 }
 
 func externalCacheConfig(path, extra string) string {
@@ -58,9 +65,9 @@ func assertCacheReleased(t *testing.T, path string) {
 	}
 }
 
-func TestExternalCachePinsSurviveChecksAndNativeCleanup(t *testing.T) {
-	ctx, working, external := externalCacheFixture(t)
-	path := filepath.Join(external, "profile.db")
+func TestManagedCachePinsSurviveChecksAndNativeCleanup(t *testing.T) {
+	ctx, working, managed := managedCacheFixture(t)
+	path := filepath.Join(managed, "profile.db")
 	content := externalCacheConfig(path, "")
 	engine, err := createBox(ctx, content, working, false)
 	if err != nil {
@@ -76,15 +83,18 @@ func TestExternalCachePinsSurviveChecksAndNativeCleanup(t *testing.T) {
 	if err := cache.StoreSelected("test", "selected"); err != nil {
 		t.Fatal(err)
 	}
-	assertCachePinned(t, external, path)
+	assertCachePinned(t, managed, path)
 	assertStorageIntegrity(t, path, false)
 	withMediumIntegrity(t, func() {
-		if err := os.WriteFile(path, []byte("attacker"), 0o600); err == nil {
-			t.Fatal("lower integrity process wrote external cache")
+		if _, err := os.ReadFile(path); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			t.Fatalf("Medium cache read must fail with access denied: %v", err)
 		}
-		if handle, err := directoryMutationHandle(external); err == nil {
+		if err := os.WriteFile(path, []byte("attacker"), 0o600); err == nil {
+			t.Fatal("lower integrity process wrote managed cache")
+		}
+		if handle, err := directoryMutationHandle(managed); err == nil {
 			windows.CloseHandle(handle)
-			t.Fatal("lower integrity process acquired external directory mutation rights")
+			t.Fatal("lower integrity process acquired managed directory mutation rights")
 		}
 	})
 	var checks sync.WaitGroup
@@ -100,9 +110,9 @@ func TestExternalCachePinsSurviveChecksAndNativeCleanup(t *testing.T) {
 		}()
 	}
 	checks.Wait()
-	assertCachePinned(t, external, path)
+	assertCachePinned(t, managed, path)
 	engine.constructors.Add(func() error {
-		assertCachePinned(t, external, path)
+		assertCachePinned(t, managed, path)
 		return nil
 	})
 	if err := engine.Close(); err != nil {
@@ -112,12 +122,12 @@ func TestExternalCachePinsSurviveChecksAndNativeCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCacheReleased(t, path)
-	assertCacheReleased(t, external)
+	assertCachePinned(t, managed) // The controller still owns its storage lease.
 }
 
-func TestExternalCacheLeaseReleasedOnConstructionAndStartFailure(t *testing.T) {
-	ctx, working, external := externalCacheFixture(t)
-	path := filepath.Join(external, "profile.db")
+func TestManagedCacheLeaseReleasedOnConstructionAndStartFailure(t *testing.T) {
+	ctx, working, managed := managedCacheFixture(t)
+	path := filepath.Join(managed, "profile.db")
 	duplicate := externalCacheConfig(path, `,"outbounds":[{"type":"direct","tag":"dup"},{"type":"direct","tag":"dup"}]`)
 	for range 2 {
 		if engine, err := createBox(ctx, duplicate, working, false); err != errConfig || engine != nil {
@@ -127,7 +137,7 @@ func TestExternalCacheLeaseReleasedOnConstructionAndStartFailure(t *testing.T) {
 			t.Fatalf("expected sanitized constructor failure, got %v", err)
 		}
 		assertCacheReleased(t, path)
-		assertCacheReleased(t, external)
+		assertCachePinned(t, managed)
 	}
 	content := externalCacheConfig(path, `,"inbounds":[{"type":"tun","address":["172.19.0.1/30"],"auto_route":false}]`)
 	for range 2 {
@@ -142,40 +152,150 @@ func TestExternalCacheLeaseReleasedOnConstructionAndStartFailure(t *testing.T) {
 			engine.Close()
 			t.Fatalf("expected sanitized cancelled start, got %v", err)
 		}
-		assertCachePinned(t, external, path)
+		assertCachePinned(t, managed, path)
 		if err := engine.Close(); err != nil {
 			t.Fatal(err)
 		}
 		assertCacheReleased(t, path)
-		assertCacheReleased(t, external)
+		assertCachePinned(t, managed)
 	}
 }
 
-func TestExternalCacheRejectsUnsafePathsWithoutMutation(t *testing.T) {
+func TestManagedCachePersistsAcrossStorageOwnerReopen(t *testing.T) {
+	for _, kind := range []string{"default", "relative", "nested", "absolute"} {
+		t.Run(kind, func(t *testing.T) {
+			base := directoryTestCacheRoot(t)
+			working := filepath.Join(base, "Host App", "sing_box_flutter")
+			path, want := "", filepath.Join(working, "cache.db")
+			switch kind {
+			case "relative":
+				path, want = "profile.db", filepath.Join(working, "profile.db")
+			case "nested":
+				path = filepath.Join("cache", "nested", "profile.db")
+				want = filepath.Join(working, path)
+			case "absolute":
+				path = filepath.Join(working, "cache", "profile.db")
+				want = path
+			}
+			for attempt := range 2 {
+				lease, err := initializeStorage(working)
+				if err != nil {
+					t.Fatalf("owner initialization %d: %v", attempt, err)
+				}
+				defer lease.Close()
+				if kind == "nested" {
+					if err := os.MkdirAll(filepath.Dir(want), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ctx := withStorageContext(context.Background(), lease)
+				engine, err := createBox(ctx, externalCacheConfig(path, ""), working, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer engine.Close()
+				cache := service.FromContext[adapter.CacheFile](engine.ctx)
+				if err := engine.constructors.Start("cache", cache, adapter.StartStateInitialize); err != nil {
+					t.Fatal(err)
+				}
+				if attempt == 0 {
+					if err := cache.StoreSelected("selection", "persisted"); err != nil {
+						t.Fatal(err)
+					}
+				} else if got := cache.LoadSelected("selection"); got != "persisted" {
+					t.Fatalf("managed cache persistence changed after owner reopen: %q", got)
+				}
+				assertStorageIntegrity(t, want, false)
+				temp, err := filemanager.CreateTemp(engine.ctx, "native-temp-*")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := temp.WriteString("native temp state"); err != nil {
+					temp.Close()
+					t.Fatal(err)
+				}
+				if err := temp.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if filepath.Dir(temp.Name()) != filepath.Join(working, "tmp") {
+					t.Fatal("cache admission changed native temp storage")
+				}
+				assertStorageIntegrity(t, temp.Name(), true)
+				if err := engine.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := lease.Close(); err != nil {
+					t.Fatal(err)
+				}
+				assertCacheReleased(t, working)
+			}
+		})
+	}
+}
+
+func TestManagedCacheRequiresLiveOwnerAndLiteralHierarchy(t *testing.T) {
+	for _, kind := range []string{"missing-owner", "closed-owner", "sibling-prefix", "case-alias"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx, working, managed := managedCacheFixture(t)
+			path := filepath.Join(managed, "profile.db")
+			switch kind {
+			case "missing-owner":
+				ctx = context.Background()
+			case "closed-owner":
+				if err := ctx.Value(storageContextKey{}).(*windowsStorage).Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "sibling-prefix":
+				if err := privateDirectory(working + "-sibling"); err != nil {
+					t.Fatal(err)
+				}
+				path = filepath.Join(working+"-sibling", "profile.db")
+			case "case-alias":
+				path = filepath.Join(filepath.Dir(filepath.Dir(working)), "host app", "sing_box_flutter", "cache", "profile.db")
+			}
+			if engine, err := createBox(ctx, externalCacheConfig(path, ""), working, false); err != errConfig || engine != nil {
+				if engine != nil {
+					engine.Close()
+				}
+				t.Fatalf("cache admitted without its live literal owner: %v", err)
+			}
+			for _, unexpected := range []string{path, filepath.Join(managed, "profile.db"), filepath.Join(working, "cache.db")} {
+				if _, err := os.Lstat(unexpected); !os.IsNotExist(err) {
+					t.Fatalf("rejected cache path was created or rewritten: %s: %v", unexpected, err)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedCacheRejectsUnsafePathsWithoutMutation(t *testing.T) {
 	for _, kind := range []string{"directory-policy", "file-policy", "junction", "symlink", "hardlink", "alias"} {
 		t.Run(kind, func(t *testing.T) {
-			ctx, working, external := externalCacheFixture(t)
+			ctx, working, managed := managedCacheFixture(t)
 			outside := t.TempDir()
 			target := filepath.Join(outside, "secret-target.db")
 			if err := os.WriteFile(target, []byte("outside state"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join(external, "profile.db")
+			path := filepath.Join(managed, "profile.db")
 			switch kind {
-			case "directory-policy":
-				path = filepath.Join(outside, "profile.db")
-			case "file-policy":
-				directories, err := openDirectoryHierarchy(external)
+			case "directory-policy", "file-policy":
+				directories, err := openDirectoryHierarchy(managed)
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, err = directories.openFile(directories.last(), "profile.db", true, false, unsafeStorageDescriptor(t, "medium"))
+				if kind == "directory-policy" {
+					_, err = directories.openChild(directories.last(), "medium", true, unsafeStorageDescriptor(t, "medium"))
+					path = filepath.Join(managed, "medium", "profile.db")
+				} else {
+					_, err = directories.openFile(directories.last(), "profile.db", true, false, unsafeStorageDescriptor(t, "medium"))
+				}
 				directories.close()
 				if err != nil {
 					t.Fatal(err)
 				}
 			case "junction":
-				link := filepath.Join(external, "link")
+				link := filepath.Join(managed, "link")
 				createDirectoryJunction(t, link, outside)
 				path = filepath.Join(link, "profile.db")
 			case "symlink":
@@ -194,10 +314,10 @@ func TestExternalCacheRejectsUnsafePathsWithoutMutation(t *testing.T) {
 				if engine != nil {
 					engine.Close()
 				}
-				t.Fatalf("unsafe cache accepted or leaked details: %v", err)
+				t.Fatalf("unsafe managed cache accepted or leaked details: %v", err)
 			}
 			if storagePolicySnapshot(t, target) != beforeFile || storagePolicySnapshot(t, outside) != beforeDirectory {
-				t.Fatal("rejected external cache changed outside security policy")
+				t.Fatal("rejected managed cache changed outside security policy")
 			}
 			if contents, err := os.ReadFile(target); err != nil || string(contents) != "outside state" {
 				t.Fatalf("rejected cache modified outside state: %q, %v", contents, err)
@@ -205,7 +325,12 @@ func TestExternalCacheRejectsUnsafePathsWithoutMutation(t *testing.T) {
 			if _, err := os.Lstat(filepath.Join(outside, "profile.db")); !os.IsNotExist(err) {
 				t.Fatalf("rejected cache created outside state before construction failed: %v", err)
 			}
-			assertCacheReleased(t, external)
+			if kind == "directory-policy" {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("rejected unsafe parent created cache data: %v", err)
+				}
+			}
+			assertCachePinned(t, managed)
 		})
 	}
 }
@@ -220,7 +345,7 @@ func setOwnedCachePolicy(t *testing.T, path string, descriptor *windows.SECURITY
 	}
 	handle, err := windows.CreateFile(name, windows.WRITE_DAC|windows.WRITE_OWNER|windows.READ_CONTROL,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
-		windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,24 +377,9 @@ func TestExternalCacheRejectsRetainedMediumDataHandlesAfterHardening(t *testing.
 			ctx, working, external := externalCacheFixture(t)
 			path := filepath.Join(external, "profile.db")
 			content := externalCacheConfig(path, "")
-			engine, err := createBox(ctx, content, working, false)
-			if err != nil {
+			before := []byte("external cache persisted bytes")
+			if err := os.WriteFile(path, before, 0o600); err != nil {
 				t.Fatal(err)
-			}
-			defer engine.Close()
-			cache := service.FromContext[adapter.CacheFile](engine.ctx)
-			if err := engine.constructors.Start("cache", cache, adapter.StartStateInitialize); err != nil {
-				t.Fatal(err)
-			}
-			if err := cache.StoreSelected("test", "persisted"); err != nil {
-				t.Fatal(err)
-			}
-			if err := engine.Close(); err != nil {
-				t.Fatal(err)
-			}
-			before, err := os.ReadFile(path)
-			if err != nil || len(before) < 16 {
-				t.Fatalf("could not seed native database: %v", err)
 			}
 			outside := filepath.Join(t.TempDir(), "untouched.bin")
 			if err := os.WriteFile(outside, []byte("outside state"), 0o600); err != nil {
@@ -302,7 +412,7 @@ func TestExternalCacheRejectsRetainedMediumDataHandlesAfterHardening(t *testing.
 			setOwnedCachePolicy(t, path, private)
 			policyBefore := storagePolicySnapshot(t, path)
 			// Prove these granted data rights survive the administrator's change.
-			// Writing identical header bytes keeps the database fixture intact.
+			// Writing identical bytes keeps the persisted fixture intact.
 			withMediumIntegrity(t, func() {
 				var count uint32
 				if tc.access == windows.FILE_READ_DATA {
@@ -331,23 +441,14 @@ func TestExternalCacheRejectsRetainedMediumDataHandlesAfterHardening(t *testing.
 				t.Fatal(err)
 			}
 			hostile = 0
-			retry, err := createBox(ctx, content, working, false)
-			if err != nil {
-				t.Fatalf("cache could not be admitted after hostile handle closed: %v", err)
+			if retry, err := createBox(ctx, content, working, false); err != errConfig || retry != nil {
+				if retry != nil {
+					retry.Close()
+				}
+				t.Fatalf("external cache gained provenance when hostile handle closed: %v", err)
 			}
-			defer retry.Close()
-			cache = service.FromContext[adapter.CacheFile](retry.ctx)
-			if err := retry.constructors.Start("cache", cache, adapter.StartStateInitialize); err != nil {
-				t.Fatal(err)
-			}
-			if cache.LoadSelected("test") != "persisted" {
-				t.Fatal("cache contents changed while hostile handle was retained")
-			}
-			if err := cache.StoreSelected("test", "native IO restored"); err != nil {
-				t.Fatalf("shared metadata pin prevented native IO: %v", err)
-			}
-			if err := retry.Close(); err != nil {
-				t.Fatal(err)
+			if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("external persisted bytes changed: %v", err)
 			}
 			assertCacheReleased(t, path)
 			assertCacheReleased(t, external)
@@ -355,7 +456,7 @@ func TestExternalCacheRejectsRetainedMediumDataHandlesAfterHardening(t *testing.
 	}
 }
 
-func TestExternalCacheRejectsRetainedMediumMetadataRights(t *testing.T) {
+func TestExternalCacheRejectsRetainedMediumMetadataRightsAfterHardening(t *testing.T) {
 	for _, kind := range []string{"directory", "file"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, working, external := externalCacheFixture(t)
@@ -364,17 +465,22 @@ func TestExternalCacheRejectsRetainedMediumMetadataRights(t *testing.T) {
 				t.Fatal(err)
 			}
 			unsafe := unsafeStorageDescriptor(t, "medium")
-			path := filepath.Join(external, "medium")
+			path := filepath.Join(external, "hardened")
 			cachePath := filepath.Join(path, "profile.db")
 			if kind == "directory" {
-				_, err = directories.openChild(directories.last(), "medium", true, unsafe)
+				_, err = directories.openChild(directories.last(), "hardened", true, unsafe)
 			} else {
-				_, err = directories.openFile(directories.last(), "medium", true, false, unsafe)
+				_, err = directories.openFile(directories.last(), "hardened", true, false, unsafe)
 				cachePath = path
 			}
 			directories.close()
 			if err != nil {
 				t.Fatal(err)
+			}
+			if kind == "file" {
+				if err := os.WriteFile(path, []byte("external persisted state"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var metadata windows.Handle
 			withMediumIntegrity(t, func() {
@@ -390,16 +496,61 @@ func TestExternalCacheRejectsRetainedMediumMetadataRights(t *testing.T) {
 				}
 			})
 			defer windows.CloseHandle(metadata)
+			private, err := privateDirectorySecurity()
+			if err != nil {
+				t.Fatal(err)
+			}
+			setOwnedCachePolicy(t, path, private)
+			assertStorageIntegrity(t, path, false)
+			// Establish the loophole: all current policy checks and an exclusive
+			// probe pass while Medium retains WRITE_DAC and WRITE_OWNER.
+			directories, err = openDirectoryHierarchy(external)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = directories.openObject(directories.last(), "hardened", false, private,
+				storageObjectOptions{directory: kind == "directory", nativeIO: kind == "file", exclusive: true})
+			directories.close()
+			if err != nil {
+				t.Fatalf("metadata fixture must evade policy/share probes: %v", err)
+			}
 			before := storagePolicySnapshot(t, path)
 			if engine, err := createBox(ctx, externalCacheConfig(cachePath, ""), working, false); err != errConfig || engine != nil {
 				if engine != nil {
 					engine.Close()
 				}
-				t.Fatalf("adopted preowned metadata rights: %v", err)
+				t.Fatalf("admitted hardened external object with retained metadata rights: %v", err)
 			}
 			if storagePolicySnapshot(t, path) != before {
-				t.Fatal("upgraded an object whose old metadata rights survive")
+				t.Fatal("mutated rejected external security policy")
 			}
+			if kind == "directory" {
+				if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+					t.Fatalf("rejected external cache created a database: %v", err)
+				}
+			} else if data, err := os.ReadFile(path); err != nil || string(data) != "external persisted state" {
+				t.Fatalf("rejected external cache changed data: %q, %v", data, err)
+			}
+			// Prove both metadata capabilities still work after hardening. These
+			// are owned fixtures; production never performs an in-place seal.
+			dacl, _, err := unsafe.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			label, _, err := unsafe.SACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			withMediumIntegrity(t, func() {
+				if err := windows.SetSecurityInfo(metadata, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION,
+					nil, nil, dacl, nil); err != nil {
+					t.Fatalf("retained WRITE_DAC did not survive hardening: %v", err)
+				}
+				if err := windows.SetSecurityInfo(metadata, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION,
+					nil, nil, nil, label); err != nil {
+					t.Fatalf("retained WRITE_OWNER did not survive hardening: %v", err)
+				}
+			})
 			assertCacheReleased(t, external)
 		})
 	}

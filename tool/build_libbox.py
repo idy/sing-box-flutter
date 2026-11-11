@@ -55,6 +55,11 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
     env = {k: v for k, v in original.items()
            if not k.startswith("GO") and not k.startswith("CGO_")
            and k not in ("CC", "CXX", "AR", "PKG_CONFIG")}
+    # A literal path separator cannot name one PATH entry (notably ';' on
+    # Windows). Direct compiler invocations still work; never split it into
+    # unintended search directories. Mobile tools reject these paths below.
+    tool_paths = [str(path) for path in (goroot / "bin", cache / "gopath/bin")
+                  if os.pathsep not in str(path)]
     env.update({
         "GOROOT": str(goroot), "GOTOOLCHAIN": "local", "GOENV": "off", "GOWORK": "off",
         "GOPATH": str(cache / "gopath"), "GOBIN": str(cache / "gopath/bin"),
@@ -65,8 +70,7 @@ def go_environment(goroot: Path, cache: Path, inherited: dict | None = None) -> 
         "GOPROXY": original.get("GOPROXY", "https://proxy.golang.org,direct"),
         "GOSUMDB": "sum.golang.org",
         "GOFLAGS": "-mod=readonly -trimpath -buildvcs=false", "CGO_ENABLED": "1",
-        "PATH": os.pathsep.join((str(goroot / "bin"), str(cache / "gopath/bin"),
-                                 original.get("PATH", os.defpath))),
+        "PATH": os.pathsep.join([*tool_paths, original.get("PATH", os.defpath)]),
     })
     # Scope private-module access without accepting compiler/workspace overrides.
     # Leave omitted values unset so Go can derive their defaults from GOPRIVATE.
@@ -135,17 +139,18 @@ def bootstrap_go(pins: dict, bootstrap: Path, cache: Path) -> tuple[Path, dict, 
     finally:
         if staging.exists():
             shutil.rmtree(staging)
+    goroot = goroot.absolute()
     env = go_environment(goroot, cache)
     go = goroot / "bin" / executable
-    if Path(shutil.which(executable, path=env["PATH"]) or "").resolve() != go.resolve():
-        raise BuildError("PATH did not select the verified Tailscale Go binary")
+    # Bootstrap and standalone builds invoke this verified absolute path. PATH
+    # cannot express every valid filesystem path and is not its identity check.
     identity = json.loads(run([go, "env", "-json", "GOROOT", "GOTOOLCHAIN", "GOVERSION"], env=env, capture=True))
     if (Path(identity["GOROOT"]).resolve() != goroot.resolve()
             or identity["GOTOOLCHAIN"] != "local" or identity["GOVERSION"] != lock["version"]):
         raise BuildError("Running Go identity differs from the verified toolchain")
     provenance.update({"revision": pins["tailscale_go_revision"], "version": lock["version"],
                        "host": key, "checksum_source": lock["checksum_source"],
-                       "binary_sha256": sha256(go), "selection": "explicit-GOROOT/PATH; GOTOOLCHAIN=local"})
+                       "binary_sha256": sha256(go), "selection": "absolute-go; explicit-GOROOT; GOTOOLCHAIN=local"})
     write_json(bootstrap / "toolchain-provenance.json", provenance)
     return go, env, provenance
 
@@ -354,6 +359,17 @@ def prepare_dependencies(go: Path, env: dict, source: Path, pins: dict, *,
 
 
 def install_mobile(go: Path, env: dict, source: Path, pins: dict) -> tuple[dict, dict]:
+    # gomobile and the upstream mobile builder launch Go/gobind through PATH.
+    # Reject unrepresentable directories before downloading or compiling tools;
+    # skipping bootstrap's PATH check must never enable a stock Go fallback here.
+    if any(os.pathsep in str(path) for path in (go.parent, Path(env["GOBIN"]))):
+        raise BuildError("Mobile tools require the verified Go and GOBIN directories to be single PATH entries; "
+                         "choose a work directory without the PATH separator " + repr(os.pathsep))
+    selected = shutil.which(go.name, path=env.get("PATH", ""))
+    if selected is None or Path(selected).resolve() != go.resolve():
+        raise BuildError("Mobile tools require PATH to select the verified Tailscale Go binary")
+    if str(Path(env["GOBIN"])) not in env.get("PATH", "").split(os.pathsep):
+        raise BuildError("Mobile tools require the project GOBIN directory on PATH")
     # Stay in the verified core module. An @version go install outside the module
     # queries unrelated latest versions for deprecation notices; this uses go.mod.
     modules = json.loads(network_run([go, "mod", "download", "-json", GOMOBILE_MODULE],

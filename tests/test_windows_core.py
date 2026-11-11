@@ -359,7 +359,7 @@ class WindowsCMake(WindowsFixture):
                   directory_install="", install_mutation="", exclude_helper=False,
                   helper_component="Runtime", metadata_copy=False, runner_component=None,
                   extra_helper_copy=False, metadata_component="Runtime", helper_filters="",
-                  omit_helper=False, asset_count=0, decoy_helper_rule=False):
+                  omit_helper=False, asset_count=0, decoy_helper_rule=False, extra_rules=""):
         windows = self.plugin / "windows"
         windows.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / "windows/CMakeLists.txt", windows / "CMakeLists.txt")
@@ -479,6 +479,7 @@ install(DIRECTORY "${METADATA_SOURCE}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/met
                              'file(INSTALL DESTINATION \\"unused\\" TYPE DIRECTORY '
                              'FILES \\"${METADATA_SOURCE}/\\")\\nendfunction()" COMPONENT ' +
                              metadata_component + ')\n')
+        text += extra_rules
         if nested_host:
             host_source = self.host / "windows"
             host_source.mkdir(exist_ok=True)
@@ -857,10 +858,12 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
         legal = artifact.parent / "Legal"
         legal.mkdir()
         (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
-        for kind, filters in (("", ""), ("contents", ""),
-                              ("contents", ' FILES_MATCHING PATTERN "*.exe"')):
+        cases = (("", ""), ("contents", ""),
+                 ("contents", ' FILES_MATCHING PATTERN "*.exe"'),
+                 ("contents", ' PATTERN ".dart_tool" EXCLUDE'))
+        for index, (kind, filters) in enumerate(cases):
             with self.subTest(directory_install=kind, filters=filters):
-                prefix = self.root / ("staged " + (kind or "file") + (" filtered" if filters else ""))
+                prefix = self.root / ("staged " + str(index) + " " + (kind or "file"))
                 result = self.configure(flutter_layout=True, relative_install=True,
                                         install_prefix=self.root / "configured staged bundle",
                                         directory_install=kind, bundle_subdir="bin;tools", metadata_copy=True,
@@ -884,6 +887,97 @@ add_subdirectory("${HOST_SOURCE_DIR}" host)
                     self.assertTrue((installed / "sing_box_flutter/core-capabilities.json").is_file())
                     self.assertEqual((installed / "sing_box_flutter/Legal/LICENSE.wintun").read_bytes(), self.contents["license"])
                 self.assertEqual(list(self.cmake_build.rglob("sing_box_flutter-installed-*.txt")), [])
+
+    def build_fixture_runner(self):
+        result = subprocess.run(["cmake", "--build", str(self.cmake_build), "--config", "Release",
+                                 "--target", "fixture_runner"], capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def install_component(self, prefix, component="Runtime"):
+        return subprocess.run(["cmake", "--install", str(self.cmake_build), "--config", "Release",
+                               "--component", component, "--prefix", str(prefix)],
+                              capture_output=True, text=True, encoding="utf-8")
+
+    def test_reinstall_rejects_corrupt_resources_with_source_timestamps(self):
+        entry, _, _ = self.published()
+        artifact = build_core.host_path(self.host, entry["path"])
+        legal = artifact.parent / "Legal"
+        legal.mkdir()
+        (legal / "NOTICE").write_text("required notice\n", encoding="utf-8")
+        prefix = self.root / "resource byte verification"
+        result = self.configure(flutter_layout=True, relative_install=True, install_prefix=prefix,
+                                bundle_subdir="bin;tools")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.build_fixture_runner()
+        sources = {"core-capabilities.json": artifact.parent / "core-capabilities.json",
+                   "native-build.json": artifact.parent / "native-build.json",
+                   "Legal/NOTICE": legal / "NOTICE", "Legal/LICENSE.wintun": artifact / "LICENSE.wintun"}
+        for name, source in sources.items():
+            with self.subTest(resource=name):
+                result = self.install_component(prefix)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                installed = prefix / "bin;tools/sing_box_flutter" / name
+                original = source.read_bytes()
+                installed.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                stamp = source.stat()
+                os.utime(installed, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                result = self.install_component(prefix)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Installed Windows companion resources failed byte verification",
+                              " ".join((result.stdout + result.stderr).split()))
+                self.assertFalse(installed.exists())
+                result = self.install_component(prefix)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(installed.read_bytes(), original)
+
+    def test_deferred_helper_must_be_installed_beside_the_host(self):
+        self.published()
+        for kind in ("FILE", "DIRECTORY", "filtered-and-other-directory"):
+            with self.subTest(rule=kind):
+                prefix = self.root / ("different destination " + kind)
+                rules = 'get_filename_component(REVIEW_CORE "${bundle_path}" DIRECTORY)\n'
+                if kind == "FILE":
+                    rules += 'install(FILES "${bundle_path}" DESTINATION "other" COMPONENT Helper)\n'
+                else:
+                    if kind == "filtered-and-other-directory":
+                        rules += ('install(DIRECTORY "${REVIEW_CORE}/" DESTINATION "bin;tools" '
+                                  'COMPONENT Helper FILES_MATCHING PATTERN "*.json")\n')
+                    rules += 'install(DIRECTORY "${REVIEW_CORE}/" DESTINATION "other" COMPONENT Helper)\n'
+                result = self.configure(flutter_layout=True, relative_install=True, install_prefix=prefix,
+                                        runner_component="Runtime", bundle_subdir="bin;tools",
+                                        omit_helper=True, extra_rules=rules)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.build_fixture_runner()
+                result = self.install_component(prefix)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Installed Windows helper failed byte verification", result.stdout + result.stderr)
+
+    def test_unreachable_conditions_cannot_claim_helper_ownership(self):
+        self.published()
+        copy = ('file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/bin;tools" TYPE DIRECTORY '
+                'FILES "${REVIEW_CORE}/")')
+        cases = (
+            'if(CMAKE_INSTALL_COMPONENT STREQUAL "Metadata" AND FALSE)\n' + copy + '\nendif()',
+            'if(TRUE)\nmessage(STATUS "earlier branch chosen")\n'
+            'elseif(CMAKE_INSTALL_COMPONENT STREQUAL "Metadata")\n' + copy + '\nendif()',
+            'if("CMAKE_INSTALL_COMPONENT" STREQUAL "Metadata")\n' + copy + '\nendif()',
+        )
+        for index, code in enumerate(cases):
+            with self.subTest(condition=index):
+                prefix = self.root / ("unreachable directory rule " + str(index))
+                rules = ('get_filename_component(REVIEW_CORE "${bundle_path}" DIRECTORY)\n'
+                         'install(DIRECTORY "${REVIEW_CORE}/" DESTINATION "bin;tools" '
+                         'COMPONENT Metadata FILES_MATCHING PATTERN "*.json")\n')
+                escaped = code.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                rules += 'install(CODE "' + escaped + '" COMPONENT Metadata)\n'
+                result = self.configure(flutter_layout=True, relative_install=True, install_prefix=prefix,
+                                        runner_component="Runtime", bundle_subdir="bin;tools",
+                                        omit_helper=True, extra_rules=rules)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.build_fixture_runner()
+                result = self.install_component(prefix)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("Installed Windows helper failed byte verification", result.stdout + result.stderr)
 
     def test_large_install_manifest_preserves_unicode_and_semicolons(self):
         entry, _, _ = self.published()

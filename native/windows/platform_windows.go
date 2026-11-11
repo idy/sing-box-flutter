@@ -80,11 +80,11 @@ func privateDirectorySecurityForToken(token windows.Token) (*windows.SECURITY_DE
 		return nil, errDirectories // Never create Medium state on a first launch.
 	}
 	label := sid.String()
-	// Keep user+SYSTEM full control. An inheritable no-write-up label at the
-	// process integrity level (high for the elevated helper) prevents a lower
-	// integrity process with the same user SID from changing managed state.
-	// This is local to these objects; no token privilege or global policy changes.
-	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")S:P(ML;OICI;NW;;;" + label + ")")
+	// Keep user+SYSTEM full control. Inheritable no-write-up and no-read-up at
+	// the process integrity level (high for the elevated helper) prevent a lower
+	// integrity process with the same user SID from reading auth/state secrets
+	// or changing managed state. This policy is local to these objects.
+	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")S:P(ML;OICI;NWNR;;;" + label + ")")
 }
 
 // Existing objects are never upgraded: a previously granted WRITE_OWNER or
@@ -316,8 +316,9 @@ func (d *directoryHandles) openFile(parent windows.Handle, name string, create, 
 }
 
 // Retain a metadata-only file pin that denies delete/rename but permits the
-// native database to reopen it for data IO. The parent must already be private;
-// both new and existing files must satisfy the same immutable private policy.
+// native database to reopen it for data IO. The caller must establish that the
+// parent belongs to the leased managed hierarchy; matching policy alone cannot
+// prove that an external object was private when its old handles were granted.
 func (d *directoryHandles) pinNativeFile(parent windows.Handle, name string, descriptor *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
 	if parent == 0 || !safeDirectoryComponent(name) || descriptor == nil || len(d.handles) == 0 {
 		return 0, errDirectories

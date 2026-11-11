@@ -6,11 +6,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 
 # -I removes the script directory; restore only this trusted package directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_install_guard import verify_selection
 from windows_install_records import read_records
 from windows_install_rules import directory_copies_helper
 
@@ -59,35 +59,45 @@ def installation_model(settings: dict, configuration: str) -> tuple[Path, Path, 
     return build, reply, source, selected
 
 
-def helper_components(settings: dict, configuration: str) -> tuple[set[str], set[str]]:
+def helper_components(settings: dict, configuration: str, prefix: str) -> dict[str, set[str]]:
+    """Map each actual helper destination to components whose rules admit it."""
     build, reply, source, selected = installation_model(settings, configuration)
     core = (Path(settings["core_dir"]) / HELPER).resolve()
-    definite: set[str] = set()
-    possible: set[str] = set()
+    effective_prefix = settings["fallback_prefix"] if "$<" in prefix else prefix
+    owners: dict[str, set[str]] = {}
     for directory in selected["directories"]:
         details = read_reply(reply, directory["jsonFile"])
         for installer in details.get("installers", []):
             kind = installer.get("type")
             if kind not in ("file", "directory"):
                 continue
+            root = Path(installer["destination"])
+            if not root.is_absolute():
+                root = Path(effective_prefix) / root
+            root = root.resolve()
+            component = installer.get("component", "Unspecified")
             for item in installer.get("paths", []):
                 origin = item.get("from") if isinstance(item, dict) else item
                 if not isinstance(origin, str):
                     continue
                 path = Path(origin)
                 path = (path if path.is_absolute() else source / path).resolve()
-                component = installer.get("component", "Unspecified")
-                if kind == "file" and path == core:
-                    if not isinstance(item, dict) or item.get("to", HELPER) == HELPER:
-                        definite.add(component)
-                        possible.add(component)
-                elif (kind == "directory" and core.is_relative_to(path) and
-                      directory_copies_helper(build / directory["build"] / "cmake_install.cmake",
-                                              component, selected["name"], path, core)):
-                    # File API omits filters. A directory component can defer the
-                    # host check only if its generated copy policy admits the exe.
-                    possible.add(component)
-    return definite, possible
+                if kind == "file":
+                    if path.as_posix() != core.as_posix() or (isinstance(item, dict) and item.get("to", HELPER) != HELPER):
+                        continue
+                    destination = root
+                else:
+                    source_prefix = path.as_posix().rstrip("/") + "/"
+                    if not core.as_posix().startswith(source_prefix) or not directory_copies_helper(
+                            build / directory["build"] / "cmake_install.cmake", component,
+                            selected["name"], path, core, destination=root, prefix=effective_prefix):
+                        continue
+                    target = item.get("to", path.name) if isinstance(item, dict) else path.name
+                    relative = Path(core.as_posix()[len(source_prefix):])
+                    destination = (root / target / relative.parent).resolve()
+                # Resolved spelling preserves distinct case-sensitive directories.
+                owners.setdefault(destination.as_posix(), set()).add(component)
+    return owners
 
 
 def install_directories(settings: dict, configuration: str, prefix: str, component: str, *,
@@ -195,14 +205,14 @@ def verify_installed(settings: dict, configuration: str, prefix: str, component:
     guard = json.loads(Path(settings["guard_file"]).read_text(encoding="utf-8"))
     destinations = install_directories(settings, configuration, prefix, component,
                                        verify_copies=True, fallback=False, manifest=manifest)
-    definite_components, possible_components = helper_components(settings, configuration)
-    # An individual component may intentionally stage the host before its helper.
-    # Only another component whose actual copy policy admits the helper can defer
-    # that check; resource-only filters cannot stand in for executable ownership.
-    if (not component or component in definite_components or
-            possible_components.issubset({component})):
-        destinations += install_directories(settings, configuration, prefix, component,
-                                            host_only=True, fallback=False, manifest=manifest)
+    owners = helper_components(settings, configuration, prefix)
+    # A later component may defer this host's check only when it installs an
+    # admitted helper beside that host, not in another bundle directory.
+    for destination in install_directories(settings, configuration, prefix, component,
+                                           host_only=True, fallback=False, manifest=manifest):
+        components = owners.get(destination, set())
+        if not component or not components or component in components:
+            destinations.append(destination)
     destinations = list(dict.fromkeys(destinations))
     invalid = []
     for destination in destinations:
@@ -220,14 +230,58 @@ def verify_installed(settings: dict, configuration: str, prefix: str, component:
             if path.is_file() or path.is_symlink():
                 path.unlink()
         raise ValueError("Installed Windows helper failed byte verification")
-    result = subprocess.run([
-        guard["python"], "-I", "-X", "utf8", guard["validator"],
-        "--project-dir", guard["project_dir"], "--target", "windows",
-        "--windows-arch", guard["architecture"], "--installed-artifact", guard["core_dir"],
-        "--installed-sha256", guard["core_digest"],
-    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode:
-        raise ValueError("Windows core selection changed before installation completed")
+    verify_selection(guard)
+
+
+def resource_directories(settings: dict, configuration: str, prefix: str, component: str,
+                         manifest: str | None) -> list[str]:
+    directories = install_directories(settings, configuration, prefix, component,
+                                      verify_copies=True, manifest=manifest, fallback=False)
+    directories += install_directories(settings, configuration, prefix, component,
+                                       manifest=manifest, host_only=True, fallback=False)
+    if not directories and component in ("", "Runtime"):
+        effective_prefix = settings["fallback_prefix"] if "$<" in prefix else prefix
+        directories = [Path(effective_prefix).resolve().as_posix()]
+    return list(dict.fromkeys(directories))
+
+
+def verify_resources(settings: dict, configuration: str, prefix: str, component: str,
+                     manifest: str | None) -> None:
+    core = Path(settings["core_dir"])
+    parent = core.parent
+    sources = {"core-capabilities.json": parent / "core-capabilities.json",
+               "native-build.json": parent / "native-build.json",
+               "Legal/LICENSE.wintun": core / "LICENSE.wintun"}
+    legal = parent / "Legal"
+    for source in legal.rglob("*"):
+        if source.name.casefold() == "license.wintun":
+            continue
+        if source.is_symlink():
+            raise ValueError("Unsafe Windows companion-resource source")
+        if source.is_file():
+            sources["Legal/" + source.relative_to(legal).as_posix()] = source
+    expected = {}
+    for name, source in sources.items():
+        with source.open("rb") as stream:
+            expected[name] = hashlib.file_digest(stream, "sha256").digest()
+    invalid = []
+    for destination in resource_directories(settings, configuration, prefix, component, manifest):
+        installed = Path(os.environ.get("DESTDIR", "") + destination) / "sing_box_flutter"
+        for name, digest in expected.items():
+            path = installed / name
+            if path.is_symlink() or not path.is_file():
+                invalid.append(path)
+                continue
+            with path.open("rb") as stream:
+                if hashlib.file_digest(stream, "sha256").digest() != digest:
+                    invalid.append(path)
+    if invalid:
+        for path in invalid:
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+        raise ValueError("Installed Windows companion resources failed byte verification")
+    # Recheck the helper and selected recipe after all companion copies too.
+    verify_installed(settings, configuration, prefix, component, manifest)
 
 
 def main() -> int:
@@ -246,7 +300,7 @@ def main() -> int:
     guard.add_argument("--core-dir", type=Path, required=True)
     guard.add_argument("--core-digest", required=True)
     guard.add_argument("--architecture", choices=("amd64", "arm64"), required=True)
-    for name in ("resolve", "verify-copies"):
+    for name in ("resolve", "verify-copies", "verify-resources"):
         resolve = commands.add_parser(name)
         resolve.add_argument("--settings", type=Path, required=True)
         resolve.add_argument("--configuration", default="")
@@ -282,17 +336,11 @@ def main() -> int:
             manifest = read_records(json.loads(args.records_lease)) if args.records_lease else args.manifest
             if args.command == "verify-copies":
                 verify_installed(settings, args.configuration, args.prefix, args.component, manifest)
+            elif args.command == "verify-resources":
+                verify_resources(settings, args.configuration, args.prefix, args.component, manifest)
             else:
-                directories = install_directories(settings, args.configuration, args.prefix, args.component,
-                                                   manifest=manifest, fallback=False)
-                directories += install_directories(settings, args.configuration, args.prefix, args.component,
-                                                    manifest=manifest, host_only=True, fallback=False)
-                # Preserve the existing explicit Runtime resource-staging entry
-                # point; unrelated named components never receive this fallback.
-                if not directories and args.component in ("", "Runtime"):
-                    prefix = settings["fallback_prefix"] if "$<" in args.prefix else args.prefix
-                    directories = [Path(prefix).resolve().as_posix()]
-                print(json.dumps(list(dict.fromkeys(directories)), ensure_ascii=False))
+                print(json.dumps(resource_directories(settings, args.configuration, args.prefix,
+                                                     args.component, manifest), ensure_ascii=False))
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f"Windows resource installation: {error}\n")
     return 0

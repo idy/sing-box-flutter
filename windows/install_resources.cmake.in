@@ -59,14 +59,14 @@ block(PROPAGATE CMAKE_INSTALL_MANIFEST_FILES)
       --records-lease "${_sbf_records}"
     RESULT_VARIABLE _sbf_result OUTPUT_VARIABLE _sbf_roots ERROR_VARIABLE _sbf_error
     ENCODING UTF-8 OUTPUT_STRIP_TRAILING_WHITESPACE)
-  # Readers have finished before companion resources extend the install manifest.
-  _sing_box_flutter_release_records()
   if(NOT _sbf_result EQUAL 0)
+    _sing_box_flutter_release_records()
     message(FATAL_ERROR "${_sbf_error}")
   endif()
   string(JSON _sbf_count LENGTH "${_sbf_roots}")
   # Unrelated named components have no runtime-resource destination.
   if(_sbf_count LESS 1)
+    _sing_box_flutter_release_records()
     return()
   endif()
   math(EXPR _sbf_last "${_sbf_count} - 1")
@@ -81,4 +81,16 @@ block(PROPAGATE CMAKE_INSTALL_MANIFEST_FILES)
     file(INSTALL DESTINATION "${_sbf_root}/sing_box_flutter/Legal" TYPE FILE
       FILES "${_sbf_core}/LICENSE.wintun")
   endforeach()
+  # file(INSTALL) can skip destinations with matching timestamps. Authenticate
+  # the final bytes, including capabilities, provenance and every copied notice.
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_resolver}" verify-resources
+      --settings "${_sbf_settings}" --configuration "${CMAKE_INSTALL_CONFIG_NAME}"
+      --prefix "${CMAKE_INSTALL_PREFIX}" --component "${CMAKE_INSTALL_COMPONENT}"
+      --records-lease "${_sbf_records}"
+    RESULT_VARIABLE _sbf_result ERROR_VARIABLE _sbf_error ENCODING UTF-8)
+  _sing_box_flutter_release_records()
+  if(NOT _sbf_result EQUAL 0)
+    message(FATAL_ERROR "Windows companion-resource verification failed: ${_sbf_error}")
+  endif()
 endblock()

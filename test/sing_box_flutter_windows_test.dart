@@ -499,26 +499,30 @@ void main() {
     await subscription.cancel();
   });
 
-  test('an awaited status snapshot never replaces a newer native event',
-      () async {
-    process.onRequest = process.respondNormally;
-    await plugin.initialize(
-        applicationId: 'test.app', notificationTitle: 'Example');
-    process.onRequest = (request) {
-      // One OS read can carry both an older RPC response and the newer event.
-      final response = jsonEncode({
-        'id': request['id'],
-        'result': {'type': 'status', 'state': 'disconnected'},
-      });
-      final event = jsonEncode({
-        'event': {'type': 'status', 'state': 'connected'},
-      });
-      process._output.add(utf8.encode('$response\n$event\n'));
-    };
-    expect((await plugin.getStatus()).state, VpnConnectionState.disconnected);
-    expect((await plugin.events.first as VpnStatus).state,
-        VpnConnectionState.connected);
-  });
+  for (final state in [
+    VpnConnectionState.connected,
+    VpnConnectionState.error
+  ]) {
+    test('getStatus returns a newer ${state.name} event over an old snapshot',
+        () async {
+      process.onRequest = process.respondNormally;
+      await plugin.initialize(
+          applicationId: 'test.app', notificationTitle: 'Example');
+      process.onRequest = (request) {
+        // One OS read can carry both an older RPC response and the newer event.
+        final response = jsonEncode({
+          'id': request['id'],
+          'result': {'type': 'status', 'state': 'disconnected'},
+        });
+        final event = jsonEncode({
+          'event': {'type': 'status', 'state': state.name},
+        });
+        process._output.add(utf8.encode('$response\n$event\n'));
+      };
+      expect((await plugin.getStatus()).state, state);
+      expect((await plugin.events.first as VpnStatus).state, state);
+    });
+  }
 
   test(
       'control methods require explicit initialization without launching a helper',
@@ -653,7 +657,7 @@ void main() {
         first, SingBoxFlutterWindows.applicationStorageName('dev.example.Vpn'));
     expect(first,
         isNot(SingBoxFlutterWindows.applicationStorageName('dev.example.vpn')));
-    expect(first, matches(RegExp(r'^v1-dev_example_Vpn-[a-f0-9]{64}$')));
+    expect(first, matches(RegExp(r'^v2-dev_example_Vpn-[a-f0-9]{64}$')));
     expect(SingBoxFlutterWindows.applicationStorageName('a' * 128).length,
         lessThanOrEqualTo(92));
     for (final invalid in ['', ' app', 'app ', 'app/id', 'a' * 129]) {

@@ -58,9 +58,9 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
     final prefix =
         readable.substring(0, readable.length > 24 ? 24 : readable.length);
     final identity = sha256.convert(utf8.encode(applicationId));
-    // This storage format only reopens objects protected at creation. Keep its
-    // namespace separate from earlier, unreleased in-place-sealed storage.
-    return 'v1-$prefix-$identity';
+    // v2 requires read and write isolation from lower-integrity processes.
+    // Never adopt or relabel earlier unreleased storage protected only from writes.
+    return 'v2-$prefix-$identity';
   }
 
   Future<Process> Function(String executable)? _launcher;
@@ -257,7 +257,7 @@ class SingBoxFlutterWindows extends SingBoxFlutterPlatform
       _statusRevision++;
       if (notify) _updates.add(status);
     }
-    return status;
+    return _status;
   }
 
   Future<Object?> _invokeInitialized(String method,

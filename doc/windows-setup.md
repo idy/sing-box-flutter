@@ -66,10 +66,11 @@ Installation verifies the configured receipt, path and digest before copying the
 helper, including when invoked directly through `cmake --install`. On Windows,
 read-only handles pin source files, directory ancestors, the receipt and host
 pubspec in the invoking CMake process until it exits. These handles deny write
-and delete sharing while CMake copies the inputs. The installed helper bytes and
-current selection are also checked after copying; a mismatched helper is removed
-and installation fails. Non-Windows packaging checks use the same final byte
-validation. Each Windows install keeps its own record file exclusively open in
+and delete sharing while CMake copies the inputs. After copying, it verifies the
+helper, capabilities, provenance and copied legal notices against the selected
+sources, then rechecks the current selection. Preserved timestamps cannot hide
+corrupted destination bytes; mismatched files are removed and installation fails.
+Non-Windows packaging checks use the same final byte validation. Each Windows install keeps its own record file exclusively open in
 CMake; writers and validators duplicate that handle and never reopen its pathname.
 Bounded hex chunks preserve large Unicode/semicolon manifests without exceeding
 Windows command-line limits. Closing the lease or installer deletes the temporary
@@ -203,43 +204,44 @@ version, including updates that change the executable directory. Independently
 operated applications must use different IDs. Android and iOS ignore this option.
 
 `initialize()` creates application storage under
-`%LOCALAPPDATA%/v1-<short application ID>-<application ID SHA-256>/sing_box_flutter`.
-The fixed `v1-` prefix identifies the secure storage format and stays constant
-across application updates. Executable paths and filename case do not determine
-the namespace. Changing the ID intentionally selects separate empty storage.
-Earlier unreleased path-based or in-place-sealed storage is left untouched and
-is not automatically adopted.
+`%LOCALAPPDATA%/v2-<short application ID>-<application ID SHA-256>/sing_box_flutter`.
+The fixed `v2-` prefix identifies the storage format with both read and write
+isolation from lower-integrity processes. It stays constant across application
+updates; executable paths and filename case do not determine the namespace.
+Changing the ID intentionally selects separate empty storage. Earlier unreleased
+`v1` state, path-based storage and in-place-sealed storage are left untouched and
+are not automatically adopted or relabeled.
 
 Storage must be on a local volume with persistent ACL support and no reparse-point
 ancestors. The helper creates managed objects atomically with private ACLs and
-no-write-up labels, and retains verified directory and lease handles until all
-core/check cleanup completes. Existing objects are verified without rewriting
-their security descriptors: private single-link state with the required integrity
-label keeps its contents across restarts. Unsafe ACLs, insufficient integrity,
-reparse points and multi-linked state cause initialization to fail without
-repairing or adopting those objects. Directory entries are checked by file
-identity, including distinct names in case-sensitive directories. Administrator
-privileges are required to create or reopen storage; normal cache and temporary-file
-features remain enabled.
+inheritable no-read-up/no-write-up labels, retaining verified directory and lease
+handles until all core/check cleanup completes. A Medium process using the same
+account cannot read inherited private state such as Tailscale authentication data.
+Existing objects must already satisfy that policy; verification never rewrites
+security descriptors. Safe single-link state persists across restarts. Unsafe
+ACLs, missing isolation bits, insufficient integrity, reparse points and
+multi-linked state cause initialization to fail. Directory entries are checked by
+file identity, including distinct names in case-sensitive directories. Runtime
+storage requires administrator privileges; ordinary compilation does not.
 
-An explicit `experimental.cache_file.path` outside application storage must also
-have a verified local hierarchy without reparse points. Its immediate parent and
-existing file must already be private at the required integrity, or be created
-atomically with that policy. Unsafe writable external paths are rejected without
-repair. First admission uses an exclusive-sharing metadata probe to reject
-pre-existing read/write/delete handles, then overlaps that probe with the retained
-file pin. Concurrent checks can reuse the current core's admitted file. The cache
-identity remains pinned through all core/check cleanup; checking a configuration
-with the cache enabled can create an empty private file. Do not harden untrusted
-external caches in place; historical metadata rights are not revoked by ACL changes.
-Deleting and recreating a corrupt cache is blocked while its file is leased: stop
-and exit the helper before manually cleaning it up.
+`experimental.cache_file.path` may use the native default, a literal relative path,
+or an absolute path within this same leased managed hierarchy. External paths are
+rejected even if their current ACL/label appears private: retained metadata rights
+from earlier administrator hardening cannot be excluded by a sharing probe. The
+helper verifies the live root's volume/file identity and each cache descendant,
+without rewriting an explicit path. Normal managed cache and temporary persistence
+remain enabled. Concurrent checks can reuse the current core's admitted file, and
+its identity remains pinned through all core/check cleanup. An enabled-cache check
+can create an empty private file. Deleting/recreating a corrupt cache is blocked
+while leased; stop and exit the helper before manually cleaning it up.
 
 The Apple identifiers and Android notification title are not used on Windows. `checkConfig()` parses against
 the selected native registry and validates the engine before connecting.
 Configurations travel through an anonymous process pipe, never command-line
-arguments or a temporary config file. Native protocol diagnostics are suppressed;
-platform errors and status events use fixed messages. Encoded UTF-8 requests,
+arguments or a temporary config file. The underlying Windows stderr handle and
+Go's cached stderr handles are redirected before configuration is read, including
+runtime panic output; redirection failure exits before initialization. Platform
+errors and status events use fixed messages. Encoded UTF-8 requests,
 including JSON escaping and newline framing, must fit within 8 MiB. Oversized
 requests return `request_too_large` locally without closing an existing VPN.
 
@@ -249,8 +251,11 @@ widget do not stop the VPN. Call `stop()` to close sing-box, restore routes, and
 release Wintun. The helper closes the core when its control pipe reaches EOF,
 including when the app exits. Unlike the mobile system services, Windows does not
 install a persistent background service: the tunnel belongs to the running app.
-After helper failure, `getStatus()` returns the cached failure and `stop()` waits
-for the old process to finish cleanup without launching another helper. Call
+A failed native close reports `cleanup_failed`, makes that helper unusable and
+retires its process; a startup error cannot hide the cleanup failure. After helper
+failure, `getStatus()` returns the cached failure and `stop()` waits for the old
+process to finish cleanup without launching another helper. If a newer event
+overtakes a status response, `getStatus()` returns that newer observed status. Call
 `initialize()` again before configuration checks, permission requests or starting
 a replacement session. A version lookup alone does not initialize that session.
 

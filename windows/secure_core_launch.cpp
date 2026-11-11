@@ -123,8 +123,11 @@ HANDLE OpenPinned(NtOpen open, HANDLE parent, const std::wstring& name,
     case_flags = 0;
   }
   if ((case_flags & ~DWORD{1}) != 0) return INVALID_HANDLE_VALUE;
+  // The absolute root must resolve its Object Manager DOS drive link. Keep
+  // FILE_OPEN_REPARSE_POINT below and prove the exact local volume root before
+  // descent; every subsequent relative component forbids all reparse traversal.
   attributes.Attributes =
-      kDontReparse | ((case_flags & 1) ? 0 : OBJ_CASE_INSENSITIVE);
+      (parent ? kDontReparse : 0) | ((case_flags & 1) ? 0 : OBJ_CASE_INSENSITIVE);
   HANDLE handle = INVALID_HANDLE_VALUE;
   IO_STATUS_BLOCK status{};
   const auto result = open(
@@ -369,8 +372,8 @@ std::unique_ptr<CoreLaunchLease> CoreLaunchLease::Acquire(
     return std::unique_ptr<CoreLaunchLease>{};
   };
   if (rejection_stage) *rejection_stage = "path validation";
-  // Do not normalize aliases: reject them. Only a local drive-absolute path is
-  // accepted as input; the output names the pinned device in the global namespace.
+  // Only local drive-absolute input is accepted. The exact volume-root proof
+  // rejects directory/SUBST aliases; output names the pinned native device.
   if (path.size() < 4 ||
       !((path[0] >= L'A' && path[0] <= L'Z') ||
         (path[0] >= L'a' && path[0] <= L'z')) ||

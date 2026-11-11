@@ -15,8 +15,15 @@ class UnknownRule(ValueError):
     pass
 
 
+class Argument(str):
+    def __new__(cls, value: str, quoted: bool):
+        result = super().__new__(cls, value)
+        result.quoted = quoted
+        return result
+
+
 def commands(text: str):
-    """Tokenize CMake commands, retaining quoted/bracket path arguments as scalars."""
+    """Tokenize CMake commands, retaining scalar quoting for condition semantics."""
     position = 0
     length = len(text)
 
@@ -64,6 +71,7 @@ def commands(text: str):
                 block = bracket(position)
                 if block:
                     value, position = block
+                    quoted = True
                 else:
                     quoted = text[position] == '"'
                     if quoted:
@@ -87,9 +95,8 @@ def commands(text: str):
                     else:
                         raise UnknownRule("Unterminated CMake argument")
                     if not quoted and not value:
-                        # Parenthesized conditions are not needed to prove a rule.
                         raise UnknownRule("Unsupported CMake condition")
-                arguments.append(value)
+                arguments.append(Argument(value, quoted))
             yield name, arguments
 
 
@@ -104,7 +111,32 @@ def matches(pattern: str, value: str) -> bool:
         raise UnknownRule("Invalid generated CMake regular expression") from error
 
 
-def permits(arguments: list[str], core: Path) -> bool:
+def condition(arguments: list[Argument], component: str, configuration: str) -> bool | None:
+    """Evaluate complete generated conditions; unknown expressions stay unknown."""
+    if any(argument.quoted for argument in arguments[:2]):
+        return None
+    if arguments[:2] == ["CMAKE_INSTALL_COMPONENT", "STREQUAL"]:
+        if len(arguments) < 3 or not arguments[2].quoted or "${" in arguments[2]:
+            return None
+        if len(arguments) == 3:
+            return arguments[2] == component
+        if (len(arguments) == 6 and arguments[3:] == ["OR", "NOT", "CMAKE_INSTALL_COMPONENT"]
+                and not any(argument.quoted for argument in arguments[3:])):
+            return arguments[2] == component or not component
+        return None
+    if arguments[:2] == ["CMAKE_INSTALL_CONFIG_NAME", "MATCHES"]:
+        if len(arguments) == 3 and arguments[2].quoted and "${" not in arguments[2]:
+            return matches(arguments[2], configuration)
+        return None
+    if len(arguments) == 1 and not arguments[0].quoted:
+        if arguments[0].upper() in ("TRUE", "1"):
+            return True
+        if arguments[0].upper() in ("FALSE", "0"):
+            return False
+    return None
+
+
+def permits(arguments: list[str], origin: Path, core: Path) -> bool:
     include = []
     exclude = []
     for index, argument in enumerate(arguments):
@@ -114,60 +146,67 @@ def permits(arguments: list[str], core: Path) -> bool:
             raise UnknownRule("Missing directory filter")
         pattern = arguments[index + 1]
         (exclude if index + 2 < len(arguments) and arguments[index + 2] == "EXCLUDE" else include).append(pattern)
-    paths = [core.as_posix(), *(parent.as_posix() for parent in core.parents)]
+    if not core.as_posix().startswith(origin.as_posix().rstrip("/") + "/"):
+        raise UnknownRule("Helper is outside the literal copied tree")
+    # Filters apply to entries in the copied tree, never to ancestors above it.
+    paths = [core.as_posix()]
+    for parent in core.parents:
+        paths.append(parent.as_posix())
+        if parent == origin:
+            break
     if any(matches(pattern, path) for pattern in exclude for path in paths):
         return False
     return "FILES_MATCHING" not in arguments or any(matches(pattern, core.as_posix()) for pattern in include)
 
 
 def directory_copies_helper(script: Path, component: str, configuration: str,
-                            origin: Path, core: Path) -> bool:
-    """Prove that an active generated directory rule includes the known helper."""
+                            origin: Path, core: Path, *, destination: Path, prefix: str) -> bool:
+    """Prove the known source/filter/destination rule is active in this component."""
     try:
-        stack: list[tuple[str, bool]] = []
+        # Each frame also remembers whether an earlier branch could have run.
+        # An unknown condition prevents every later branch from granting proof.
+        stack: list[tuple[str, bool, bool]] = []
         scopes = {"foreach", "while", "function", "macro", "block"}
         for name, arguments in commands(script.read_text(encoding="utf-8")):
             if name in ("if", "elseif"):
+                taken = False
                 if name == "elseif":
                     if not stack or stack[-1][0] != "if":
                         return False
-                    stack.pop()
-                if arguments[:2] == ["CMAKE_INSTALL_COMPONENT", "STREQUAL"]:
-                    active = len(arguments) >= 3 and arguments[2] == component
-                elif arguments[:2] == ["CMAKE_INSTALL_CONFIG_NAME", "MATCHES"]:
-                    active = len(arguments) == 3 and matches(arguments[2], configuration)
-                else:
-                    active = False
-                stack.append(("if", active))
+                    _, _, taken = stack.pop()
+                decision = condition(arguments, component, configuration)
+                stack.append(("if", not taken and decision is True, taken or decision is not False))
             elif name == "else":
-                # Ambiguous/custom branches cannot grant a deferred check.
                 if not stack or stack[-1][0] != "if":
                     return False
-                stack[-1] = ("if", False)
+                _, _, taken = stack.pop()
+                stack.append(("if", not taken, True))
             elif name == "endif":
                 if not stack or stack[-1][0] != "if":
                     return False
                 stack.pop()
             elif name in scopes:
-                # A function body or a loop may never run. Its file(INSTALL)
-                # commands cannot prove that a component installs the helper.
-                stack.append((name, False))
+                stack.append((name, False, True))
             elif name.startswith("end") and name[3:] in scopes:
                 if not stack or stack[-1][0] != name[3:]:
                     return False
                 stack.pop()
-            elif name == "file" and all(active for _, active in stack) and arguments[:1] == ["INSTALL"]:
-                if "TYPE" not in arguments or "FILES" not in arguments:
+            elif name == "file" and all(active for _, active, _ in stack) and arguments[:1] == ["INSTALL"]:
+                if not all(key in arguments for key in ("TYPE", "FILES", "DESTINATION")):
                     continue
                 if arguments[arguments.index("TYPE") + 1] != "DIRECTORY":
+                    continue
+                placed = arguments[arguments.index("DESTINATION") + 1]
+                placed = placed.replace("${CMAKE_INSTALL_PREFIX}", prefix)
+                if "${" in placed or "$ENV{" in placed or Path(placed).resolve().as_posix() != destination.as_posix():
                     continue
                 start = arguments.index("FILES") + 1
                 sources = []
                 for value in arguments[start:]:
                     if not Path(value).is_absolute():
                         break
-                    sources.append(Path(value).resolve())
-                if origin in sources and permits(arguments, core):
+                    sources.append(Path(value).resolve().as_posix())
+                if origin.as_posix() in sources and permits(arguments, origin, core):
                     return True
         return False
     except (OSError, ValueError, IndexError):

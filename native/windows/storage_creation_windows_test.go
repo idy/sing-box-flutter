@@ -76,13 +76,16 @@ func unsafeStorageDescriptor(t *testing.T, kind string) *windows.SECURITY_DESCRI
 		t.Fatal(err)
 	}
 	dacl := "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")"
-	label := "HI"
-	if kind == "broad" {
+	label, policy := "HI", "NWNR"
+	switch kind {
+	case "broad":
 		dacl += "(A;OICI;FA;;;BU)"
-	} else {
+	case "write-only":
+		policy = "NW"
+	default:
 		label = "ME"
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(dacl + "S:(ML;OICI;NW;;;" + label + ")")
+	descriptor, err := windows.SecurityDescriptorFromString(dacl + "S:P(ML;OICI;" + policy + ";;;" + label + ")")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +123,38 @@ func TestStorageRejectsUnsafeDescendantPolicyWithoutRepair(t *testing.T) {
 			}
 			if contents, err := os.ReadFile(path); err != nil || string(contents) != "old data" {
 				t.Fatalf("modified rejected persisted contents: %q, %v", contents, err)
+			}
+		})
+	}
+}
+
+func TestStorageRejectsExistingWriteOnlyRootAndDescendantsWithoutRepair(t *testing.T) {
+	for _, name := range []string{".", "cache", "tmp", "core.lock", "tailscale-state", `tailscale-state\auth.bin`} {
+		t.Run(name, func(t *testing.T) {
+			base := directoryTestCacheRoot(t)
+			working := filepath.Join(base, "Host App", "sing_box_flutter")
+			if err := initializeDirectories(working); err != nil {
+				t.Fatal(err)
+			}
+			state := filepath.Join(working, "tailscale-state", "auth.bin")
+			if err := os.Mkdir(filepath.Dir(state), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(state, []byte("persisted secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(working, name)
+			setOwnedCachePolicy(t, path, unsafeStorageDescriptor(t, "write-only"))
+			before, stateBefore := storagePolicySnapshot(t, path), storagePolicySnapshot(t, state)
+			if lease, err := initializeStorage(working); err == nil {
+				lease.Close()
+				t.Fatal("adopted legacy write-only policy that exposes same-user secrets")
+			}
+			if storagePolicySnapshot(t, path) != before || storagePolicySnapshot(t, state) != stateBefore {
+				t.Fatal("repaired rejected write-only policy")
+			}
+			if data, err := os.ReadFile(state); err != nil || string(data) != "persisted secret" {
+				t.Fatalf("rejected legacy state changed: %q, %v", data, err)
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"slices"
 	"strings"
@@ -312,11 +313,15 @@ func TestNativeCacheResolvesCallerPathAndDefault(t *testing.T) {
 			if name == "relative" {
 				path, want = "profile.db", filepath.Join(working, "profile.db")
 			} else if name == "absolute" {
-				external := filepath.Join(base, "external-cache")
-				if err := privateDirectory(external); err != nil {
-					t.Fatal(err)
+				if runtime.GOOS == "windows" {
+					path = filepath.Join(working, "cache", "absolute.db")
+				} else {
+					external := filepath.Join(base, "external-cache")
+					if err := privateDirectory(external); err != nil {
+						t.Fatal(err)
+					}
+					path = filepath.Join(external, "absolute.db")
 				}
-				path = filepath.Join(external, "absolute.db")
 				want = path
 			}
 			pathJSON, _ := json.Marshal(path)
