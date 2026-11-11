@@ -41,6 +41,22 @@ dart run sing_box_flutter build --target android
 dart run sing_box_flutter build --target apple
 ```
 
+```sh
+dart run sing_box_flutter build --target windows --windows-arch amd64
+```
+
+Windows builds a standalone selected core with `CGO_ENABLED=0`. The pinned
+sing-tun module embeds the official Wintun DLL; the builder verifies its selected
+module identity and embedded architecture-specific hash before compiling. The
+package-owned official license is retained with the app, with no sidecar driver
+or recurring Wintun ZIP download. Use `--windows-arch arm64` for ARM64 hosts.
+Go core builds run on Windows, macOS and Linux; Flutter Windows packaging requires Windows.
+The Windows target requires a host feature selection. See
+[Windows setup](windows-setup.md) for prerequisites, elevation and packaging.
+With a host core selection, `--target all` builds Android, Apple and macOS.
+Legacy standard-core build/install commands retain Android + Apple only. Windows
+always requires an explicit target.
+
 The selectable builder generates a small `native/mobile` binding package and only
 the requested constructor registry, then invokes verified gomobile directly. It
 does not use the upstream builder's fixed feature list or its RPC/profile-management
@@ -95,13 +111,22 @@ from `native-core.json`:
 | Upstream mobile module | `github.com/sagernet/gomobile v0.1.12` |
 
 `tool/tailscale-go.json` pins the official release archive SHA-256 for each supported
-macOS/Linux arm64/amd64 host. These digests came from GitHub's asset `digest` values
+macOS/Linux/Windows arm64/amd64 host. These digests came from GitHub's asset `digest` values
 for Tailscale's `build-63ae404c8203317fd3c82d972e5dc8f0fcb425cb` release, with the
 source API URL recorded in the lock. The archive checksum is validated on every
 invocation, then the toolchain is extracted again before any downloaded executable
 runs. A modified cached executable or a local provenance stamp cannot substitute
-for verification. `VERSION`, `go env`, explicit `GOROOT`, and the first `PATH` entry
-must agree. The Tailscale dependency's embedded `go.toolchain.rev` / next-revision
+for verification. `VERSION`, `go env` and explicit `GOROOT` must agree with the
+verified absolute compiler path. Standalone Windows/Linux builds never discover
+Go through `PATH`, including when a Windows work directory contains a semicolon.
+If the project `GOPATH` would contain a path-list separator, only its checksum-db
+metadata uses a private, separator-free temporary directory, cleaned on process
+exit. Module, binary and build caches remain in the project. A temporary root
+containing the separator is rejected. The real pinned-compiler smoke checks both
+compiler and cache paths containing that separator with an empty `PATH` and no
+network proxy. Mobile tools spawn nested commands through `PATH`, so they require Go and `GOBIN`
+directories without the platform's path separator and verify those entries before
+any mobile tool download or compilation. The Tailscale dependency's embedded `go.toolchain.rev` / next-revision
 contract is checked before native compilation; a mismatched fork fails early rather
 than producing a binary that panics at startup. No mismatch environment override is
 used. No source build of Go or globally installed Go is used.

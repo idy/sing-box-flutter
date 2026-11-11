@@ -1,6 +1,7 @@
 """Reversible, source-identified WGC registration in the pinned upstream libbox."""
 from __future__ import annotations
 
+from collections.abc import Callable
 import contextlib
 import json
 from pathlib import Path
@@ -36,7 +37,7 @@ def load_extensions(config: Path | None) -> list[dict]:
     if config is None:
         return []
     config = config.expanduser().resolve(strict=True)
-    document = json.loads(config.read_text())
+    document = json.loads(config.read_text(encoding="utf-8"))
     if not isinstance(document, dict) or set(document) != {"extensions"} or not isinstance(document["extensions"], list):
         raise BuildError("WGC build config must contain an extensions list")
     extensions = []
@@ -80,7 +81,7 @@ def load_extensions(config: Path | None) -> list[dict]:
 
 def seed_module_checksums(source: Path, module: str, locked: dict[str, str]) -> None:
     sums = source / "go.sum"
-    original = sums.read_text()
+    original = sums.read_text(encoding="utf-8")
     present = set()
     for line in original.splitlines():
         fields = line.split()
@@ -89,7 +90,7 @@ def seed_module_checksums(source: Path, module: str, locked: dict[str, str]) -> 
                 raise BuildError(f"Resolved {module} checksum conflicts with the checked-in lock")
             present.add(fields[1])
     additions = "".join(f"{module} {v} {locked[v]}\n" for v in sorted(locked.keys() - present))
-    sums.write_text(original + ("\n" if original and not original.endswith("\n") else "") + additions)
+    sums.write_text(original + ("\n" if original and not original.endswith("\n") else "") + additions, encoding="utf-8")
 
 
 def checksum_entries(text: str) -> dict[tuple[str, str], str]:
@@ -118,11 +119,11 @@ def pin_checksum_text(source: Path, text: str, trusted: dict) -> None:
 
 
 def seed_wgc_checksums(source: Path, root: Path, module_root: Path | None = None) -> None:
-    version = json.loads((root / "native-core.json").read_text())["wgc_version"]
+    version = json.loads((root / "native-core.json").read_text(encoding="utf-8"))["wgc_version"]
     wanted = {version, version + "/go.mod"}
     locked = {}
     lock_file = (module_root if module_root is not None else root / "native/wgc") / "go.sum"
-    for line in lock_file.read_text().splitlines():
+    for line in lock_file.read_text(encoding="utf-8").splitlines():
         fields = line.split()
         if len(fields) == 3 and fields[0] == "github.com/idy/wgc" and fields[1] in wanted:
             if not CHECKSUM.fullmatch(fields[2]):
@@ -136,13 +137,20 @@ def seed_wgc_checksums(source: Path, root: Path, module_root: Path | None = None
 def core_dependency_modules(source: Path, go: Path, env: dict, run) -> set[str]:
     declared = json.loads(run([go, "mod", "edit", "-json"], cwd=source, env=env, capture=True))
     protected = {entry["Path"] for entry in declared.get("Require", [])}
-    protected.update(module for module, _ in checksum_entries((source / "go.sum").read_text()))
+    protected.update(module for module, _ in checksum_entries((source / "go.sum").read_text(encoding="utf-8")))
     return protected
 
 
 @contextlib.contextmanager
-def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], root: Path = ROOT):
-    """Register WGC in the same libbox instance; restore upstream inputs on all exits."""
+def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], root: Path = ROOT, *,
+                resolve_dependencies: Callable[[Path, dict, Path, Callable], object] | None = None):
+    """Register WGC and restore upstream inputs on all exits.
+
+    By default tidy resolves the standard/mobile graph. A selected-package
+    resolver receives (go, resolution_env, source, run) and must only read package
+    graphs, without compiling or executing code. Module updates are enabled only
+    in resolution_env; checksum guards and verification still run before yield.
+    """
     registry = source / "include/registry.go"
     builder = source / "cmd/internal/build_libbox/main.go"
     generated = source / "include/wgc_flutter.go"
@@ -187,12 +195,12 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
                 item["path"] = local_snapshots[identity]
         if prepared:
             protected = core_dependency_modules(source, go, env, run)
-            protected.update(module for module, _ in checksum_entries((adapter_snapshot / "go.sum").read_text()))
+            protected.update(module for module, _ in checksum_entries((adapter_snapshot / "go.sum").read_text(encoding="utf-8")))
             if any(item["module"] in protected for item in prepared):
                 raise BuildError("WGC extensions must not replace or override core dependency modules")
-        registry.write_text(registry_text.replace(marker, marker + "\tregisterWGCEndpoint(registry)\n"))
-        builder.write_text(builder_text.replace(tag_marker, 'sharedTags = append(sharedTags, "with_wgc")\n\t' + tag_marker))
-        generated.write_text(generated_text)
+        registry.write_text(registry_text.replace(marker, marker + "\tregisterWGCEndpoint(registry)\n"), encoding="utf-8")
+        builder.write_text(builder_text.replace(tag_marker, 'sharedTags = append(sharedTags, "with_wgc")\n\t' + tag_marker), encoding="utf-8")
+        generated.write_text(generated_text, encoding="utf-8")
         run([go, "mod", "edit", f"-require={MODULE}@v0.0.0", f"-replace={MODULE}=./{adapter_snapshot.relative_to(source).as_posix()}"], cwd=source, env=env)
         for item in prepared:
             options = [f"-require={item['module']}@{item['version']}"]
@@ -201,7 +209,7 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
             run([go, "mod", "edit", *options], cwd=source, env=env)
         # Go reads only the main module's sums, so promote authenticated module locks.
         trusted = checksum_entries(originals[source / "go.sum"].decode())
-        pin_checksum_text(source, (adapter_snapshot / "go.sum").read_text(), trusted)
+        pin_checksum_text(source, (adapter_snapshot / "go.sum").read_text(encoding="utf-8"), trusted)
         seed_wgc_checksums(source, root, adapter_snapshot)
         for item in prepared:
             if "path" not in item:
@@ -219,9 +227,13 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
                 module_root = Path(downloaded["Dir"])
             dependency_sums = module_root / "go.sum"
             if dependency_sums.is_file():
-                pin_checksum_text(source, dependency_sums.read_text(), trusted)
-        tidy_env = dict(env, GOFLAGS="-trimpath -buildvcs=false")
-        run([go, "mod", "tidy"], cwd=source, env=tidy_env)
+                pin_checksum_text(source, dependency_sums.read_text(encoding="utf-8"), trusted)
+        if resolve_dependencies is None:
+            tidy_env = dict(env, GOFLAGS="-trimpath -buildvcs=false")
+            run([go, "mod", "tidy"], cwd=source, env=tidy_env)
+        else:
+            resolution_env = dict(env, GOFLAGS="-mod=mod -trimpath -buildvcs=false")
+            resolve_dependencies(go, resolution_env, source, run)
         for item in prepared:
             selected = json.loads(run([go, "list", "-m", "-json", item["module"]],
                                       cwd=source, env=env, capture=True))
@@ -233,7 +245,7 @@ def wgc_overlay(source: Path, go: Path, env: dict, run, extensions: list[dict], 
             elif (selected.get("Replace") or selected.get("Sum") != item["sum"] or
                     selected.get("GoModSum") != item["go_mod_sum"]):
                 raise BuildError("Resolved WGC extension source differs from its pinned module")
-        for key, value in checksum_entries((source / "go.sum").read_text()).items():
+        for key, value in checksum_entries((source / "go.sum").read_text(encoding="utf-8")).items():
             if trusted.get(key) != value:
                 raise BuildError(f"Unpinned build dependency {key[0]}@{key[1]}; update the module go.sum from a trusted source")
         run([go, "mod", "verify"], cwd=source, env=env)

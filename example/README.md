@@ -27,6 +27,10 @@ dart run sing_box_flutter build --target android
 dart run sing_box_flutter build --target apple
 ```
 
+```bash
+dart run sing_box_flutter build --target windows --windows-arch amd64
+```
+
 Selected artifacts stay under this example's `.dart_tool/sing_box_flutter/`.
 Rebuild the core after changing its pubspec selection, then rebuild the app.
 `flutter pub get` and `flutter run` do not compile a missing core automatically.
@@ -74,6 +78,34 @@ flutter run
 
 Run these from this example directory. The editable default configuration creates
 a direct-routing VPN for testing, with no external proxy or Tailscale login.
+
+## Windows (Wintun)
+
+Install Visual Studio's Desktop development with C++ workload, the Windows SDK,
+Python 3.11+, Git and Flutter. Build the selected Windows core, then package:
+
+```bash
+flutter build windows --release
+```
+
+Deploy the complete `build/windows/x64/runner/Release/` bundle using an elevated
+installer into an administrator-owned directory, for example under `Program Files`,
+then launch its installed `sing_box_flutter_example.exe` and accept the UAC prompt.
+The example's manifest requests administrator privileges for Wintun adapter creation.
+The helper launch check rejects user-writable build directories; see the trusted
+installation and development requirements in [Windows setup](../doc/windows-setup.md).
+CMake bundles the selected helper, which embeds sing-tun's verified official
+Wintun driver, and retains its license under `sing_box_flutter/Legal/`. For ARM64,
+build the core with `--windows-arch arm64` and Flutter with
+`--target-platform windows-arm64`. See [Windows setup](../doc/windows-setup.md).
+
+The example passes `dev.idy.singboxflutter.example` as its stable Windows
+`applicationId`. Override `APPLICATION_ID` with your own unique identifier when
+adapting the host; keep the same ID across versioned-directory updates. IDs are
+case-sensitive and do not derive from executable paths.
+
+Cancelling the status subscription leaves the tunnel connected. Explicit stop or
+app exit closes the core and releases its routes; no Windows service is installed.
 
 ## macOS
 

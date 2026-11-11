@@ -31,6 +31,22 @@ required by the licenses.
 The `native/wgc` binding uses this dependency directly. Its protocol source is
 not vendored here. The binding follows this project's GPL-3.0-or-later license.
 
+## Wintun
+
+- Source and official binaries: https://www.wintun.net/
+- Version: 0.14.1; official archive, architecture-specific driver, and license
+  hashes are pinned in `tool/wintun.json`.
+- Runtime source: `github.com/sagernet/sing-tun` at
+  `v0.9.7-0.20261023115432-040db71fcd33`, module checksum
+  `h1:0+op+qbxh/M/JsqIG8tkEwPM+5pZtBeicf1ciMxp4OI=`. Its
+  `internal/wintun/{amd64,arm64}/wintun.dll` resources match the official hashes
+  and are embedded in the helper, then loaded through sing-tun's in-memory loader.
+- Copyright (C) 2018-2021 WireGuard LLC. All Rights Reserved.
+- The embedded official DLL uses the exact license from its release archive,
+  retained in this package as `native/windows/LICENSE.wintun` and in Windows apps
+  as `sing_box_flutter/Legal/LICENSE.wintun`. Preserve it when redistributing an
+  application. Wintun source is GPL-2.0. No separate driver DLL is bundled.
+
 ## Platform references and toolchain
 
 Native platform code references the official GPL-3.0-or-later clients:

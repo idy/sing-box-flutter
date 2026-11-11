@@ -2,187 +2,146 @@
 package libbox
 
 import (
+	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 
-	// The engine's decoder: it accepts comments and trailing commas, and the
-	// options re-encoder keeps comment text inside protocol entries, so the
-	// gate must read canonical options with the same syntax rules.
-	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing-box/option"
 )
 
-// Registries prevent unselected protocol constructors. Shared upstream TLS and
-// transport implementations also need a runtime gate against the exact receipt.
-func checkSelectedCapabilities(content string) error {
+// Registries enforce protocol selection while decoding. Shared upstream TLS,
+// transport and API implementations also need a gate against the exact receipt.
+func checkSelectedCapabilities(options option.Options) error {
+	selected, err := decodeCapabilities(selectedFeaturesJSON)
+	if err != nil {
+		return err
+	}
+	return checkCapabilities(options, selected)
+}
+
+func decodeCapabilities(content string) (map[string][]string, error) {
 	var selected map[string][]string
-	if err := json.Unmarshal([]byte(selectedFeaturesJSON), &selected); err != nil {
-		return errors.New("invalid compiled mobile capabilities")
+	if err := json.Unmarshal([]byte(content), &selected); err != nil || selected == nil {
+		return nil, errors.New("invalid compiled capabilities")
 	}
-	return checkCapabilities(content, selected)
+	return selected, nil
 }
 
-func checkCapabilities(content string, selected map[string][]string) error {
-	var root map[string]any
-	if err := json.Unmarshal([]byte(content), &root); err != nil || root == nil {
-		return errors.New("mobile configuration must be a JSON object")
+// Inspect decoded option types, never JSON field names: application dictionaries
+// can contain keys such as "tls" or "transport" without requesting a capability.
+// Interfaces and json:"-" fields include the registries' concrete option values.
+func checkCapabilities(options any, selected map[string][]string) error {
+	type visit struct {
+		typ     reflect.Type
+		pointer uintptr
+		length  int
 	}
-	for _, category := range []string{"inbounds", "outbounds", "endpoints", "services", "certificate_providers"} {
-		if value, exists := root[category]; exists {
-			if err := checkTypedList(value, category, selected); err != nil {
-				return err
+	seen := make(map[visit]bool)
+	var walk func(reflect.Value) error
+	walk = func(value reflect.Value) error {
+		if !value.IsValid() {
+			return nil
+		}
+		kind := value.Kind()
+		if kind == reflect.Slice || kind == reflect.Array || kind == reflect.Map {
+			// Named scalar types cannot contain option objects either. Skip their
+			// entire containers, including large string lists and headers.
+			switch value.Type().Elem().Kind() {
+			case reflect.Interface, reflect.Pointer, reflect.Struct, reflect.Slice, reflect.Array, reflect.Map:
+			default:
+				return nil
 			}
 		}
-	}
-	if !slices.Contains(selected["outbounds"], "direct") {
-		outbounds, _ := root["outbounds"].([]any)
-		route, _ := root["route"].(map[string]any)
-		final, _ := route["final"].(string)
-		if len(outbounds) == 0 && final == "" {
-			return errors.New("direct capability was not selected for this core")
-		}
-	}
-	if value, exists := root["dns"]; exists {
-		dns, ok := value.(map[string]any)
-		if !ok {
-			return errors.New("mobile DNS must be an object")
-		}
-		if servers, exists := dns["servers"]; exists {
-			if err := checkTypedList(servers, "dns", selected); err != nil {
-				return err
+		switch kind {
+		case reflect.Interface:
+			if !value.IsNil() {
+				return walk(value.Elem())
 			}
-		}
-	}
-	if value, exists := root["experimental"]; exists {
-		experimental, ok := value.(map[string]any)
-		if !ok {
-			return errors.New("mobile experimental options must be an object")
-		}
-		for _, name := range []string{"clash_api", "v2ray_api"} {
-			if value, exists := experimental[name]; exists {
-				if _, ok := value.(map[string]any); !ok {
-					return errors.New("mobile API options must be an object")
-				}
-				if !slices.Contains(selected["api"], name) {
-					return errors.New("API capability was not selected for this core")
-				}
+		case reflect.Pointer, reflect.Map, reflect.Slice:
+			if value.IsNil() {
+				return nil
 			}
-		}
-	}
-	return walkCapabilities(root, "", selected)
-}
-
-func checkTypedList(value any, category string, selected map[string][]string) error {
-	items, ok := value.([]any)
-	if !ok {
-		return errors.New("mobile protocol lists must be arrays")
-	}
-	for _, value := range items {
-		item, ok := value.(map[string]any)
-		if !ok {
-			return errors.New("mobile protocol entries must be objects")
-		}
-		if err := checkSelectedType(item, category, selected); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func checkSelectedType(item map[string]any, category string, selected map[string][]string) error {
-	name, ok := item["type"].(string)
-	if !ok || name == "" {
-		return errors.New("mobile protocol type is required")
-	}
-	if !slices.Contains(selected[category], name) {
-		return errors.New("capability was not selected for this core")
-	}
-	return nil
-}
-
-func walkCapabilities(value any, protocol string, selected map[string][]string) error {
-	switch item := value.(type) {
-	case []any:
-		for _, child := range item {
-			if err := walkCapabilities(child, protocol, selected); err != nil {
-				return err
+			key := visit{typ: value.Type(), pointer: uintptr(value.UnsafePointer())}
+			if value.Kind() == reflect.Slice {
+				key.length = value.Len()
 			}
-		}
-	case map[string]any:
-		if name, ok := item["type"].(string); ok {
-			protocol = name
-		}
-		for key, child := range item {
-			switch key {
-			case "headers", "header", "predefined", "environment", "env":
-				// These dictionaries contain arbitrary application/user keys.
-				continue
-			case "transport_options":
-				// A registered WGC application transport owns its opaque options.
-				if protocol == "wgc" {
-					continue
-				}
-			case "transport":
-				if transport, ok := child.(map[string]any); ok {
-					if err := checkSelectedType(transport, "transports", selected); err != nil {
+			if seen[key] {
+				return nil
+			}
+			seen[key] = true
+			switch value.Kind() {
+			case reflect.Pointer:
+				return walk(value.Elem())
+			case reflect.Map:
+				values := value.MapRange()
+				for values.Next() {
+					if err := walk(values.Value()); err != nil {
 						return err
 					}
-				} else if protocol == "vmess" || protocol == "vless" || protocol == "trojan" {
-					return errors.New("mobile stream transport must be an object")
 				}
-			case "tls":
-				tls, ok := child.(map[string]any)
-				if !ok {
-					return errors.New("mobile TLS options must be an object")
+			case reflect.Slice:
+				for index := 0; index < value.Len(); index++ {
+					if err := walk(value.Index(index)); err != nil {
+						return err
+					}
 				}
-				if err := checkTLSCapabilities(tls, selected); err != nil {
+			}
+		case reflect.Array:
+			for index := 0; index < value.Len(); index++ {
+				if err := walk(value.Index(index)); err != nil {
 					return err
 				}
-			case "certificate_provider":
-				switch provider := child.(type) {
-				case string:
-					if provider == "" {
-						return errors.New("mobile certificate provider reference is empty")
-					}
-				case map[string]any:
-					if err := checkSelectedType(provider, "certificate_providers", selected); err != nil {
+			}
+		case reflect.Struct:
+			if !value.CanInterface() {
+				return nil
+			}
+			var category, feature string
+			switch options := value.Interface().(type) {
+			case option.Options:
+				if len(options.Outbounds) == 0 && (options.Route == nil || options.Route.Final == "") && !slices.Contains(selected["outbounds"], "direct") {
+					return errors.New("direct capability was not selected for this core")
+				}
+			case option.V2RayTransportOptions:
+				category, feature = "transports", options.Type
+			case option.OutboundUTLSOptions:
+				if options.Enabled {
+					category, feature = "tls", "utls"
+				}
+			case option.InboundRealityOptions:
+				if options.Enabled {
+					category, feature = "tls", "reality"
+				}
+			case option.OutboundRealityOptions:
+				if options.Enabled {
+					category, feature = "tls", "reality"
+				}
+			case option.InboundECHOptions:
+				if options.Enabled {
+					category, feature = "tls", "ech"
+				}
+			case option.OutboundECHOptions:
+				if options.Enabled {
+					category, feature = "tls", "ech"
+				}
+			case option.ClashAPIOptions:
+				category, feature = "api", "clash_api"
+			case option.V2RayAPIOptions:
+				category, feature = "api", "v2ray_api"
+			}
+			if category != "" && !slices.Contains(selected[category], feature) {
+				return errors.New("capability was not selected for this core")
+			}
+			for index := 0; index < value.NumField(); index++ {
+				if value.Type().Field(index).IsExported() {
+					if err := walk(value.Field(index)); err != nil {
 						return err
 					}
-				default:
-					return errors.New("invalid mobile certificate provider")
 				}
 			}
-			if err := walkCapabilities(child, protocol, selected); err != nil {
-				return err
-			}
 		}
+		return nil
 	}
-	return nil
-}
-
-func checkTLSCapabilities(tls map[string]any, selected map[string][]string) error {
-	if enabled, exists := tls["enabled"]; exists {
-		if _, ok := enabled.(bool); !ok {
-			return errors.New("mobile TLS enabled must be boolean")
-		}
-	}
-	for _, name := range []string{"utls", "reality", "ech"} {
-		value, exists := tls[name]
-		if !exists {
-			continue
-		}
-		feature, ok := value.(map[string]any)
-		if !ok {
-			return errors.New("mobile TLS feature must be an object")
-		}
-		if enabled, exists := feature["enabled"]; exists {
-			active, ok := enabled.(bool)
-			if !ok {
-				return errors.New("mobile TLS feature enabled must be boolean")
-			}
-			if active && !slices.Contains(selected["tls"], name) {
-				return errors.New("TLS capability was not selected for this core")
-			}
-		}
-	}
-	return nil
+	return walk(reflect.ValueOf(options))
 }

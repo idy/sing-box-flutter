@@ -1,4 +1,4 @@
-/// Native sing-box VPN control for Android, iOS, macOS and Linux.
+/// Native sing-box VPN control for Android, iOS, macOS, Windows and Linux.
 ///
 /// Install the native libbox artifacts and, for Network Extension mode, a Packet Tunnel extension
 /// before using this library. See the package README for host setup.
@@ -25,11 +25,21 @@ class SingBoxFlutter {
   /// extension. macOS user_tun mode requires neither identifier. Select the
   /// macOS backend at build time in the host pubspec.yaml.
   /// Android uses [notificationTitle] for its foreground-service notification.
+  /// Windows requires a unique, stable [applicationId] shared by all versions of
+  /// this application. Its case-sensitive value identifies persistent storage.
+  /// Windows storage initialization requires an elevated application.
   Future<void> initialize({
+    String? applicationId,
     String? appGroup,
     String? providerBundleIdentifier,
     String notificationTitle = 'sing-box',
   }) {
+    if (applicationId != null &&
+        !RegExp(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+            .hasMatch(applicationId)) {
+      throw ArgumentError(
+          'Application IDs must contain 1 to 128 ASCII identifier characters.');
+    }
     for (final value in [appGroup, providerBundleIdentifier]) {
       if (value != null && value.trim().isEmpty) {
         throw ArgumentError('Apple identifiers must not be empty.');
@@ -38,7 +48,19 @@ class SingBoxFlutter {
     if (notificationTitle.trim().isEmpty) {
       throw ArgumentError('The notification title must not be empty.');
     }
-    return SingBoxFlutterPlatform.instance.initialize(
+    final platform = SingBoxFlutterPlatform.instance;
+    if (platform is SingBoxFlutterApplicationIdentity) {
+      if (applicationId == null) {
+        throw ArgumentError(
+            'This platform requires a stable applicationId when initializing the VPN.');
+      }
+      return (platform as SingBoxFlutterApplicationIdentity)
+          .initializeForApplication(
+        applicationId: applicationId,
+        notificationTitle: notificationTitle,
+      );
+    }
+    return platform.initialize(
       appGroup: appGroup,
       providerBundleIdentifier: providerBundleIdentifier,
       notificationTitle: notificationTitle,
@@ -50,7 +72,7 @@ class SingBoxFlutter {
 
   /// Checks sing-box JSON without connecting.
   ///
-  /// Android and Linux use native engine validation. iOS performs structural and
+  /// Android, Windows and Linux use native engine validation. iOS performs structural and
   /// compiled-capability preflight in the app; the extension performs full engine
   /// validation during startup, so a successful preflight cannot guarantee start.
   /// macOS user_tun requires an idle runtime and returns `busy` while a check,
@@ -67,6 +89,7 @@ class SingBoxFlutter {
   /// attached Activity; iOS and macOS NE install the configured VPN profile.
   /// macOS user_tun checks administrator privileges and returns false when absent;
   /// it does not display an elevation dialog or install a privileged helper.
+  /// Windows checks whether the application is elevated without launching UAC.
   /// Linux probes TUN access and requires capabilities on its bundled helper;
   /// no dialog opens.
   Future<bool> requestPermission() =>

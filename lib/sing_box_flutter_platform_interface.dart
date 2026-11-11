@@ -52,3 +52,15 @@ abstract class SingBoxFlutterPlatform extends PlatformInterface {
   /// Broadcast native status and diagnostic events.
   Stream<SingBoxEvent> get events => throw UnimplementedError('events');
 }
+
+/// Optional initialization capability for platforms with application-owned state.
+///
+/// Kept separate so existing [SingBoxFlutterPlatform.initialize] overrides and
+/// implementations retain their original contract.
+abstract interface class SingBoxFlutterApplicationIdentity {
+  /// Initializes persistent storage identified by a unique, stable host ID.
+  Future<void> initializeForApplication({
+    required String applicationId,
+    required String notificationTitle,
+  });
+}

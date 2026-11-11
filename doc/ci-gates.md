@@ -9,6 +9,21 @@ GitHub Actions checks before merge:
 - `OpenAI Code Review`, `OpenAI Issue Review`, `OpenAI PR Review`: the shared reviewer.
 - `Native CI gate`: conditional native validation with an unconditional PR result.
 
+The `windows` job in Check always reports its test result. Its costly native
+build and example packaging steps run when relevant package, helper, tooling,
+Windows runner or workflow inputs change, and on manual dispatch. A full-history
+checkout validates the PR base/head or push before/after commits. Unknown diffs
+and unclassified paths, including checkout and packaging configuration, build
+conservatively. Only explicitly recognized documentation changes skip those costly steps.
+The build verifies sing-tun's embedded Wintun driver and checks the packaged helper,
+capabilities, metadata and exact driver license, with no unused DLL sidecar.
+On the elevated Windows runner, `SING_BOX_FLUTTER_WINTUN_SMOKE=1` also enables a
+real adapter lifecycle test: create a uniquely named Wintun adapter, start the
+native core, stop it, and verify the adapter disappears. Its TUN configuration
+uses `auto_route: false`, preserving the runner's default routes and DNS policy.
+Ordinary host tests skip this opt-in test. Adding the Windows job does not change
+the repository's configured required-check list.
+
 The native workflow starts for every pull request. Its `changes` job determines
 whether native inputs changed. If so, validation, both Android/Apple builds and
 combined release-input verification must all succeed. If not, those jobs are

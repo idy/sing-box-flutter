@@ -1,0 +1,96 @@
+# Generated per configuration; all path values remain JSON strings.
+block(PROPAGATE CMAKE_INSTALL_MANIFEST_FILES)
+  set(_sbf_settings "${CMAKE_CURRENT_LIST_DIR}/sing_box_flutter-install-$<CONFIG>.json")
+  file(READ "${_sbf_settings}" _sbf_data)
+  string(JSON _sbf_python GET "${_sbf_data}" python)
+  string(JSON _sbf_resolver GET "${_sbf_data}" resolver)
+  string(JSON _sbf_records_tool GET "${_sbf_data}" records_tool)
+  string(JSON _sbf_core GET "${_sbf_data}" core_dir)
+  get_filename_component(_sbf_parent "${_sbf_core}" DIRECTORY)
+  # The record file stays exclusively open in this CMake process on Windows.
+  # Consumers duplicate that handle; no elevated write reopens a mutable path.
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_records_tool}" create
+    RESULT_VARIABLE _sbf_result OUTPUT_VARIABLE _sbf_records ERROR_VARIABLE _sbf_error
+    ENCODING UTF-8 OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _sbf_result EQUAL 0)
+    message(FATAL_ERROR "${_sbf_error}")
+  endif()
+  function(_sing_box_flutter_release_records)
+    execute_process(
+      COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_records_tool}" release --lease "${_sbf_records}"
+      RESULT_VARIABLE _sbf_release_result ERROR_VARIABLE _sbf_release_error ENCODING UTF-8)
+    if(NOT _sbf_release_result EQUAL 0)
+      message(FATAL_ERROR "Windows install-record release failed: ${_sbf_release_error}")
+    endif()
+  endfunction()
+  # Hex chunks keep Unicode/semicolon paths intact and each child command below
+  # Windows' command-line limit, even for very large Flutter asset manifests.
+  string(HEX "${CMAKE_INSTALL_MANIFEST_FILES}" _sbf_hex)
+  string(LENGTH "${_sbf_hex}" _sbf_length)
+  set(_sbf_offset 0)
+  while(_sbf_offset LESS _sbf_length)
+    string(SUBSTRING "${_sbf_hex}" ${_sbf_offset} 8192 _sbf_chunk)
+    execute_process(
+      COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_records_tool}" append
+        --lease "${_sbf_records}" --hex "${_sbf_chunk}"
+      RESULT_VARIABLE _sbf_result ERROR_VARIABLE _sbf_error ENCODING UTF-8)
+    if(NOT _sbf_result EQUAL 0)
+      _sing_box_flutter_release_records()
+      message(FATAL_ERROR "Windows install-record write failed: ${_sbf_error}")
+    endif()
+    math(EXPR _sbf_offset "${_sbf_offset} + 8192")
+  endwhile()
+  # Authenticate the bytes copied by host rules, not only the pre-copy source.
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_resolver}" verify-copies
+      --settings "${_sbf_settings}" --configuration "${CMAKE_INSTALL_CONFIG_NAME}"
+      --prefix "${CMAKE_INSTALL_PREFIX}" --component "${CMAKE_INSTALL_COMPONENT}"
+      --records-lease "${_sbf_records}"
+    RESULT_VARIABLE _sbf_result ERROR_VARIABLE _sbf_error ENCODING UTF-8)
+  if(NOT _sbf_result EQUAL 0)
+    _sing_box_flutter_release_records()
+    message(FATAL_ERROR "Windows installed-byte verification failed: ${_sbf_error}")
+  endif()
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_resolver}" resolve
+      --settings "${_sbf_settings}" --configuration "${CMAKE_INSTALL_CONFIG_NAME}"
+      --prefix "${CMAKE_INSTALL_PREFIX}" --component "${CMAKE_INSTALL_COMPONENT}"
+      --records-lease "${_sbf_records}"
+    RESULT_VARIABLE _sbf_result OUTPUT_VARIABLE _sbf_roots ERROR_VARIABLE _sbf_error
+    ENCODING UTF-8 OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _sbf_result EQUAL 0)
+    _sing_box_flutter_release_records()
+    message(FATAL_ERROR "${_sbf_error}")
+  endif()
+  string(JSON _sbf_count LENGTH "${_sbf_roots}")
+  # Unrelated named components have no runtime-resource destination.
+  if(_sbf_count LESS 1)
+    _sing_box_flutter_release_records()
+    return()
+  endif()
+  math(EXPR _sbf_last "${_sbf_count} - 1")
+  foreach(_sbf_index RANGE 0 ${_sbf_last})
+    string(JSON _sbf_root GET "${_sbf_roots}" ${_sbf_index})
+    file(INSTALL DESTINATION "${_sbf_root}/sing_box_flutter" TYPE FILE FILES
+      "${_sbf_parent}/core-capabilities.json" "${_sbf_parent}/native-build.json")
+    file(INSTALL DESTINATION "${_sbf_root}/sing_box_flutter/Legal" TYPE DIRECTORY
+      FILES "${_sbf_parent}/Legal/"
+      REGEX "/[Ll][Ii][Cc][Ee][Nn][Ss][Ee][.][Ww][Ii][Nn][Tt][Uu][Nn]$" EXCLUDE)
+    # The receipt and guard cover this exact copy, not the cached Legal copy.
+    file(INSTALL DESTINATION "${_sbf_root}/sing_box_flutter/Legal" TYPE FILE
+      FILES "${_sbf_core}/LICENSE.wintun")
+  endforeach()
+  # file(INSTALL) can skip destinations with matching timestamps. Authenticate
+  # the final bytes, including capabilities, provenance and every copied notice.
+  execute_process(
+    COMMAND "${_sbf_python}" -I -X utf8 "${_sbf_resolver}" verify-resources
+      --settings "${_sbf_settings}" --configuration "${CMAKE_INSTALL_CONFIG_NAME}"
+      --prefix "${CMAKE_INSTALL_PREFIX}" --component "${CMAKE_INSTALL_COMPONENT}"
+      --records-lease "${_sbf_records}"
+    RESULT_VARIABLE _sbf_result ERROR_VARIABLE _sbf_error ENCODING UTF-8)
+  _sing_box_flutter_release_records()
+  if(NOT _sbf_result EQUAL 0)
+    message(FATAL_ERROR "Windows companion-resource verification failed: ${_sbf_error}")
+  endif()
+endblock()

@@ -13,7 +13,13 @@ Build from source (0.3.0):
   dart run sing_box_flutter build --target android
   dart run sing_box_flutter build --target apple
   dart run sing_box_flutter build --target macos
+  dart run sing_box_flutter build --target windows --windows-arch amd64
   dart run sing_box_flutter build --target linux --arch amd64
+
+Windows supports amd64 and arm64, using native Windows or macOS/Linux cross builds.
+The helper embeds the pinned signed Wintun driver and retains its official license.
+With a core block, --target all builds Android + Apple + macOS.
+Legacy --target all builds Android + Apple. Linux and Windows require explicit targets.
 
 Add sing_box_flutter.core to your host pubspec.yaml to select features.
 Select macOS with sing_box_flutter.macos.mode: ne (default) or user_tun.
@@ -62,8 +68,12 @@ Pass --help after a subcommand for its options.''');
     final invocation = resolveHostArguments(arguments.skip(1).toList(),
         callerDirectory: Directory.current, environment: Platform.environment);
     forwarded = invocation.arguments;
-    final linux = _targetArgument(forwarded) == 'linux';
-    if (linux && arguments.first == 'build') script = 'build_core.py';
+    final target = requestedCoreTarget(forwarded);
+    final windows = target == 'windows';
+    final linux = target == 'linux';
+    if ((windows || linux) && arguments.first == 'build') {
+      script = 'build_core.py';
+    }
     // Help must work even if the host selection is incomplete or unsupported.
     if (!forwarded.contains('--help') && !forwarded.contains('-h')) {
       if (linux && arguments.first == 'install') {
@@ -74,6 +84,12 @@ Pass --help after a subcommand for its options.''');
       final snapshot = invocation.pubspec == null
           ? null
           : readCoreBuildSnapshot(invocation.pubspec!);
+      if (windows && (snapshot == null || !snapshot.hasCoreSelection)) {
+        throw const FormatException(
+            'Windows requires a host sing_box_flutter.core selection. '
+            'Add sing_box_flutter: {core: {}} to your pubspec.yaml, then '
+            'run dart run sing_box_flutter build --target windows.');
+      }
       if (linux && (snapshot == null || !snapshot.hasCoreSelection)) {
         throw const FormatException(
             'Linux source builds require sing_box_flutter.core in the host pubspec.yaml. '
@@ -118,7 +134,7 @@ Pass --help after a subcommand for its options.''');
     }
     final process = await Process.start(
       python,
-      [executable.path, ...forwarded],
+      ['-X', 'utf8', executable.path, ...forwarded],
       workingDirectory: root.path,
       mode: ProcessStartMode.inheritStdio,
     );
@@ -137,6 +153,19 @@ Pass --help after a subcommand for its options.''');
       request.parent.deleteSync(recursive: true);
     }
   }
+}
+
+/// Matches argparse's final --target value, including its equals form.
+String? requestedCoreTarget(List<String> arguments) {
+  String? target;
+  for (var index = 0; index < arguments.length; index++) {
+    if (arguments[index].startsWith('--target=')) {
+      target = arguments[index].substring('--target='.length);
+    } else if (arguments[index] == '--target' && index + 1 < arguments.length) {
+      target = arguments[++index];
+    }
+  }
+  return target;
 }
 
 /// A backend-only selection combines legacy mobile and selected macOS cores.
@@ -176,19 +205,6 @@ bool _macosOnlySourceTarget(List<String> arguments) {
         'and build --target macos separately.');
   }
   return target == 'macos';
-}
-
-String? _targetArgument(List<String> arguments) {
-  String? target;
-  for (var index = 0; index < arguments.length; index++) {
-    final argument = arguments[index];
-    if (argument.startsWith('--target=')) {
-      target = argument.substring('--target='.length);
-    } else if (argument == '--target' && index + 1 < arguments.length) {
-      target = arguments[++index];
-    }
-  }
-  return target;
 }
 
 /// Resolves CLI-owned host selectors while preserving legacy tool arguments.
@@ -330,6 +346,8 @@ Future<String?> _findPython() async {
     try {
       final result = await Process.run(candidate, [
         '-I',
+        '-X',
+        'utf8',
         '-c',
         'import sys; sys.exit(sys.version_info < (3, 11))',
       ]);

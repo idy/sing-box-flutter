@@ -27,6 +27,8 @@ class VpnExample extends StatefulWidget {
 }
 
 class _VpnExampleState extends State<VpnExample> {
+  static const applicationId = String.fromEnvironment('APPLICATION_ID',
+      defaultValue: 'dev.idy.singboxflutter.example');
   static const appGroup = String.fromEnvironment('APP_GROUP');
   static const provider = String.fromEnvironment('TUNNEL_BUNDLE_ID');
   final _plugin = SingBoxFlutter();
@@ -59,8 +61,11 @@ class _VpnExampleState extends State<VpnExample> {
     }
   }
 
-  Future<void> _initialize() async {
-    if (_initialized) return;
+  Future<void> _initialize({bool reconnect = false}) async {
+    if (_initialized &&
+        !(reconnect && defaultTargetPlatform == TargetPlatform.windows)) {
+      return;
+    }
     if (defaultTargetPlatform == TargetPlatform.iOS &&
         (appGroup.isEmpty || provider.isEmpty)) {
       throw StateError(
@@ -69,7 +74,9 @@ class _VpnExampleState extends State<VpnExample> {
       );
     }
     await _subscription?.cancel();
+    _subscription = null;
     await _plugin.initialize(
+      applicationId: applicationId,
       appGroup: appGroup.isEmpty ? null : appGroup,
       providerBundleIdentifier: provider.isEmpty ? null : provider,
       notificationTitle: 'sing_box_flutter example',
@@ -99,7 +106,9 @@ class _VpnExampleState extends State<VpnExample> {
   }
 
   Future<void> _connect() async {
-    await _initialize();
+    // Windows helpers can exit independently of the widget. Reinitialize before
+    // reconnecting so cached UI state cannot authorize an uninitialized helper.
+    await _initialize(reconnect: true);
     await _plugin.checkConfig(_config.text);
     if (!await _plugin.requestPermission()) {
       throw StateError('VPN permission was not granted.');

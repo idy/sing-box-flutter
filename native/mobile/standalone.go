@@ -207,7 +207,7 @@ type preparedStandaloneService struct {
 // validation engine would require double initialization or upstream changes.
 func needsDisposableValidation(options option.Options) bool {
 	return common.Any(options.Endpoints, func(e option.Endpoint) bool {
-		return e.Type == C.TypeOpenConnect || e.Type == C.TypeOpenVPNClient || e.Type == C.TypeOpenVPNServer
+		return e.Type == C.TypeWireGuard || e.Type == C.TypeOpenConnect || e.Type == C.TypeOpenVPNClient || e.Type == C.TypeOpenVPNServer
 	})
 }
 

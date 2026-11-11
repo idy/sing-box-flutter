@@ -30,6 +30,80 @@ jobs:
         run: flutter test
       - name: Check publication archive
         run: flutter pub publish --dry-run
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Detect Windows native inputs
+        id: windows-inputs
+        run: python -X utf8 tool/windows_ci.py
+      - name: Windows build tool tests
+        run: python -m unittest discover -s tests -p 'test_windows*.py' -v
+      - name: Secure helper launch policy tests
+        if: steps.windows-inputs.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          cmake -S windows/tests -B .build/secure-helper-launch -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'Secure launch test configuration failed' }
+          cmake --build .build/secure-helper-launch --config Release
+          if ($LASTEXITCODE -ne 0) { throw 'Secure launch test compilation failed' }
+          & .build/secure-helper-launch/Release/secure_core_launch_test.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Secure launch policy tests failed' }
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Resolve packages
+        run: flutter pub get
+      - name: Windows backend tests
+        run: flutter test test/sing_box_flutter_windows_test.dart
+      - name: Bootstrap verified Windows compiler
+        if: steps.windows-inputs.outputs.build == 'true'
+        working-directory: example
+        run: dart run sing_box_flutter build --target windows --bootstrap-only
+      - name: Real compiler paths containing semicolons
+        if: steps.windows-inputs.outputs.build == 'true'
+        run: python -I -B tests/smoke_go_environment.py
+      - name: Build Windows core and smoke-test native Wintun
+        if: steps.windows-inputs.outputs.build == 'true'
+        working-directory: example
+        env:
+          SING_BOX_FLUTTER_WINTUN_SMOKE: '1'
+        run: dart run sing_box_flutter build --target windows --windows-arch amd64
+      - name: Package Windows example
+        if: steps.windows-inputs.outputs.build == 'true'
+        working-directory: example
+        run: flutter build windows --release -v
+      - name: Verify bundled native files and elevation manifest
+        if: steps.windows-inputs.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          $bundle = 'example/build/windows/x64/runner/Release'
+          foreach ($name in @('sing_box_flutter_core.exe', 'sing_box_flutter/Legal/LICENSE.wintun', 'sing_box_flutter/core-capabilities.json', 'sing_box_flutter/native-build.json')) {
+            if (-not (Test-Path (Join-Path $bundle $name))) { throw "Missing bundled file: $name" }
+          }
+          if (Test-Path (Join-Path $bundle 'wintun.dll')) { throw 'Unused Wintun sidecar must not be bundled' }
+          $license = Join-Path $bundle 'sing_box_flutter/Legal/LICENSE.wintun'
+          $expected = (Get-Content -Raw tool/wintun.json | ConvertFrom-Json).files.license.sha256
+          if ((Get-FileHash $license -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Wintun license checksum mismatch' }
+          $mt = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\mt.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $mt) { throw 'Windows SDK manifest tool not found' }
+          $binary = [IO.Path]::GetFullPath((Join-Path $bundle 'sing_box_flutter_example.exe'))
+          $manifest = Join-Path $env:RUNNER_TEMP 'sing_box_flutter_example.manifest'
+          & $mt.FullName -nologo "-inputresource:$binary;#1" "-out:$manifest"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the embedded application manifest' }
+          [xml]$embedded = Get-Content -Raw -LiteralPath $manifest
+          $levels = @($embedded.SelectNodes("//*[local-name()='requestedExecutionLevel']"))
+          if ($levels.Count -ne 1 -or $levels[0].GetAttribute('level') -ne 'requireAdministrator' -or $levels[0].GetAttribute('uiAccess') -ne 'false') {
+            throw 'The packaged example must request administrator privileges without uiAccess'
+          }
   wgc:
     runs-on: ubuntu-latest
     steps:

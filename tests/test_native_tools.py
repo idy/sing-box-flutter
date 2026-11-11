@@ -576,7 +576,8 @@ class DownloadTests(unittest.TestCase):
 
 class ToolchainDownloadTests(unittest.TestCase):
     HOSTS = {"darwin-amd64": 470759042, "darwin-arm64": 470759043,
-             "linux-amd64": 470759104, "linux-arm64": 470759044}
+             "linux-amd64": 470759104, "linux-arm64": 470759044,
+             "windows-amd64": 470759045, "windows-arm64": 470759138}
 
     def fixture(self, root, key):
         pins = load_pins()
@@ -585,7 +586,8 @@ class ToolchainDownloadTests(unittest.TestCase):
         self.assertEqual(set(lock["sha256"]), set(self.HOSTS))
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w:gz") as archive:
-            for name, content in (("go/bin/go", b"verified executable"),
+            executable = "go.exe" if key.startswith("windows-") else "go"
+            for name, content in ((f"go/bin/{executable}", b"verified executable"),
                                   ("go/VERSION", (lock["version"] + "\n").encode())):
                 info = tarfile.TarInfo(name)
                 info.size, info.mode = len(content), 0o755
@@ -639,6 +641,54 @@ class ToolchainDownloadTests(unittest.TestCase):
                         self.assertEqual(request.call_count, len(responses))
                         self.assertEqual(run.call_count, 2)
 
+    def test_windows_semicolon_path_bootstraps_verified_compiler_without_path_lookup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve() / "构建;目录 with spaces"
+            root.mkdir()
+            pins, lock, payload, bootstrap, cache, _, _ = self.fixture(root, "windows-amd64")
+            archives = cache / "archives"
+            archives.mkdir(parents=True)
+            archive = archives / f"tailscale-go-{pins['tailscale_go_revision']}-windows-amd64.tar.gz"
+            archive.write_bytes(payload)
+            stock = Path(temp).resolve() / "stock-go"
+            stock.mkdir()
+            (stock / "go.exe").write_bytes(b"stock compiler must never run")
+            identity = {"GOROOT": str(bootstrap / "tailscale-go-windows-amd64"),
+                        "GOTOOLCHAIN": "local", "GOVERSION": lock["version"]}
+
+            def verified_identity(command, **kwargs):
+                self.assertEqual(command, [Path(identity["GOROOT"]) / "bin/go.exe", "env", "-json",
+                                           "GOROOT", "GOTOOLCHAIN", "GOVERSION"])
+                self.assertTrue(command[0].is_absolute())
+                self.assertEqual(command[0].read_bytes(), b"verified executable")
+                self.assertEqual(kwargs["env"]["GOROOT"], identity["GOROOT"])
+                self.assertEqual(kwargs["env"]["GOTOOLCHAIN"], "local")
+                return json.dumps(identity)
+
+            with mock.patch("build_libbox.ROOT", root), \
+                    mock.patch("build_libbox.host_key", return_value="windows-amd64"), \
+                    mock.patch("build_libbox.os.pathsep", ";"), \
+                    mock.patch.dict(os.environ, {"PATH": str(stock)}, clear=True), \
+                    mock.patch("build_libbox.shutil.which", side_effect=AssertionError("ambiguous PATH lookup")), \
+                    mock.patch("native_common.urllib.request.urlopen") as request, \
+                    mock.patch("build_libbox.run", side_effect=verified_identity) as run:
+                go, env, provenance = bootstrap_go(pins, bootstrap, cache)
+                self.assertEqual(env["PATH"], str(stock))
+                self.assertEqual(provenance["binary_sha256"], sha256(go))
+                request.assert_not_called()
+                run.assert_called_once()
+                with mock.patch("build_libbox.network_run") as network:
+                    with self.assertRaisesRegex(BuildError, "single PATH entries"):
+                        install_mobile(go, env, root / "source", pins)
+                    network.assert_not_called()
+                run.assert_called_once()
+                # Neither the semicolon path nor direct invocation relaxes verification.
+                archive.write_bytes(b"corrupt archive")
+                run.reset_mock()
+                with self.assertRaisesRegex(BuildError, "SHA-256"):
+                    bootstrap_go(pins, bootstrap, cache)
+                run.assert_not_called()
+
     def test_failed_fallback_is_bounded_and_leaves_no_archive_or_partial_files(self):
         for failure in ("504", "404", "hash", "size", "http-redirect"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
@@ -686,6 +736,18 @@ class ToolchainDownloadTests(unittest.TestCase):
 
 
 class ToolchainTests(unittest.TestCase):
+    def test_subprocess_output_and_commands_use_utf8_in_a_non_ascii_directory(self):
+        from build_libbox import run
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary).resolve() / "构建 目录"
+            directory.mkdir()
+            command = [sys.executable, "-I", "-X", "utf8", "-c",
+                       'import os; print("命令输出: " + os.getcwd())']
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                output = run(command, cwd=directory, env={**os.environ, "LC_ALL": "C"}, capture=True)
+            self.assertEqual(output, "命令输出: " + str(directory))
+            self.assertIn("命令输出", printed.getvalue())
+
     def test_environment_always_selects_fork_and_project_caches(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -705,6 +767,60 @@ class ToolchainTests(unittest.TestCase):
             self.assertTrue(Path(env["GOMODCACHE"]).is_relative_to(root / "cache"))
             self.assertTrue(Path(env["TEST_TELEMETRY_DIR"]).is_relative_to(root / "cache"))
             self.assertEqual((Path(env["TEST_TELEMETRY_DIR"]) / "mode").read_text(), "off\n")
+
+    def test_delimiter_gopath_is_private_per_environment_and_cleaned_on_process_exit(self):
+        import subprocess
+        script = '''
+import json
+from pathlib import Path
+import sys
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+from build_libbox import go_environment
+with mock.patch("build_libbox.os.pathsep", sys.argv[2]):
+    inherited = {"PATH": "fixture-stock", "GOPATH": "/ambient-global", "GOMODCACHE": "/ambient-modules"}
+    environments = [go_environment(Path(sys.argv[3]), Path(sys.argv[4]), inherited) for _ in range(2)]
+    print(json.dumps([{"environment": env, "exists": Path(env["GOPATH"]).is_dir(),
+                       "mode": Path(env["GOPATH"]).stat().st_mode & 0o777} for env in environments]), flush=True)
+if sys.argv[5] == "error":
+    raise RuntimeError("injected build failure")
+'''
+        for separator in sorted({os.pathsep, ";"}):
+            for failure in (False, True):
+                with self.subTest(separator=separator, failure=failure), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp).resolve()
+                    cache = root / ("缓存" + separator + "private")
+                    result = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(ROOT / "tool"),
+                                             separator, str(root / "fork"), str(cache), "error" if failure else "ok"],
+                                            capture_output=True, text=True, encoding="utf-8")
+                    self.assertEqual(result.returncode, 1 if failure else 0, result.stderr)
+                    records = json.loads(result.stdout)
+                    self.assertNotEqual(records[0]["environment"]["GOPATH"], records[1]["environment"]["GOPATH"])
+                    for record in records:
+                        env = record["environment"]
+                        metadata = Path(env["GOPATH"])
+                        self.assertTrue(record["exists"])
+                        self.assertTrue(metadata.is_absolute())
+                        self.assertNotIn(separator, str(metadata))
+                        self.assertFalse(metadata.exists(), "private GOPATH must be removed when the process exits")
+                        self.assertNotEqual(env["GOPATH"], "/ambient-global")
+                        self.assertEqual(env["GOBIN"], str(cache / "gopath/bin"))
+                        self.assertEqual(env["GOMODCACHE"], str(cache / "go-mod"))
+                        self.assertEqual(env["GOCACHE"], str(cache / "go-build"))
+                        self.assertEqual(env["GOTOOLCHAIN"], "local")
+                        if os.name != "nt":
+                            self.assertEqual(record["mode"], 0o700)
+
+    def test_delimiter_gopath_rejects_ambiguous_temporary_root_and_cleans_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            temporary_root = root / "temporary;ambiguous"
+            temporary_root.mkdir()
+            with mock.patch("build_libbox.os.pathsep", ";"), \
+                    mock.patch("build_libbox.tempfile.tempdir", str(temporary_root)):
+                with self.assertRaisesRegex(BuildError, "temporary directory without the PATH separator"):
+                    go_environment(root / "fork", root / "cache;ambiguous", {"GOPATH": "/ambient-global"})
+            self.assertEqual(list(temporary_root.iterdir()), [])
 
     def test_private_module_rules_survive_pinned_toolchain_environment(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -774,13 +890,52 @@ class ToolchainTests(unittest.TestCase):
                 verify.assert_called_once_with([go, "mod", "verify"], cwd=source, env=env)
                 self.assertEqual(env["GOFLAGS"], "-mod=readonly -trimpath -buildvcs=false")
 
+    def test_mobile_tools_reject_each_unrepresentable_path_before_any_work(self):
+        for ambiguous in ("compiler", "cache"):
+            with self.subTest(ambiguous=ambiguous), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                fork = root / ("fork;ambiguous" if ambiguous == "compiler" else "fork")
+                cache = root / ("cache;ambiguous" if ambiguous == "cache" else "cache")
+                with mock.patch("build_libbox.os.pathsep", ";"):
+                    env = go_environment(fork, cache, {"PATH": "stock-go"})
+                    with mock.patch("build_libbox.network_run") as network, \
+                            mock.patch("build_libbox.run") as run:
+                        with self.assertRaisesRegex(BuildError, "single PATH entries"):
+                            install_mobile(fork / "bin/go.exe", env, root / "source", load_pins())
+                        network.assert_not_called()
+                        run.assert_not_called()
+
+    def test_mobile_tools_reject_stock_go_or_missing_tool_paths_before_any_work(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            fork, stock = root / "fork", root / "stock"
+            executable = "go.exe" if os.name == "nt" else "go"
+            for directory in (fork / "bin", stock):
+                directory.mkdir(parents=True)
+                binary = directory / executable
+                binary.write_bytes(b"compiler fixture must not execute")
+                binary.chmod(0o755)
+            go = fork / "bin" / executable
+            env = go_environment(fork, root / "cache", {"PATH": ""})
+            for path in (str(stock), env["GOBIN"], str(go.parent)):
+                with self.subTest(path=path), mock.patch("build_libbox.network_run") as network, \
+                        mock.patch("build_libbox.run") as run:
+                    with self.assertRaisesRegex(BuildError, "Mobile tools require"):
+                        install_mobile(go, {**env, "PATH": path}, root / "source", load_pins())
+                    network.assert_not_called()
+                    run.assert_not_called()
+
     def test_mobile_install_checks_pin_and_prepares_before_installing_tools(self):
         pins = load_pins()
-        go = Path("/verified/bin/go")
         for failure in (None, "pin", "verification"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
                 source = Path(temp)
-                env = {"GOBIN": str(source / "bin")}
+                fork = source / "verified"
+                go = fork / "bin" / ("go.exe" if os.name == "nt" else "go")
+                go.parent.mkdir(parents=True)
+                go.write_bytes(b"verified compiler fixture")
+                go.chmod(0o755)
+                env = go_environment(fork, source / "cache", {"PATH": ""})
                 events = []
                 modules = {"Version": pins["gomobile_version"] if failure != "pin" else "v0.0.0",
                            "Sum": "h1:module", "GoModSum": "h1:mod"}
@@ -796,7 +951,7 @@ class ToolchainTests(unittest.TestCase):
                     self.assertEqual(command, [go, "install", "-trimpath", f"{GOMOBILE_MODULE}/cmd/gomobile",
                                                f"{GOMOBILE_MODULE}/cmd/gobind"])
                     for name in ("gomobile", "gobind"):
-                        binary = Path(env["GOBIN"]) / name
+                        binary = Path(env["GOBIN"]) / (name + (".exe" if os.name == "nt" else ""))
                         binary.parent.mkdir(exist_ok=True)
                         binary.write_bytes(b"fresh verified mobile tool")
                     return ""
@@ -809,7 +964,7 @@ class ToolchainTests(unittest.TestCase):
                     return dependency
 
                 def version(command, **kwargs):
-                    name = Path(command[-1]).name
+                    name = Path(command[-1]).stem
                     events.append(name)
                     return f"\tmod\t{GOMOBILE_MODULE}\t{pins['gomobile_version']}\th1:module\n\tpath\t{GOMOBILE_MODULE}/cmd/{name}"
 

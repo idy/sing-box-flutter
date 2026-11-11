@@ -11,10 +11,11 @@ sys.dont_write_bytecode = True
 # -I deliberately removes the script directory. Restore only this trusted package
 # directory, never the host project or downloaded artifact, for sibling imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_core import (RECEIPT, LINUX_ARCHITECTURES, artifact_key, build_identity,
-                        canonical_hash, canonical_macos, host_path, validate_artifact)
+from build_core import (LINUX_ARCHITECTURES, artifact_key, build_identity, canonical_hash,
+                        canonical_macos, host_path, receipt_for_target, validate_artifact)
 from core_features import canonicalize, resolve_features
 from native_common import BuildError, ROOT, artifact_hashes, load_pins, sha256
+from windows_core import WINDOWS_ARCHES, validate_windows_bundle
 
 
 def verify_current_recipe(project: Path, receipt: dict, metadata: dict, *,
@@ -47,8 +48,13 @@ def verify_current_recipe(project: Path, receipt: dict, metadata: dict, *,
         if (not isinstance(extensions, list) or
                 any(not isinstance(entry, dict) or "path" in entry for entry in extensions)):
             raise ValueError("invalid extension descriptors")
+        windows_arch = identity.get("windows_arch", "amd64")
+        if target == "windows" and (windows_arch not in WINDOWS_ARCHES or
+                receipt.get("windows_arch") != windows_arch or metadata.get("windows_arch") != windows_arch):
+            raise ValueError("Windows architecture differs from the recipe")
         macos = canonical_macos(receipt["macos"]) if "macos" in receipt else None
-        expected = build_identity(requested, extensions, pins, root, macos=macos)
+        expected = build_identity(requested, extensions, pins, root, target=target,
+                                  windows_arch=windows_arch, macos=macos)
         fingerprint = canonical_hash(expected)
         resolved = resolve_features(requested, target)
         if (identity != expected or receipt.get("fingerprint") != fingerprint or
@@ -82,32 +88,51 @@ def verify_current_artifact(project: Path, receipt: dict, target: str,
         if (not isinstance(expected, dict) or not expected or artifact_hashes(artifact) != expected or
                 sha256(capabilities) != entry["capabilities_sha256"]):
             raise ValueError("modified artifact")
-        manifest = json.loads(capabilities.read_text())
+        manifest = json.loads(capabilities.read_text(encoding="utf-8"))
         if any(manifest.get(key) != receipt.get(key) for key in ("schema", "version", "fingerprint", "features")):
             raise ValueError("capabilities disagree with receipt")
+        if target == "windows":
+            if manifest.get("windows_arch") != receipt.get("windows_arch"):
+                raise ValueError("capabilities architecture disagrees with receipt")
+            validate_windows_bundle(artifact, receipt["windows_arch"])
         digest = canonical_hash(expected)
     except (BuildError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         raise BuildError("Selected native core artifact changed after it was built. "
                          "Run dart run sing_box_flutter build for this host and target.") from error
-    if installed is not None and (entry["path"], digest) != installed:
-        if target == "linux":
-            raise BuildError("The selected Linux core changed since CMake configuration. "
-                             "Run flutter build linux again before building or installing the app.")
-        raise BuildError("The selected native core changed since pod install. "
-                         "Run pod install (or flutter build) before building the app.")
+    if installed is not None:
+        selected = entry["path"]
+        if target == "windows" and Path(installed[0]).is_absolute():
+            selected = str(artifact.resolve())
+            installed = (str(Path(installed[0]).resolve()), installed[1])
+        if (selected, digest) != installed:
+            if target == "windows":
+                raise BuildError("The selected Windows core changed since CMake configuration. "
+                                 "Reconfigure CMake (or run flutter build windows) before building the app.")
+            if target == "linux":
+                raise BuildError("The selected Linux core changed since CMake configuration. "
+                                 "Run flutter build linux again before building or installing the app.")
+            raise BuildError("The selected native core changed since pod install. "
+                             "Run pod install (or flutter build) before building the app.")
     return digest
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-dir", type=Path, required=True)
-    parser.add_argument("--target", choices=("android", "apple", "macos", "linux"), required=True)
+    parser.add_argument("--target", choices=("android", "apple", "macos", "linux", "windows"), required=True)
     parser.add_argument("--arch", choices=tuple(LINUX_ARCHITECTURES))
-    parser.add_argument("--installed-artifact", help="Artifact path chosen at native build configuration")
-    parser.add_argument("--installed-sha256", help="Artifact digest chosen at native build configuration")
-    parser.add_argument("--print-artifact-digest", action="store_true",
-                        help="Print the verified artifact digest for the pod install guard")
-    parser.add_argument("--print-artifact-info", action="store_true",
+    parser.add_argument("--windows-arch", choices=tuple(WINDOWS_ARCHES),
+                        help="Require this Windows bundle architecture")
+    parser.add_argument("--installed-artifact", help="Artifact path baked in at pod install or CMake configuration")
+    parser.add_argument("--installed-sha256", help="Artifact digest baked in at pod install or CMake configuration")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--print-artifact-digest", action="store_true",
+                        help="Print only the verified artifact digest")
+    output.add_argument("--print-artifact-path", action="store_true",
+                        help="Print only the validated absolute artifact path (WindowsCore directory on Windows)")
+    output.add_argument("--print-artifact-pair", action="store_true",
+                        help="Print the verified digest and absolute path as one newline-delimited pair")
+    output.add_argument("--print-artifact-info", action="store_true",
                         help="Print verified host-relative artifact/capabilities paths and digest as JSON")
     args = parser.parse_args(argv)
     if (args.target == "linux") != (args.arch is not None):
@@ -117,18 +142,30 @@ def main(argv: list[str] | None = None) -> int:
     installed = None if args.installed_artifact is None else (args.installed_artifact, args.installed_sha256)
     try:
         project = args.project_dir.expanduser().resolve(strict=True)
-        receipt_path = host_path(project, RECEIPT.as_posix())
-        receipt = json.loads(receipt_path.read_text())
+        receipt_path = host_path(project, receipt_for_target(args.target).as_posix())
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         entry = receipt["artifacts"][artifact_key(args.target, args.arch)]
         metadata_path = host_path(project, entry["metadata"])
-        metadata = json.loads(metadata_path.read_text())
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         verify_current_recipe(project, receipt, metadata, target=args.target, arch=args.arch)
-        # Recheck the bytes native packaging will consume as well as their recipe.
+        if args.windows_arch is not None and (args.target != "windows" or
+                metadata["identity"].get("windows_arch") != args.windows_arch):
+            raise BuildError("The selected Windows core architecture differs from this app target. "
+                             "Rebuild with --target windows --windows-arch for the app architecture.")
+        # Build-time guards run after pod install/Gradle/CMake configuration;
+        # recheck the bytes native packaging will consume as well as their recipe.
         digest = verify_current_artifact(project, receipt, args.target, installed, arch=args.arch)
-        if args.print_artifact_info:
+        if args.print_artifact_pair:
+            # One validated snapshot; scalar consumers split only the first newline
+            # so spaces, semicolons and backslashes in the path remain literal.
+            artifact = host_path(project, entry["path"]).resolve(strict=True)
+            print(f"{digest}\n{artifact}")
+        elif args.print_artifact_info:
             print(json.dumps({"path": entry["path"], "capabilities": entry["capabilities"], "digest": digest}))
         elif args.print_artifact_digest:
             print(digest)
+        elif args.print_artifact_path:
+            print(host_path(project, entry["path"]).resolve(strict=True))
         return 0
     except BuildError as error:
         # BuildError messages are fixed text without paths, configs or credentials.
