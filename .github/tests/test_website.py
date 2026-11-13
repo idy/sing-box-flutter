@@ -29,9 +29,14 @@ class WebsiteBuild(unittest.TestCase):
         self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
         subprocess.run(["git", "init", "-q", str(self.root)], env=self.env, check=True)
         self.source = self.root / "site"
-        (self.source / "assets").mkdir(parents=True)
-        (self.source / "assets/manrope-latin.woff2").write_bytes(b"font fixture")
-        (self.source / "assets/OFL-Manrope.txt").write_text("License fixture", encoding="utf-8")
+        sdk = self.source / "shared/sdk"
+        (sdk / "assets").mkdir(parents=True)
+        for name in ("idy-site.min.js", "idy-site.css"):
+            (sdk / name).write_text("/* SDK fixture */", encoding="utf-8")
+        for name in ("archivo-latin.woff2", "phosphor-regular.woff2"):
+            (sdk / "assets" / name).write_bytes(b"font fixture")
+        for name in ("Archivo-OFL.txt", "Phosphor-MIT.txt"):
+            (sdk / "assets" / name).write_text("License fixture", encoding="utf-8")
         (self.source / "index.html").write_text(
             '<!doctype html><html><head><title>選択 → café 🛰</title>'
             '<link rel="canonical" href="{{SITE_URL}}"></head>'

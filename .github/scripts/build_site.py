@@ -97,7 +97,11 @@ def build():
         local = (OUTPUT / unquote(parsed.path)).resolve()
         if not local.is_relative_to(OUTPUT.resolve()) or not local.is_file():
             raise ValueError(f"Missing or external local file: {reference}")
-    required = ("assets/manrope-latin.woff2", "assets/OFL-Manrope.txt")
+    required = (
+        "shared/sdk/idy-site.min.js", "shared/sdk/idy-site.css",
+        "shared/sdk/assets/archivo-latin.woff2", "shared/sdk/assets/Archivo-OFL.txt",
+        "shared/sdk/assets/phosphor-regular.woff2", "shared/sdk/assets/Phosphor-MIT.txt",
+    )
     for relative in required:
         if not (OUTPUT / relative).is_file():
             raise ValueError(f"Missing site asset: {relative}")

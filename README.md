@@ -315,7 +315,14 @@ publication policy.
 
 ## Example and development
 
-The standalone project website is built from `site/`. See the
+The standalone project website is built from the source template in `site/`
+with `python3 -B .github/scripts/build_site.py`; the generated output is
+`.build/site/`. The complete idy.dev Site SDK 0.2.0 distribution is vendored in
+`site/shared/sdk/`, including self-hosted Archivo, icons and licenses. Replace
+that complete directory together when updating it. The site uses the shared
+Component Datasheet frame, a blue masthead, white/deep-navy sheets, 2px corners
+and ruled specification tables. Its YAML recipes, source pins and downloads
+remain generated from the committed example profiles. See the
 [website development and deployment guide](doc/website.md) for local preview,
 GitHub Pages and custom-domain setup.
 

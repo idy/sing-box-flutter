@@ -16,8 +16,12 @@ for the displayed dependency pin and source links. Downloaded YAML bytes are kep
 unchanged. Commit profile changes before previewing them; uncommitted profile
 edits do not alter a website pinned to an older core. All text is UTF-8 regardless
 of the build machine's locale. The default profile is also embedded in the page
-for readers without JavaScript. The Manrope Latin variable
-font is served locally under the SIL Open Font License retained in `site/assets/`.
+for readers without JavaScript. The complete idy.dev Site SDK 0.2.0 distribution
+is vendored in `site/shared/sdk/`, including the self-hosted Archivo variable font,
+Phosphor icons and their licenses. Load its JavaScript and CSS through relative
+URLs, followed by `site/style.css`. Keep the complete SDK distribution together
+when updating it. The site uses the Component Datasheet frame with a blue
+masthead, white/deep-navy sheets, 2px corners and ruled specification tables.
 
 Serve the built directory from the repository root:
 

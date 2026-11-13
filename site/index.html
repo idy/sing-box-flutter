@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#2454e6">
+  <meta name="theme-color" content="#0b5cad" data-idy-theme-color-light="#0b5cad" data-idy-theme-color-dark="#0b3d73">
   <meta name="description" content="A Flutter plugin for Android and iOS VPNs. Choose sing-box features in your app's pubspec.yaml and build a smaller native core with the pinned Tailscale Go toolchain.">
   <meta property="og:title" content="sing_box_flutter — Your app. Your sing-box.">
   <meta property="og:description" content="Select your protocols. Compile your core. Keep your Flutter API.">
@@ -11,22 +11,25 @@
   <meta property="og:url" content="{{SITE_URL}}">
   <link rel="canonical" href="{{SITE_URL}}">
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <meta name="color-scheme" content="light dark">
+  <script src="./shared/sdk/idy-site.min.js"></script>
+  <link rel="stylesheet" href="./shared/sdk/idy-site.css">
   <link rel="stylesheet" href="./style.css">
   <script src="./app.js" defer></script>
   <title>sing_box_flutter — Your app. Your sing-box.</title>
 </head>
-<body data-core-revision="{{CORE_REVISION}}">
+<body class="idy-site" lang="en" data-core-revision="{{CORE_REVISION}}">
   <a class="skip-link" href="#main">Skip to content</a>
-  <header class="site-header wrap">
-    <a class="brand" href="#main" aria-label="sing_box_flutter home"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 3h11v11H3zM18 3h11v11H18zM3 18h11v11H3z"/><path class="offset" d="M21 21h8v8h-8z"/></svg><span>sing_box<span class="brand-suffix">_flutter</span></span></a>
-    <nav aria-label="Main navigation">
-      <a href="#why">Why this core</a>
-      <a href="#quickstart">Quick start</a>
-      <a class="github-link" href="https://github.com/idy/sing-box-flutter">GitHub <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 15 15 5M5 5h10v10"/></svg></a>
-    </nav>
+  <header class="idy-header compact-header">
+    <div class="idy-header-inner">
+      <a class="idy-home" href="#main" aria-label="sing_box_flutter home">sing_box_flutter</a>
+      <nav class="idy-nav" aria-label="Main navigation"><a href="#why">Why this core</a><a href="#quickstart">Quick start</a><a href="https://github.com/idy/sing-box-flutter">GitHub</a><a href="https://idy.dev/">idy.dev</a></nav>
+      <details class="idy-mobile"><summary aria-label="Main navigation"><i class="ph ph-list" aria-hidden="true"></i></summary><nav class="idy-mobile-panel" aria-label="Main navigation"><a href="#why">Why this core</a><a href="#quickstart">Quick start</a><a href="https://github.com/idy/sing-box-flutter">GitHub</a><a href="https://idy.dev/">idy.dev</a></nav></details>
+      <div class="header-actions"><div class="idy-preferences"><label><span>Theme</span><select data-idy-theme><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label></div></div>
+    </div>
   </header>
 
-  <main id="main">
+  <main id="main" class="site-content">
     <section class="hero wrap" aria-labelledby="hero-title">
       <div class="hero-copy">
         <h1 id="hero-title">Your app.<br>Your <span>sing-box.</span></h1>
