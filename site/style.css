@@ -13,6 +13,8 @@
   --mono: var(--idy-font-code);
 }
 html { scroll-padding-top: 24px; }
+/* This English-only site intentionally keeps its single theme selector native. */
+.compact-header .idy-preferences select[data-idy-theme] { width: auto; min-width: 5.75rem; max-width: none; }
 .site-content a { text-underline-offset: .25em; }
 .site-content button { font: inherit; color: inherit; cursor: pointer; }
 .site-content button:disabled { cursor: wait; }
